@@ -1,0 +1,90 @@
+{
+  "diagnostics": [
+    {
+      "rule_id": "agents-md-must-mention-uv",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 12,
+        "heading": "Local commands"
+      },
+      "backend": "filesystem",
+      "status": "pass",
+      "severity": "error",
+      "message": "AGENTS.md contains `uv`.",
+      "evidence": [
+        {
+          "kind": "text_match",
+          "data": {
+            "path": "AGENTS.md",
+            "pattern": "uv",
+            "match_count": 3
+          }
+        }
+      ]
+    },
+    {
+      "rule_id": "pr-must-be-open",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 28,
+        "heading": "Merge gate"
+      },
+      "backend": "github",
+      "status": "fail",
+      "severity": "error",
+      "message": "PR is closed.",
+      "evidence": [
+        {
+          "kind": "gh_pr_view",
+          "data": {
+            "state": "CLOSED",
+            "isDraft": false
+          }
+        }
+      ],
+      "remediation": "Reopen the PR before retrying merge gates."
+    },
+    {
+      "rule_id": "pr-must-be-open",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 28,
+        "heading": "Merge gate"
+      },
+      "backend": "github",
+      "status": "unavailable",
+      "severity": "error",
+      "message": "`gh` is not authenticated; PR state could not be read.",
+      "evidence": [
+        {
+          "kind": "gh_invocation_error",
+          "data": {
+            "command": "gh pr view 1 --json state",
+            "exit_code": 4
+          }
+        }
+      ]
+    },
+    {
+      "rule_id": "semantic-rubric-placeholder",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 41,
+        "heading": "Semantic checks"
+      },
+      "backend": "llm-rubric",
+      "status": "unsupported",
+      "severity": "advisory",
+      "message": "LLM rubric backend is not configured for this MVP.",
+      "evidence": [
+        {
+          "kind": "backend_capability",
+          "data": {
+            "backend": "llm-rubric",
+            "configured": false
+          }
+        }
+      ]
+    }
+  ]
+}
