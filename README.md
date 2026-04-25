@@ -27,6 +27,9 @@ The 3-day MVP is intentionally narrow:
 See [docs/mvp-spec.md](docs/mvp-spec.md) and
 [docs/issue-plan.md](docs/issue-plan.md).
 
+The initial execution board is
+[gate-keeper 3-day MVP](https://github.com/users/t-uda/projects/2).
+
 ## Development
 
 ```bash

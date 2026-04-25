@@ -2,29 +2,35 @@
 
 This is the intended GitHub issue structure for the 3-day MVP.
 
+Project: https://github.com/users/t-uda/projects/2
+
+Tracker: https://github.com/t-uda/gate-keeper/issues/21
+
 ## Day 1: Local Compiler Core
 
-1. Bootstrap uv package, MIT license, and developer workflow.
-2. Define rule IR and diagnostic schema.
-3. Implement Markdown rule extraction.
-4. Implement `compile` CLI with JSON output.
-5. Implement filesystem/text backend.
-6. Add local fixtures and tests.
+1. [Define rule IR and diagnostic schema](https://github.com/t-uda/gate-keeper/issues/1).
+2. [Implement Markdown rule document parser](https://github.com/t-uda/gate-keeper/issues/2).
+3. [Add rule classification and backend hinting](https://github.com/t-uda/gate-keeper/issues/3).
+4. [Implement `compile` CLI with JSON output](https://github.com/t-uda/gate-keeper/issues/4).
+5. [Implement diagnostic renderer and exit codes](https://github.com/t-uda/gate-keeper/issues/5).
+6. [Implement filesystem and text backend](https://github.com/t-uda/gate-keeper/issues/6).
+7. [Add local fixtures and parser/backend tests](https://github.com/t-uda/gate-keeper/issues/7).
 
 ## Day 2: Validation Runtime and GitHub Backend
 
-7. Implement validation orchestrator and backend routing.
-8. Implement compiler-style diagnostics and exit codes.
-9. Implement GitHub PR metadata checks through `gh pr view`.
-10. Implement unresolved review thread check through GraphQL.
-11. Implement independent review check and documented limits.
-12. Add fail-closed handling for GitHub unavailable evidence.
+8. [Implement validation orchestrator and backend registry](https://github.com/t-uda/gate-keeper/issues/8).
+9. [Implement GitHub target resolver around `gh`](https://github.com/t-uda/gate-keeper/issues/9).
+10. [Implement PR state, draft, label, and tasklist checks](https://github.com/t-uda/gate-keeper/issues/10).
+11. [Implement status check rollup validation](https://github.com/t-uda/gate-keeper/issues/11).
+12. [Implement unresolved review thread GraphQL check](https://github.com/t-uda/gate-keeper/issues/12).
+13. [Implement independent review check and limits](https://github.com/t-uda/gate-keeper/issues/13).
+14. [Add GitHub fail-closed error handling and pagination policy](https://github.com/t-uda/gate-keeper/issues/14).
 
 ## Day 3: Integration, Docs, and Hardening
 
-13. Add LLM rubric backend interface.
-14. Add `explain` command for rule-to-backend mapping.
-15. Document `gh aw` composition patterns.
-16. Add end-to-end examples and smoke tests.
-17. Harden packaging, README, and contribution notes.
-18. Cut MVP readiness checklist.
+15. [Add LLM rubric backend interface](https://github.com/t-uda/gate-keeper/issues/15).
+16. [Implement `explain` command for rule-to-backend mapping](https://github.com/t-uda/gate-keeper/issues/16).
+17. [Document gh-aw composition patterns](https://github.com/t-uda/gate-keeper/issues/17).
+18. [Add end-to-end examples and smoke tests](https://github.com/t-uda/gate-keeper/issues/18).
+19. [Add CI and development workflow hardening](https://github.com/t-uda/gate-keeper/issues/19).
+20. [Cut MVP readiness checklist](https://github.com/t-uda/gate-keeper/issues/20).
