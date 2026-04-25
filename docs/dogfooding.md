@@ -1,4 +1,4 @@
-# Dogfooding gate-keeper on gate-keeper
+# Dogfooding gate-keeper on itself
 
 `gate-keeper` is exercised against its own PRs to surface compiler/backend gaps
 early. The rule of thumb in `AGENTS.md` is: **self-gating is advisory by default;
@@ -21,7 +21,7 @@ A single rule may be promoted from advisory to required when **all** hold:
 3. The deterministic backend is the source of truth for the rule. LLM-rubric
    rules stay advisory until a deterministic equivalent exists or an explicit
    exception is recorded here.
-4. Fail-closed behaviour on missing evidence has been validated against a
+4. Fail-closed behavior on missing evidence has been validated against a
    synthetic PR that withholds the evidence.
 
 Promotion is per-rule, not per-ruleset. Demotion is always allowed and does

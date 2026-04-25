@@ -10,7 +10,7 @@
 ## Project Overview
 
 <!-- Replace this section in-place. Remove the placeholder line once filled. -->
-- Local-first CLI that compiles rule documents (AGENTS.md, SKILL.md, PR checklists) into compiler-style pass/fail with evidence.
+- Local-first CLI that compiles rule documents (AGENTS.md, PR checklists) into compiler-style pass/fail with evidence.
 
 ## Commands
 
