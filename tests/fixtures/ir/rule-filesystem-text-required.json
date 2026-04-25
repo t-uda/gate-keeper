@@ -1,0 +1,22 @@
+{
+  "rules": [
+    {
+      "id": "agents-md-must-mention-uv",
+      "title": "AGENTS.md must mention `uv`",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 12,
+        "heading": "Local commands"
+      },
+      "text": "AGENTS.md must reference `uv` so contributors run the supported workflow.",
+      "kind": "text_required",
+      "severity": "error",
+      "backend_hint": "filesystem",
+      "confidence": "high",
+      "params": {
+        "path": "AGENTS.md",
+        "pattern": "uv"
+      }
+    }
+  ]
+}

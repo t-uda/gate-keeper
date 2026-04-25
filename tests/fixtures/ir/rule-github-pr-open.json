@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "pr-must-be-open",
+      "title": "PR must be open",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 28,
+        "heading": "Merge gate"
+      },
+      "text": "The pull request must be open before merge gates run.",
+      "kind": "github_pr_open",
+      "severity": "error",
+      "backend_hint": "github",
+      "confidence": "high",
+      "params": {}
+    }
+  ]
+}
