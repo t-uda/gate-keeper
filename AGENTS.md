@@ -33,6 +33,7 @@ uv run pytest
 
 <!-- Replace this section in-place. Remove the placeholder line once filled. -->
 - Pipeline: rule extraction -> IR -> backend routing -> evidence-bearing result.
+- IR contract: src/gate_keeper/models.py (schema in docs/rule-ir.md).
 - GitHub support sits behind a backend boundary so core works without network or `gh`.
 - `uv` is the supported workflow runner.
 
