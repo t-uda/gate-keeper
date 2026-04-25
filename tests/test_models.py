@@ -189,6 +189,22 @@ def test_source_location_rejects_bool_for_line():
         RuleSet.from_dict(payload)
 
 
+@pytest.mark.parametrize("line", [0, -1])
+def test_source_location_rejects_non_positive_line(line):
+    payload = copy.deepcopy(_ruleset_payload())
+    payload["rules"][0]["source"]["line"] = line
+    with pytest.raises(ValueError, match="1-based line number"):
+        RuleSet.from_dict(payload)
+
+
+def test_ruleset_rejects_duplicate_rule_ids():
+    payload = _ruleset_payload()
+    duplicate = copy.deepcopy(payload["rules"][0])
+    payload["rules"].append(duplicate)
+    with pytest.raises(ValueError, match="duplicate rule ids"):
+        RuleSet.from_dict(payload)
+
+
 def test_unavailable_status_distinct_from_pass_fail():
     payload = _diagnostic_payload()
     payload["diagnostics"][0]["status"] = "unavailable"

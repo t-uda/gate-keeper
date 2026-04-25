@@ -121,9 +121,14 @@ class SourceLocation:
     @classmethod
     def from_dict(cls, data: Any) -> SourceLocation:
         _require_keys(data, {"path", "line"}, {"heading"}, "SourceLocation")
+        line = _expect_int(data["line"], "SourceLocation.line")
+        if line < 1:
+            raise ValueError(
+                f"SourceLocation.line: expected 1-based line number, got {line}"
+            )
         return cls(
             path=_expect_str(data["path"], "SourceLocation.path"),
-            line=_expect_int(data["line"], "SourceLocation.line"),
+            line=line,
             heading=_expect_optional_str(data.get("heading"), "SourceLocation.heading"),
         )
 
@@ -261,7 +266,18 @@ class RuleSet:
     def from_dict(cls, data: Any) -> RuleSet:
         _require_keys(data, {"rules"}, set(), "RuleSet")
         items = _expect_list(data["rules"], "RuleSet.rules")
-        return cls(rules=[Rule.from_dict(item) for item in items])
+        rules = [Rule.from_dict(item) for item in items]
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for rule in rules:
+            if rule.id in seen:
+                duplicates.add(rule.id)
+            seen.add(rule.id)
+        if duplicates:
+            raise ValueError(
+                f"RuleSet.rules: duplicate rule ids: {sorted(duplicates)}"
+            )
+        return cls(rules=rules)
 
     def to_dict(self) -> dict[str, Any]:
         return {"rules": [rule.to_dict() for rule in self.rules]}
