@@ -16,6 +16,19 @@ In three development days, produce a working CLI that can:
 - document how `gh aw` workflows can call or complement the CLI without making
   `gate-keeper` depend on `gh aw`.
 
+# Planning Authority
+
+Use this precedence order for MVP implementation:
+
+1. explicit user instruction in the current task;
+2. `AGENTS.md` repository guidance;
+3. this MVP spec;
+4. the active GitHub issue body;
+5. `docs/issue-plan.md` and README.
+
+When artifacts conflict, update the lower-precedence artifact instead of
+inventing behavior during implementation.
+
 # Scope
 
 ## In
@@ -52,6 +65,111 @@ In three development days, produce a working CLI that can:
 - Keep `gh aw` integration as documented composition: workflows may call the CLI,
   consume its output, or use it as a preflight step.
 - Do not require an LLM provider for the MVP to pass local deterministic checks.
+
+# MVP CLI Contract
+
+For the MVP, commands consume Markdown rule documents directly. Compiled JSON as
+an input format is out of scope.
+
+```bash
+gate-keeper compile DOCUMENT --format json
+gate-keeper validate DOCUMENT --target TARGET --backend auto --format text
+gate-keeper validate DOCUMENT --target TARGET --backend auto --format json
+gate-keeper explain DOCUMENT --format text
+```
+
+Exit codes:
+
+- `0`: all evaluated rules pass.
+- `1`: at least one rule fails, is unavailable, unsupported, or indeterminate.
+- `2`: CLI usage error or unreadable input document.
+
+`DOCUMENT` is a Markdown file. `TARGET` is a local path for filesystem rules or a
+GitHub PR target for GitHub rules. MVP GitHub target formats are PR URLs and
+`OWNER/REPO#NUMBER`.
+
+# MVP Data Contract
+
+Required backends:
+
+- `filesystem`
+- `github`
+- `llm-rubric`
+
+Required diagnostic statuses:
+
+- `pass`
+- `fail`
+- `unavailable`
+- `unsupported`
+- `error`
+
+Required severities:
+
+- `error`
+- `warning`
+- `advisory`
+
+Required rule kinds:
+
+- `file_exists`
+- `file_absent`
+- `path_matches`
+- `text_required`
+- `text_forbidden`
+- `markdown_tasks_complete`
+- `github_pr_open`
+- `github_not_draft`
+- `github_labels_absent`
+- `github_tasks_complete`
+- `github_checks_success`
+- `github_threads_resolved`
+- `github_non_author_approval`
+- `semantic_rubric`
+
+Every compiled rule must include `id`, `title`, `source`, `text`, `kind`,
+`severity`, `backend_hint`, `confidence`, and `params`. Every diagnostic must
+include `rule_id`, `source`, `backend`, `status`, `severity`, `message`, and
+`evidence`.
+
+# Parser and Classifier Policy
+
+Use a line-oriented Markdown parser for the MVP. Extract candidate rules from
+heading-scoped list items, ordered-list items, task checkboxes, and paragraphs
+that contain normative keywords. Preserve source line numbers and heading
+context. Ignore narrative text that does not contain normative wording.
+
+Normative keywords for MVP are `must`, `must not`, `should`, `should not`,
+`never`, `required`, `forbidden`, `fail`, `block`, `ensure`, and `require`.
+
+Classification must use deterministic pattern matching first:
+
+- file/path/text/taskbox rules route to `filesystem`;
+- PR state, draft, label, status, tasklist, review, and thread rules route to
+  `github`;
+- unclear semantic judgement routes to `llm-rubric`.
+
+Confidence values are `high`, `medium`, and `low`. A low-confidence route must
+remain visible in compile JSON and `explain` output.
+
+# GitHub Backend Policy
+
+GitHub support shells out through `gh` behind a backend boundary. The MVP does
+not directly write to GitHub.
+
+For `statusCheckRollup`, treat every returned check as required evidence. Only
+successful conclusions pass. Failure, pending, cancelled, timed out, skipped,
+missing, or unknown states fail closed.
+
+For review threads, fetch the first 100 threads. If GraphQL reports another
+page, return an `unavailable` diagnostic instead of passing.
+
+For independent review, use the latest review state per non-bot, non-author
+reviewer. Only `APPROVED` satisfies the MVP rule. Comment-only or semantically
+"substantive" reviews are out of scope.
+
+For the LLM rubric backend, an unconfigured provider returns `unavailable` and
+exits non-zero. Provider-specific implementation is out of scope.
 
 # Risks
 

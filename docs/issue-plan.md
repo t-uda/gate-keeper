@@ -6,6 +6,25 @@ Project: https://github.com/users/t-uda/projects/2
 
 Tracker: https://github.com/t-uda/gate-keeper/issues/21
 
+## Source of Truth
+
+Implementation should follow the precedence in
+[docs/mvp-spec.md](mvp-spec.md#planning-authority). Individual issues describe
+the work slice, but they must not redefine the shared CLI, IR, diagnostic, or
+backend contracts.
+
+## Dependency Order
+
+- #1 blocks #2, #3, #4, #5, #6, #8, #15, and #16.
+- #2 blocks #3, #4, #7, #16, and #18.
+- #3 blocks #6, #7, #8, and #10 through #16.
+- #4 blocks #7, #16, and #18.
+- #5 blocks #6, #8 through #15, and #18.
+- #6 and #7 block #8.
+- #8 blocks #9 through #15.
+- #9 and #14 block #10 through #13.
+- #17 through #20 are final hardening and must not redefine core contracts.
+
 ## Day 1: Local Compiler Core
 
 1. [Define rule IR and diagnostic schema](https://github.com/t-uda/gate-keeper/issues/1).
