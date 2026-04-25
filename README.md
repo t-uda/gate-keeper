@@ -6,8 +6,8 @@ The first target is a small rule compiler that works locally and can also be
 used beside GitHub Agentic Workflows (`gh aw`) without coupling itself to that
 runtime. The intended shape is:
 
-1. read a rule document such as `SKILL.md`, `AGENTS.md`, a PR checklist, or a
-   compact project spec;
+1. read a natural-language Markdown rule document with normative bullets,
+   headings, or checklists;
 2. extract explicit rule units into a small intermediate representation;
 3. route each rule to a deterministic backend when possible;
 4. fall back to an LLM rubric backend for semantic checks;
