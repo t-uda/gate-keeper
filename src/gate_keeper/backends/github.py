@@ -1,8 +1,8 @@
 """GitHub backend for gate-keeper.
 
-Implements deterministic PR state, draft, label, and tasklist checks
-using the ``gh`` CLI (issue #10).  Issues #11-#13 (status checks, threads,
-approvals) are still UNAVAILABLE stubs; they land in separate PRs.
+Implements deterministic PR state, draft, label, tasklist, and status-check
+rollup validation using the ``gh`` CLI (issues #10–#11).  Issues #12–#13
+(threads, approvals) are still UNAVAILABLE stubs; they land in separate PRs.
 
 All rule kinds here share a single ``gh pr view`` call per ``check()``
 invocation; the result is parsed once and dispatched to the appropriate
@@ -66,7 +66,7 @@ def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) ->
 # _fetch_pr_view — single gh pr view call shared by all four handlers
 # ---------------------------------------------------------------------------
 
-_PR_VIEW_FIELDS = "state,isDraft,labels,body"
+_PR_VIEW_FIELDS = "state,isDraft,labels,body,statusCheckRollup"
 
 
 def _fetch_pr_view(pr: PrTarget, rule: Rule) -> tuple[dict | None, Diagnostic | None]:
@@ -277,6 +277,154 @@ def _check_tasks_complete(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
 
 
 # ---------------------------------------------------------------------------
+# Status check rollup handler (issue #11)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_rollup(raw: object) -> list | None:
+    """Return a flat list of rollup entries, or ``None`` if shape is unrecognized.
+
+    ``gh pr view --json statusCheckRollup`` flattens the GraphQL
+    ``StatusCheckRollup`` object to a list of entries (one per
+    ``CheckRun``/``StatusContext``). Future gh versions or alternate access
+    paths could conceivably return the nested object shape, e.g.::
+
+        {"contexts": {"nodes": [...]}}
+
+    or simply ``{"nodes": [...]}``. Be tolerant: accept the flat list (current
+    behaviour), and fall back to either nested-nodes shape so the rule still
+    evaluates instead of failing closed on a pure shape change.
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        # Try ``contexts.nodes`` first (the documented GraphQL relay shape),
+        # then a top-level ``nodes`` fallback.
+        contexts = raw.get("contexts")
+        if isinstance(contexts, dict):
+            nodes = contexts.get("nodes")
+            if isinstance(nodes, list):
+                return nodes
+        nodes = raw.get("nodes")
+        if isinstance(nodes, list):
+            return nodes
+    return None
+
+
+def _classify_check_entry(entry: dict) -> tuple[str, str, bool]:
+    """Classify a single statusCheckRollup entry into (name, label, ok).
+
+    Two shapes are supported:
+
+    - ``StatusContext`` (legacy commit statuses): passes only when
+      ``state == "SUCCESS"``.
+    - ``CheckRun`` (GitHub Actions / Checks API): passes only when
+      ``status == "COMPLETED"`` **and** ``conclusion == "SUCCESS"``.
+
+    Entries with an unrecognised ``__typename``, or with missing fields that
+    prevent classification, yield ``label = "UNKNOWN"`` and ``ok = False``.
+    The name falls back to ``"<unnamed>"`` when neither ``name`` nor
+    ``context`` is present.
+    """
+    if not isinstance(entry, dict):
+        return "<unnamed>", "UNKNOWN", False
+
+    name = entry.get("name") or entry.get("context") or "<unnamed>"
+
+    typename = entry.get("__typename", "")
+
+    if typename == "StatusContext":
+        state = entry.get("state")
+        if not isinstance(state, str):
+            return name, "UNKNOWN", False
+        ok = state == "SUCCESS"
+        return name, state, ok
+
+    if typename == "CheckRun":
+        status = entry.get("status")
+        conclusion = entry.get("conclusion")
+        if not isinstance(status, str):
+            return name, "UNKNOWN", False
+        if status != "COMPLETED":
+            # Still in progress, queued, etc.
+            label = status if status else "UNKNOWN"
+            return name, label, False
+        # status == COMPLETED — conclusion is authoritative.
+        if not isinstance(conclusion, str):
+            return name, "MISSING_CONCLUSION", False
+        ok = conclusion == "SUCCESS"
+        return name, conclusion, ok
+
+    # Unknown __typename or missing it entirely.
+    return name, "UNKNOWN", False
+
+
+def _check_checks_success(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
+    """Pass when every entry in ``statusCheckRollup`` resolves to success.
+
+    Evidence kind: ``checks_rollup``.
+
+    - ``statusCheckRollup`` absent → UNAVAILABLE (gh_missing_field).
+    - Empty rollup list → PASS (vacuous — zero checks defined; noted in message).
+    - Any non-successful entry → FAIL; non-successful names listed in evidence.
+    - Branch protection remains the authoritative control plane; this check
+      is advisory evidence only.
+    """
+    if "statusCheckRollup" not in data:
+        return gh_missing_field_diag(rule, "pr-view", "statusCheckRollup")
+
+    rollup_raw = data["statusCheckRollup"]
+    rollup = _normalize_rollup(rollup_raw)
+    if rollup is None:
+        return gh_missing_field_diag(rule, "pr-view", "statusCheckRollup")
+
+    successful: list[str] = []
+    non_successful: list[dict] = []
+
+    for entry in rollup:
+        entry_name, label, ok = _classify_check_entry(entry)
+        if ok:
+            successful.append(entry_name)
+        else:
+            non_successful.append({"name": entry_name, "state": label})
+
+    total = len(rollup)
+    n_success = len(successful)
+    summary = f"{n_success}/{total} checks passed"
+
+    evidence = [
+        Evidence(
+            kind="checks_rollup",
+            data={
+                "total": total,
+                "successful": successful,
+                "non_successful": non_successful,
+                "summary": summary,
+                **_pr_coords(pr),
+            },
+        )
+    ]
+
+    if not non_successful:
+        if total == 0:
+            msg = f"PR {pr.owner}/{pr.repo}#{pr.number}: 0 checks defined; vacuous pass."
+        else:
+            msg = f"PR {pr.owner}/{pr.repo}#{pr.number}: {summary}."
+        return _diag(rule, Status.PASS, msg, evidence)
+
+    non_names = [e["name"] for e in non_successful]
+    return _diag(
+        rule,
+        Status.FAIL,
+        (
+            f"PR {pr.owner}/{pr.repo}#{pr.number}: {summary}; "
+            f"non-successful checks: {non_names!r}."
+        ),
+        evidence,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
 
@@ -285,6 +433,7 @@ _HANDLED = {
     RuleKind.GITHUB_NOT_DRAFT: _check_not_draft,
     RuleKind.GITHUB_LABELS_ABSENT: _check_labels_absent,
     RuleKind.GITHUB_TASKS_COMPLETE: _check_tasks_complete,
+    RuleKind.GITHUB_CHECKS_SUCCESS: _check_checks_success,
 }
 
 # ---------------------------------------------------------------------------
@@ -297,7 +446,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
 
     Resolution failures (bad target, missing gh, auth error, PR not found)
     surface as UNAVAILABLE immediately.  A single ``gh pr view`` call is made
-    for the four implemented kinds; unimplemented kinds (#11-#13) receive an
+    for the five implemented kinds; unimplemented kinds (#12-#13) receive an
     UNAVAILABLE stub after resolution.
     """
     target_str = str(target)
@@ -307,7 +456,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
 
     handler = _HANDLED.get(rule.kind)
     if handler is None:
-        # Rule kind not yet implemented — issues #11-#13.
+        # Rule kind not yet implemented — issues #12-#13.
         return Diagnostic(
             rule_id=rule.id,
             source=rule.source,
@@ -316,7 +465,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
             severity=rule.severity,
             message=(
                 f"target resolved to {pr.owner}/{pr.repo}#{pr.number}; "
-                f"rule kind {rule.kind.value!r} not yet implemented (#11-#13)"
+                f"rule kind {rule.kind.value!r} not yet implemented (#12-#13)"
             ),
             evidence=[
                 Evidence(
