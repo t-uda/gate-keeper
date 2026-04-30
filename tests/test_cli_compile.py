@@ -53,3 +53,14 @@ def test_compile_output_has_mixed_backends(capsys):
     backends = {rule["backend_hint"] for rule in data["rules"]}
     assert "filesystem" in backends
     assert "github" in backends
+
+
+def test_compile_non_utf8_input_exits_2(tmp_path, capsys):
+    """A document that exists but is not valid UTF-8 must surface as a usage error."""
+    bad = tmp_path / "binary.md"
+    bad.write_bytes(b"\xff\xfe not utf-8 \x80\x81")
+    rc = main(["compile", str(bad), "--format", "json"])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "UTF-8" in captured.err

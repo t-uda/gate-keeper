@@ -45,6 +45,19 @@ class TestBasicInvocation:
         captured = capsys.readouterr()
         assert "error:" in captured.err
 
+    def test_validate_non_utf8_document_exits_2(self, tmp_path, capsys):
+        bad = tmp_path / "binary.md"
+        bad.write_bytes(b"\xff\xfe not utf-8 \x80\x81")
+        rc = main([
+            "validate", str(bad),
+            "--target", str(PASS_DIR),
+            "--backend", "auto",
+        ])
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "error:" in captured.err
+        assert "UTF-8" in captured.err
+
     def test_validate_text_format_produces_output(self, capsys):
         rc = main([
             "validate", str(SIMPLE_RULES),

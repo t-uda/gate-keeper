@@ -37,12 +37,26 @@ from gate_keeper.models import (
 )
 
 
-def _error_diagnostic(rule: Rule, exc: Exception) -> Diagnostic:
-    """Wrap an unexpected backend exception in an ERROR diagnostic."""
+def _backend_for(name: str) -> Backend:
+    """Map a registered backend name to its IR ``Backend`` enum.
+
+    Registered names mirror enum values exactly; this raises ``ValueError`` only
+    if a caller registers a name outside the enum, which is a programmer error.
+    """
+    return Backend(name)
+
+
+def _error_diagnostic(rule: Rule, exc: Exception, backend: Backend) -> Diagnostic:
+    """Wrap an unexpected backend exception in an ERROR diagnostic.
+
+    The ``backend`` argument is the implementation that actually raised, so the
+    diagnostic attributes the failure correctly even when several backends are
+    registered.
+    """
     return Diagnostic(
         rule_id=rule.id,
         source=rule.source,
-        backend=Backend.FILESYSTEM,  # best-effort; real backend unknown at this point
+        backend=backend,
         status=Status.ERROR,
         severity=rule.severity,
         message=f"internal error during validation: {exc}",
@@ -55,18 +69,14 @@ def _error_diagnostic(rule: Rule, exc: Exception) -> Diagnostic:
     )
 
 
-def _resolve_check_fn(rule: Rule, backend_name: str):
-    """Return the check callable for *rule* given the chosen *backend_name*.
+def _resolve_backend_name(rule: Rule, backend_name: str) -> str:
+    """Return the registered backend name to use for *rule*.
 
     When ``backend_name`` is ``"auto"`` we use the rule's ``backend_hint``.
-    Returns ``None`` when the name is not registered (should not happen after
-    CLI validation, but handled defensively).
     """
     if backend_name == "auto":
-        name = rule.backend_hint.value  # e.g. "filesystem", "github", "llm-rubric"
-    else:
-        name = backend_name
-    return _registry.get(name)
+        return rule.backend_hint.value
+    return backend_name
 
 
 def validate(
@@ -98,23 +108,31 @@ def validate(
 
     diagnostics: list[Diagnostic] = []
     for rule in ruleset.rules:
-        check_fn = _resolve_check_fn(rule, backend)
+        resolved_name = _resolve_backend_name(rule, backend)
+        check_fn = _registry.get(resolved_name)
         if check_fn is None:
-            # Defensive: backend_hint points to an unregistered name.
+            # Defensive: name resolved from backend_hint is not registered.
+            # Attribute the diagnostic to the IR Backend that *should* have
+            # handled it when the name maps to one; otherwise fall back to
+            # filesystem (the local-only backend) so output stays renderable.
+            try:
+                attributed = _backend_for(resolved_name)
+            except ValueError:
+                attributed = Backend.FILESYSTEM
             diag = Diagnostic(
                 rule_id=rule.id,
                 source=rule.source,
-                backend=Backend.FILESYSTEM,
+                backend=attributed,
                 status=Status.UNAVAILABLE,
                 severity=rule.severity,
                 message=(
-                    f"no backend registered for {rule.backend_hint.value!r}; "
+                    f"no backend registered for {resolved_name!r}; "
                     "cannot validate rule"
                 ),
                 evidence=[
                     Evidence(
                         kind="registry_miss",
-                        data={"backend_hint": rule.backend_hint.value},
+                        data={"backend_hint": resolved_name},
                     )
                 ],
             )
@@ -122,7 +140,7 @@ def validate(
             try:
                 diag = check_fn(rule, target)
             except Exception as exc:  # noqa: BLE001
-                diag = _error_diagnostic(rule, exc)
+                diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)
 
     return DiagnosticReport(diagnostics=diagnostics)

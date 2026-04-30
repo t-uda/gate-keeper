@@ -70,6 +70,9 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"error: {args.document}: {exc.strerror}", file=sys.stderr)
         return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {args.document}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
+        return EXIT_USAGE
 
     ruleset = parser.parse(str(path), content)
     ruleset = classifier.classify(ruleset)
@@ -101,6 +104,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         content = doc_path.read_text(encoding="utf-8")
     except OSError as exc:
         print(f"error: {args.rules}: {exc.strerror}", file=sys.stderr)
+        return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {args.rules}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
         return EXIT_USAGE
 
     ruleset = parser.parse(str(doc_path), content)
