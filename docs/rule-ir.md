@@ -101,6 +101,7 @@ shape beyond those two top-level keys.
 | `kind` | `params` key | Default | Notes |
 | ------ | ------------ | ------- | ----- |
 | `github_labels_absent` | `labels` | `["blocked","do-not-merge","needs-decision"]` | List of blocking label names (case-insensitive). Absent key uses default list; explicit `[]` means no blocking labels → always PASS. |
+| `github_checks_success` | _(none)_ | — | Evaluates every entry in `statusCheckRollup` as required; only `SUCCESS` state/conclusion passes. Branch protection remains the authoritative control plane. |
 
 ## Validation policy
 
