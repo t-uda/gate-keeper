@@ -96,6 +96,12 @@ shape beyond those two top-level keys.
 ### `Confidence`
 `high`, `medium`, `low`
 
+## Per-kind params
+
+| `kind` | `params` key | Default | Notes |
+| ------ | ------------ | ------- | ----- |
+| `github_labels_absent` | `labels` | `["blocked","do-not-merge","needs-decision"]` | List of blocking label names (case-insensitive). Absent key uses default list; explicit `[]` means no blocking labels → always PASS. |
+
 ## Validation policy
 
 `from_dict` parsers in `src/gate_keeper/models.py` are strict and fail-closed:

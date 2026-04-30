@@ -11,6 +11,12 @@ from pathlib import Path
 
 name = "filesystem"
 
+from gate_keeper._md import (
+    FENCE_START_RE as _FENCE_START_RE,
+    TASK_CHECKED_RE as _TASK_CHECKED_RE,
+    TASK_UNCHECKED_RE as _TASK_UNCHECKED_RE,
+    strip_fenced_blocks as _strip_fenced_blocks_impl,
+)
 from gate_keeper.models import (
     Backend,
     Diagnostic,
@@ -30,10 +36,6 @@ _FILESYSTEM_KINDS = frozenset(
         RuleKind.MARKDOWN_TASKS_COMPLETE,
     }
 )
-
-_TASK_CHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[[xX]\]", re.MULTILINE)
-_TASK_UNCHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[ \]", re.MULTILINE)
-_FENCE_START_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
 def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) -> Diagnostic:
@@ -198,26 +200,12 @@ def _text_forbidden(rule: Rule, target: Path) -> Diagnostic:
 
 
 def _strip_fenced_blocks(text: str) -> str:
-    """Return *text* with fenced code block contents removed (fence lines included)."""
-    out: list[str] = []
-    in_fence = False
-    fence_char = ""
-    fence_len = 0
-    for line in text.splitlines(keepends=True):
-        m = _FENCE_START_RE.match(line)
-        if m:
-            marker = m.group(1)
-            if not in_fence:
-                in_fence = True
-                fence_char = marker[0]
-                fence_len = len(marker)
-            elif marker[0] == fence_char and len(marker) >= fence_len:
-                in_fence = False
-                fence_char = ""
-                fence_len = 0
-        elif not in_fence:
-            out.append(line)
-    return "".join(out)
+    """Return *text* with fenced code block contents removed (fence lines included).
+
+    Delegates to ``gate_keeper._md.strip_fenced_blocks``; kept here for backward
+    compatibility with any internal callers in this module.
+    """
+    return _strip_fenced_blocks_impl(text)
 
 
 def _markdown_tasks_complete(rule: Rule, target: Path) -> Diagnostic:
