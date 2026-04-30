@@ -78,13 +78,23 @@ class TestRunGhMissing:
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("not found")))
         result = run_gh(["pr", "view"])
         assert result.ok is False
-        assert result.returncode == -1
+        assert result.binary_missing is True
+        # 127 is the POSIX convention for "command not found".
+        assert result.returncode == 127
         assert "gh" in result.cmd
 
     def test_missing_result_classify_as_missing(self, monkeypatch):
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
         result = run_gh(["pr", "view"])
         assert classify_gh_failure(result) == "missing"
+
+    def test_negative_returncode_is_not_missing(self):
+        # SIGHUP terminates with returncode -1; this must NOT be misclassified
+        # as "binary missing" — only the binary_missing flag carries that meaning.
+        result = GhResult(
+            ok=False, stdout="", stderr="", returncode=-1, cmd=("gh", "pr", "view")
+        )
+        assert classify_gh_failure(result) == "failure"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +192,18 @@ class TestRunGhTokenRedaction:
         result = run_gh(["pr", "view"])
         assert "mysecretvalue" not in result.stderr
 
+    def test_github_pat_token_redacted(self, monkeypatch):
+        # Fine-grained personal access tokens use the github_pat_ prefix.
+        fake_token = "github_pat_" + "Z" * 60
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *a, **kw: _make_completed(stderr=f"error: bad PAT {fake_token}", returncode=1),
+        )
+        result = run_gh(["pr", "view"])
+        assert fake_token not in result.stderr
+        assert "[redacted-token]" in result.stderr
+
 
 # ---------------------------------------------------------------------------
 # run_gh — timeout and OSError
@@ -263,8 +285,16 @@ class TestClassifyGhFailure:
     def _result(self, returncode: int, stderr: str = "") -> GhResult:
         return GhResult(ok=False, stdout="", stderr=stderr, returncode=returncode, cmd=("gh", "pr", "view"))
 
-    def test_returncode_minus1_is_missing(self):
-        assert classify_gh_failure(self._result(-1)) == "missing"
+    def test_binary_missing_flag_is_missing(self):
+        result = GhResult(
+            ok=False,
+            stdout="",
+            stderr="gh binary not found",
+            returncode=127,
+            cmd=("gh", "pr", "view"),
+            binary_missing=True,
+        )
+        assert classify_gh_failure(result) == "missing"
 
     def test_auth_login_in_stderr_is_auth(self):
         assert classify_gh_failure(self._result(1, "To get started, please run: gh auth login")) == "auth"
@@ -287,6 +317,18 @@ class TestClassifyGhFailure:
     def test_returncode_minus2_is_failure(self):
         # timeout (-2) is not auth, not missing
         assert classify_gh_failure(self._result(-2, "timed out")) == "failure"
+
+    def test_negative_returncode_without_binary_missing_is_failure(self):
+        # SIGHUP-style termination (-1) with binary_missing=False must NOT be "missing".
+        result = GhResult(
+            ok=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            cmd=("gh", "pr", "view"),
+            binary_missing=False,
+        )
+        assert classify_gh_failure(result) == "failure"
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +417,14 @@ class TestFailureDiag:
 
     def test_missing_binary_routes_to_gh_missing(self):
         rule = _rule()
-        result = self._result(-1)
+        result = GhResult(
+            ok=False,
+            stdout="",
+            stderr="gh binary not found",
+            returncode=127,
+            cmd=("gh", "pr", "view"),
+            binary_missing=True,
+        )
         diag = failure_diag(rule, "pr-view", result)
         assert diag.evidence[0].kind == "gh_missing"
 
@@ -485,3 +534,41 @@ class TestTokenRedactionInEvidence:
         # If we build a failed diag from this result, excerpt is also clean
         diag = gh_failed_diag(_rule(), "pr-view", result)
         assert fake_token not in diag.evidence[0].data["stderr_excerpt"]
+
+    def test_token_in_argv_redacted_from_evidence_cmd(self):
+        """A token passed as a gh argv element must not surface in evidence['cmd']."""
+        fake_token = "ghp_" + "H" * 40
+        result = GhResult(
+            ok=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            cmd=("gh", "api", "-H", f"Authorization: token {fake_token}", "user"),
+        )
+        for builder in (
+            lambda: gh_failed_diag(_rule(), "api", result),
+            lambda: gh_auth_diag(_rule(), "api", result),
+        ):
+            diag = builder()
+            cmd_value = diag.evidence[0].data["cmd"]
+            assert fake_token not in cmd_value
+            # Per-arg redaction may produce either the token sentinel or the
+            # auth-header sentinel; both are acceptable as long as the secret
+            # is gone.
+            assert (
+                "[redacted-token]" in cmd_value
+                or "[redacted-auth-header]" in cmd_value
+            )
+
+    def test_github_pat_in_argv_redacted_from_evidence_cmd(self):
+        fake_token = "github_pat_" + "K" * 60
+        result = GhResult(
+            ok=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            cmd=("gh", "api", "-f", f"token={fake_token}", "user"),
+        )
+        diag = gh_failed_diag(_rule(), "api", result)
+        cmd_value = diag.evidence[0].data["cmd"]
+        assert fake_token not in cmd_value

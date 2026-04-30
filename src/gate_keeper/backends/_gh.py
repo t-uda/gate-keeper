@@ -26,7 +26,16 @@ from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
 # ---------------------------------------------------------------------------
 
 _SECRET_RE = re.compile(
-    r"gh[phours]_[A-Za-z0-9_]{10,}|gh_[A-Za-z0-9_]{16,}|ghr_[A-Za-z0-9_]{10,}",
+    # Classic GitHub token prefixes (ghp/gho/ghu/ghs/ghr) plus bare "gh_" tokens
+    # and the fine-grained PAT prefix `github_pat_`. Order matters only for
+    # readability — re.sub applies the alternation greedily by position.
+    r"github_pat_[A-Za-z0-9_]{20,}"
+    r"|ghp_[A-Za-z0-9_]{10,}"
+    r"|gho_[A-Za-z0-9_]{10,}"
+    r"|ghu_[A-Za-z0-9_]{10,}"
+    r"|ghs_[A-Za-z0-9_]{10,}"
+    r"|ghr_[A-Za-z0-9_]{10,}"
+    r"|gh_[A-Za-z0-9_]{16,}",
 )
 
 _AUTH_HEADER_LINE_RE = re.compile(
@@ -58,13 +67,21 @@ def _redact(text: str) -> str:
 
 @dataclass(frozen=True)
 class GhResult:
-    """Typed result of a ``gh`` CLI invocation."""
+    """Typed result of a ``gh`` CLI invocation.
+
+    ``binary_missing`` is True only when the OS could not locate the ``gh``
+    executable. This is tracked separately from ``returncode`` because Unix
+    reports signal-terminated processes with negative return codes too — for
+    example, SIGHUP yields ``returncode == -1`` — so a sentinel return code
+    would conflate the two.
+    """
 
     ok: bool
     stdout: str
     stderr: str  # already redacted
     returncode: int
     cmd: tuple[str, ...]  # the actual argv, for diagnostics
+    binary_missing: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +127,9 @@ def run_gh(
             ok=False,
             stdout="",
             stderr="gh binary not found",
-            returncode=-1,
+            returncode=127,  # POSIX convention for "command not found"
             cmd=argv,
+            binary_missing=True,
         )
     except subprocess.TimeoutExpired as exc:
         partial_stderr = _redact(exc.stderr or "") if isinstance(exc.stderr, str) else ""
@@ -163,11 +181,11 @@ def parse_json(stdout: str) -> tuple[Any, str | None]:
 def classify_gh_failure(result: GhResult) -> Literal["missing", "auth", "failure"]:
     """Classify a failed GhResult into one of three categories.
 
-    - ``"missing"`` — the ``gh`` binary was not found (returncode -1).
+    - ``"missing"`` — the ``gh`` binary was not found.
     - ``"auth"``    — stderr contains markers indicating a credentials problem.
-    - ``"failure"`` — any other non-zero exit.
+    - ``"failure"`` — any other non-zero exit (including signal-terminated runs).
     """
-    if result.returncode == -1:
+    if result.binary_missing:
         return "missing"
     stderr_lower = result.stderr.lower()
     if any(marker in stderr_lower for marker in _AUTH_MARKERS):
@@ -216,8 +234,14 @@ def _stderr_excerpt(result: GhResult, limit: int = 300) -> str:
 
 
 def _safe_cmd(result: GhResult) -> str:
-    """Return a space-joined command string (tokens already come from argv, no env)."""
-    return " ".join(result.cmd)
+    """Return a space-joined command string with secrets redacted from each argv element.
+
+    A future caller could pass an auth header or token as an argument (for example
+    via ``-H "Authorization: Bearer <token>"`` or ``-f token=<token>``); without
+    redaction those would land verbatim in diagnostic evidence. The same redaction
+    applied to stderr is applied per-arg here.
+    """
+    return " ".join(_redact(arg) for arg in result.cmd)
 
 
 def gh_failed_diag(rule: Rule, op: str, result: GhResult) -> Diagnostic:
