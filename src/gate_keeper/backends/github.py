@@ -281,6 +281,36 @@ def _check_tasks_complete(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_rollup(raw: object) -> list | None:
+    """Return a flat list of rollup entries, or ``None`` if shape is unrecognized.
+
+    ``gh pr view --json statusCheckRollup`` flattens the GraphQL
+    ``StatusCheckRollup`` object to a list of entries (one per
+    ``CheckRun``/``StatusContext``). Future gh versions or alternate access
+    paths could conceivably return the nested object shape, e.g.::
+
+        {"contexts": {"nodes": [...]}}
+
+    or simply ``{"nodes": [...]}``. Be tolerant: accept the flat list (current
+    behaviour), and fall back to either nested-nodes shape so the rule still
+    evaluates instead of failing closed on a pure shape change.
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        # Try ``contexts.nodes`` first (the documented GraphQL relay shape),
+        # then a top-level ``nodes`` fallback.
+        contexts = raw.get("contexts")
+        if isinstance(contexts, dict):
+            nodes = contexts.get("nodes")
+            if isinstance(nodes, list):
+                return nodes
+        nodes = raw.get("nodes")
+        if isinstance(nodes, list):
+            return nodes
+    return None
+
+
 def _classify_check_entry(entry: dict) -> tuple[str, str, bool]:
     """Classify a single statusCheckRollup entry into (name, label, ok).
 
@@ -343,8 +373,9 @@ def _check_checks_success(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
     if "statusCheckRollup" not in data:
         return gh_missing_field_diag(rule, "pr-view", "statusCheckRollup")
 
-    rollup = data["statusCheckRollup"]
-    if not isinstance(rollup, list):
+    rollup_raw = data["statusCheckRollup"]
+    rollup = _normalize_rollup(rollup_raw)
+    if rollup is None:
         return gh_missing_field_diag(rule, "pr-view", "statusCheckRollup")
 
     successful: list[str] = []

@@ -238,10 +238,49 @@ class TestMissingRollup:
         assert diag.evidence[0].data["field"] == "statusCheckRollup"
 
     def test_non_list_rollup_unavailable(self, monkeypatch):
-        """A non-list value for statusCheckRollup fails closed."""
+        """A non-list, non-recognized-dict value for statusCheckRollup fails closed."""
         diag = _check_rule(monkeypatch, rollup="not-a-list")
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].kind == "gh_missing_field"
+
+    def test_unrecognized_dict_rollup_unavailable(self, monkeypatch):
+        """A dict without contexts.nodes or nodes also fails closed."""
+        diag = _check_rule(monkeypatch, rollup={"unexpected": "shape"})
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "gh_missing_field"
+
+
+class TestRollupShapeFlexibility:
+    """gh's --json statusCheckRollup currently flattens to a list, but be
+    tolerant of the GraphQL StatusCheckRollup object shape so a future gh
+    upgrade or alternate access path doesn't silently break the rule."""
+
+    _ENTRY = {
+        "__typename": "CheckRun",
+        "name": "lint",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+    }
+
+    def test_dict_rollup_with_contexts_nodes_is_evaluated(self, monkeypatch):
+        diag = _check_rule(
+            monkeypatch,
+            rollup={"contexts": {"nodes": [self._ENTRY]}},
+        )
+        assert diag.status is Status.PASS
+        ev = diag.evidence[0]
+        assert ev.data["total"] == 1
+        assert ev.data["successful"] == ["lint"]
+
+    def test_dict_rollup_with_top_level_nodes_is_evaluated(self, monkeypatch):
+        diag = _check_rule(
+            monkeypatch,
+            rollup={"nodes": [self._ENTRY]},
+        )
+        assert diag.status is Status.PASS
+        ev = diag.evidence[0]
+        assert ev.data["total"] == 1
+        assert ev.data["successful"] == ["lint"]
 
 
 # ---------------------------------------------------------------------------
