@@ -48,10 +48,31 @@ class TestGithubBackendStub:
         diag = gh_backend.check(rule, tmp_path)
         assert diag.backend is Backend.GITHUB
 
-    def test_check_message_names_rule_kind(self, tmp_path):
+    def test_check_message_names_rule_kind_when_target_resolves(self, monkeypatch):
+        """When the target resolves, the diag still names the rule kind."""
+        from gate_keeper.backends import _gh, _target
+
+        def _fake_run_gh(args, **kwargs):
+            return _gh.GhResult(
+                ok=True,
+                stdout='{"number": 42, "url": "https://github.com/owner/repo/pull/42"}',
+                stderr="",
+                returncode=0,
+                cmd=("gh", *args),
+            )
+
+        monkeypatch.setattr(_target, "run_gh", _fake_run_gh)
+        rule = _github_rule(RuleKind.GITHUB_NOT_DRAFT)
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert "github_not_draft" in diag.message
+
+    def test_check_invalid_target_surfaces_target_parse_error(self, tmp_path):
+        """A non-PR target now surfaces a parse-error diagnostic via the resolver."""
         rule = _github_rule(RuleKind.GITHUB_NOT_DRAFT)
         diag = gh_backend.check(rule, tmp_path)
-        assert "github_not_draft" in diag.message
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "target_parse_error"
 
     @pytest.mark.parametrize(
         "kind",
@@ -66,6 +87,8 @@ class TestGithubBackendStub:
         ],
     )
     def test_all_github_kinds_return_unavailable(self, tmp_path, kind):
+        # tmp_path is not a valid PR target; the resolver fails closed and
+        # the diagnostic is UNAVAILABLE/github (the parse-error path).
         rule = _github_rule(kind)
         diag = gh_backend.check(rule, tmp_path)
         assert diag.status is Status.UNAVAILABLE
