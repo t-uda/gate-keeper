@@ -67,21 +67,45 @@ def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) ->
 
 
 # ---------------------------------------------------------------------------
-# _fetch_pr_view — single gh pr view call shared by all four handlers
+# _fetch_pr_view — narrow gh pr view call per rule kind
 # ---------------------------------------------------------------------------
+#
+# Each rule only needs the JSON fields its handler consumes. We declare the
+# field set per rule kind and ask gh for only those fields. This avoids
+# downloading an entire review history for a state/draft/label/task/check rule
+# (which can be several KB on heavily-reviewed PRs) and lets the approval rule
+# use the precomputed ``latestReviews`` field — one entry per reviewer, latest
+# state — eliminating any pagination concern on the reviews connection.
 
-_PR_VIEW_FIELDS = "state,isDraft,labels,body,statusCheckRollup,reviews,author"
+_FIELDS_BY_KIND: dict[RuleKind, str] = {
+    RuleKind.GITHUB_PR_OPEN: "state",
+    RuleKind.GITHUB_NOT_DRAFT: "isDraft",
+    RuleKind.GITHUB_LABELS_ABSENT: "labels",
+    RuleKind.GITHUB_TASKS_COMPLETE: "body",
+    RuleKind.GITHUB_CHECKS_SUCCESS: "statusCheckRollup",
+    RuleKind.GITHUB_NON_AUTHOR_APPROVAL: "latestReviews,author",
+}
 
 
 def _fetch_pr_view(pr: PrTarget, rule: Rule) -> tuple[dict | None, Diagnostic | None]:
-    """Call ``gh pr view`` and return (parsed_dict, None) or (None, error_diag).
+    """Call ``gh pr view`` for *only* the fields needed by ``rule.kind``.
 
-    One call per check() invocation; the result is shared across all handlers.
+    Returns ``(parsed_dict, None)`` or ``(None, error_diag)``. One call per
+    ``check()`` invocation. The narrow field selection keeps the payload small
+    for the common rules and lets the approval rule receive ``latestReviews``
+    (one row per reviewer, gh-precomputed) instead of paginating ``reviews``.
     """
+    fields = _FIELDS_BY_KIND.get(rule.kind, "")
+    if not fields:
+        # Defensive: a kind that reaches this path without a declared field set
+        # is a programmer error. Fail closed instead of running a meaningless
+        # gh call.
+        return None, gh_missing_field_diag(rule, "pr-view", "<unknown rule kind>")
+
     argv = [
         "pr", "view", str(pr.number),
         "-R", f"{pr.owner}/{pr.repo}",
-        "--json", _PR_VIEW_FIELDS,
+        "--json", fields,
     ]
     result = run_gh(argv)
     if not result.ok:
@@ -691,11 +715,15 @@ def _is_bot_reviewer(login: str, is_bot: object) -> bool:
 def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
     """Pass when at least one non-author, non-bot reviewer has an APPROVED state.
 
-    Uses the *latest* review per reviewer (by ``submittedAt``; lexicographic
-    ISO-8601 sort).  DISMISSED, COMMENTED, CHANGES_REQUESTED, and PENDING
-    all fail the rule.  Bot reviews (``is_bot=True`` or login ending in
-    ``[bot]``) and self-reviews (reviewer login == PR author login) are
-    excluded entirely.
+    Uses ``gh pr view --json latestReviews`` which returns one entry per
+    reviewer with that reviewer's *latest* review state — pre-computed by
+    GitHub. This sidesteps the pagination concern on the full ``reviews``
+    connection: ``latestReviews`` is bounded by reviewer count rather than
+    review-event count.
+
+    DISMISSED, COMMENTED, CHANGES_REQUESTED, and PENDING all fail the rule.
+    Bot reviews (``is_bot=True`` or login ending in ``[bot]``) and self-reviews
+    (reviewer login == PR author login) are excluded entirely.
 
     Evidence kind: ``pr_independent_review``.
     """
@@ -708,13 +736,15 @@ def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnost
     if not isinstance(author_login, str) or not author_login:
         return gh_missing_field_diag(rule, "pr-view", "author.login")
 
-    if "reviews" not in data or not isinstance(data["reviews"], list):
-        return gh_missing_field_diag(rule, "pr-view", "reviews")
+    if "latestReviews" not in data or not isinstance(data["latestReviews"], list):
+        return gh_missing_field_diag(rule, "pr-view", "latestReviews")
 
-    reviews_raw = data["reviews"]
+    reviews_raw = data["latestReviews"]
 
     # --- Normalize reviews ---
-    # Each entry: {login, is_bot, state, submittedAt}
+    # Each entry: {login, is_bot, state}
+    # We no longer need submittedAt because latestReviews is already the
+    # latest-per-reviewer slice.
     normalized: list[dict] = []
     for entry in reviews_raw:
         if not isinstance(entry, dict):
@@ -729,20 +759,14 @@ def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnost
         if not isinstance(state, str) or not state:
             continue
         is_bot = entry_author.get("is_bot")
-        submitted_at = entry.get("submittedAt")
-        normalized.append(
-            {
-                "login": login,
-                "is_bot": is_bot,
-                "state": state,
-                "submittedAt": submitted_at if isinstance(submitted_at, str) else None,
-            }
-        )
+        normalized.append({"login": login, "is_bot": is_bot, "state": state})
 
-    # --- Filter bots and self-reviews ---
+    # --- Filter bots and self-reviews; classify approved vs not ---
     ignored_bot_logins: list[str] = []
     ignored_self_reviews = 0
-    qualifying: list[dict] = []
+    approved_by: list[str] = []
+    non_approved_reviewers: list[dict] = []
+    seen_qualifying: set[str] = set()
 
     for rev in normalized:
         login = rev["login"]
@@ -753,35 +777,15 @@ def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnost
         if login == author_login:
             ignored_self_reviews += 1
             continue
-        qualifying.append(rev)
-
-    # --- Group by login; pick latest by submittedAt ---
-    # Bucket: login → list of reviews (in list order)
-    buckets: dict[str, list[dict]] = {}
-    for rev in qualifying:
-        login = rev["login"]
-        buckets.setdefault(login, []).append(rev)
-
-    def _latest(revs: list[dict]) -> dict:
-        """Return the review with the greatest submittedAt (lexicographic ISO sort).
-
-        If no entry has a submittedAt, return the last element in the list
-        (gh preserves chronological order).
-        """
-        with_ts = [r for r in revs if r["submittedAt"] is not None]
-        if with_ts:
-            return max(with_ts, key=lambda r: r["submittedAt"])  # type: ignore[return-value]
-        return revs[-1]
-
-    approved_by: list[str] = []
-    non_approved_reviewers: list[dict] = []
-
-    for login, revs in buckets.items():
-        latest = _latest(revs)
-        if latest["state"] == "APPROVED":
+        # Defensive: if the same login appears more than once (shouldn't on
+        # latestReviews but cheap to handle), keep the first occurrence.
+        if login in seen_qualifying:
+            continue
+        seen_qualifying.add(login)
+        if rev["state"] == "APPROVED":
             approved_by.append(login)
         else:
-            non_approved_reviewers.append({"login": login, "state": latest["state"]})
+            non_approved_reviewers.append({"login": login, "state": rev["state"]})
 
     # --- Build evidence and diagnostic ---
     evidence_data: dict = {

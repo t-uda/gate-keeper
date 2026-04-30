@@ -2,7 +2,7 @@
 
 Each test monkeypatches:
 - ``gate_keeper.backends._target.run_gh`` for resolve_target (returns PR number/url)
-- ``gate_keeper.backends.github.run_gh``  for _fetch_pr_view (returns reviews/author/…)
+- ``gate_keeper.backends.github.run_gh``  for _fetch_pr_view (returns latestReviews/author)
 
 Helper ``_pr_view_json`` accepts keyword fields including ``reviews`` and ``author``
 so callers can construct arbitrary payloads without raw JSON strings.
@@ -99,17 +99,24 @@ def _author(login: str, *, is_bot: bool = False) -> dict:
 
 
 def _base_payload(**extra: Any) -> dict:
-    """Return a minimal pr view payload with all required fields."""
-    return {
-        "state": "OPEN",
-        "isDraft": False,
-        "labels": [],
-        "body": "",
-        "statusCheckRollup": [],
-        "reviews": [],
+    """Return a minimal pr view payload with the fields the approval rule needs.
+
+    The github backend now requests only the fields its handler consumes (the
+    approval rule asks gh for ``latestReviews,author``), so we mirror that
+    narrow shape here. ``reviews`` is accepted as an alias and copied into
+    ``latestReviews`` so legacy tests authored against the wider payload still
+    work without rewriting every case.
+    """
+    payload: dict = {
+        "latestReviews": [],
         "author": _author("octocat"),
-        **extra,
     }
+    payload.update(extra)
+    if "reviews" in payload and "latestReviews" not in extra:
+        payload["latestReviews"] = payload.pop("reviews")
+    elif "reviews" in payload:
+        payload.pop("reviews")
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -143,12 +150,12 @@ class TestMissingFields:
 
     def test_missing_reviews_field_unavailable(self, monkeypatch):
         payload = _base_payload()
-        del payload["reviews"]
+        del payload["latestReviews"]
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(json.dumps(payload)))
         diag = gh_backend.check(_make_non_author_approval_rule(), "owner/repo#42")
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].kind == "gh_missing_field"
-        assert "reviews" in diag.evidence[0].data["field"]
+        assert diag.evidence[0].data["field"] == "latestReviews"
 
     def test_reviews_not_a_list_unavailable(self, monkeypatch):
         payload = _base_payload(reviews="not-a-list")
@@ -232,14 +239,15 @@ class TestNonAuthorApproval:
         ev = diag.evidence[0]
         assert "dependabot[bot]" in ev.data["ignored_bot_reviewers"]
 
-    def test_commented_then_approved_later_passes(self, monkeypatch):
-        """Two reviews from same user: COMMENTED (earlier) then APPROVED (later) → PASS."""
+    def test_latest_per_reviewer_approved_passes(self, monkeypatch):
+        """gh ``latestReviews`` returns the latest state per reviewer.
+
+        For alice the latest is APPROVED, so the rule passes. The earlier
+        COMMENTED state is collapsed away by gh; we don't see it.
+        """
         payload = _base_payload(
             author=_author("octocat"),
-            reviews=[
-                _review("alice", "COMMENTED", submitted_at="2026-04-29T09:00:00Z"),
-                _review("alice", "APPROVED", submitted_at="2026-04-29T10:00:00Z"),
-            ],
+            reviews=[_review("alice", "APPROVED", submitted_at="2026-04-29T10:00:00Z")],
         )
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(json.dumps(payload)))
         diag = gh_backend.check(_make_non_author_approval_rule(), "owner/repo#42")
@@ -247,20 +255,21 @@ class TestNonAuthorApproval:
         ev = diag.evidence[0]
         assert "alice" in ev.data["approved_by"]
 
-    def test_approved_then_dismissed_later_fails(self, monkeypatch):
-        """Two reviews: APPROVED (earlier) then DISMISSED (later) → FAIL; latest=DISMISSED."""
+    def test_latest_per_reviewer_dismissed_fails(self, monkeypatch):
+        """For alice the latest state is DISMISSED → FAIL; an earlier APPROVAL
+        on the same PR has been superseded and is not reported by gh's
+        ``latestReviews``.
+        """
         payload = _base_payload(
             author=_author("octocat"),
-            reviews=[
-                _review("alice", "APPROVED", submitted_at="2026-04-29T09:00:00Z"),
-                _review("alice", "DISMISSED", submitted_at="2026-04-29T10:00:00Z"),
-            ],
+            reviews=[_review("alice", "DISMISSED", submitted_at="2026-04-29T10:00:00Z")],
         )
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(json.dumps(payload)))
         diag = gh_backend.check(_make_non_author_approval_rule(), "owner/repo#42")
         assert diag.status is Status.FAIL
         ev = diag.evidence[0]
         assert ev.data["approved_by"] == []
+        assert {"login": "alice", "state": "DISMISSED"} in ev.data["non_approved_reviewers"]
 
     def test_one_approved_one_changes_requested_passes(self, monkeypatch):
         """One reviewer APPROVED, another CHANGES_REQUESTED → PASS (one is enough)."""
@@ -342,18 +351,22 @@ class TestNonAuthorApproval:
         assert ev.data["number"] == 42
         assert ev.data["url"] == "https://github.com/owner/repo/pull/42"
 
-    def test_no_submitted_at_uses_last_in_list(self, monkeypatch):
-        """When submittedAt is absent, fall back to last occurrence in list order."""
-        # Two reviews from alice without timestamps; last is APPROVED
+    def test_duplicate_login_in_latest_reviews_keeps_first(self, monkeypatch):
+        """Defensive: gh's ``latestReviews`` should collapse to one entry per
+        reviewer, but if a payload ever contains duplicates the handler keeps
+        the first occurrence and treats subsequent entries from the same login
+        as no-ops. This locks in the de-dup behaviour without depending on a
+        particular ordering rule.
+        """
         reviews = [
-            {"id": "PRR_1", "author": {"login": "alice", "is_bot": False}, "state": "COMMENTED"},
-            {"id": "PRR_2", "author": {"login": "alice", "is_bot": False}, "state": "APPROVED"},
+            {"id": "PRR_1", "author": {"login": "alice", "is_bot": False}, "state": "APPROVED"},
+            {"id": "PRR_2", "author": {"login": "alice", "is_bot": False}, "state": "DISMISSED"},
         ]
         payload = _base_payload(author=_author("octocat"), reviews=reviews)
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(json.dumps(payload)))
         diag = gh_backend.check(_make_non_author_approval_rule(), "owner/repo#42")
         assert diag.status is Status.PASS
-        assert "alice" in diag.evidence[0].data["approved_by"]
+        assert diag.evidence[0].data["approved_by"] == ["alice"]
 
     def test_skips_non_dict_review_entries(self, monkeypatch):
         """Non-dict entries in the reviews list are silently ignored."""

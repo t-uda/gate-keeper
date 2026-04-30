@@ -105,13 +105,15 @@ shape beyond those two top-level keys.
 
 ## `github_non_author_approval` — formal evidence and limitations
 
-The `github_non_author_approval` rule kind reads `gh pr view --json reviews,author`
-and evaluates a single deterministic condition:
+The `github_non_author_approval` rule kind reads `gh pr view --json latestReviews,author`
+and evaluates a single deterministic condition. `latestReviews` is GitHub's
+precomputed slice of one review per reviewer (the latest state for that
+reviewer), which avoids any pagination concern on the full reviews connection.
 
 **PASS** when at least one reviewer satisfies ALL of:
 - Login is not the PR author.
 - Not a bot (`is_bot=True` or login ending in `[bot]`).
-- Latest review state (by `submittedAt`, or last in list when absent) is `"APPROVED"`.
+- Latest review state (as reported by `latestReviews`) is `"APPROVED"`.
 
 **FAIL** otherwise — including when no qualifying reviewer exists.
 
