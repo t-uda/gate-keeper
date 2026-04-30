@@ -31,6 +31,7 @@ _FILESYSTEM_KINDS = frozenset(
 
 _TASK_CHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[[xX]\]", re.MULTILINE)
 _TASK_UNCHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[ \]", re.MULTILINE)
+_FENCE_START_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
 def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) -> Diagnostic:
@@ -137,7 +138,7 @@ def _read_file(rule: Rule, target: Path) -> tuple[str | None, Diagnostic | None]
         )
     try:
         return target.read_text(encoding="utf-8"), None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         return None, _diag(
             rule,
             Status.UNAVAILABLE,
@@ -194,13 +195,37 @@ def _text_forbidden(rule: Rule, target: Path) -> Diagnostic:
     return _diag(rule, Status.FAIL, f"{path_str} contains forbidden pattern {pattern!r}.", evidence)
 
 
+def _strip_fenced_blocks(text: str) -> str:
+    """Return *text* with fenced code block contents removed (fence lines included)."""
+    out: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    for line in text.splitlines(keepends=True):
+        m = _FENCE_START_RE.match(line)
+        if m:
+            marker = m.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+        elif not in_fence:
+            out.append(line)
+    return "".join(out)
+
+
 def _markdown_tasks_complete(rule: Rule, target: Path) -> Diagnostic:
     content, err = _read_file(rule, target)
     if err is not None:
         return err
     path_str = str(target)
-    checked = len(_TASK_CHECKED_RE.findall(content))
-    unchecked = len(_TASK_UNCHECKED_RE.findall(content))
+    scannable = _strip_fenced_blocks(content)
+    checked = len(_TASK_CHECKED_RE.findall(scannable))
+    unchecked = len(_TASK_UNCHECKED_RE.findall(scannable))
     total = checked + unchecked
     evidence = [Evidence(kind="markdown_tasks", data={"path": path_str, "checked": checked, "unchecked": unchecked, "total": total})]
     if unchecked:

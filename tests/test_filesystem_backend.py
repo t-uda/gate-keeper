@@ -261,6 +261,42 @@ class TestMarkdownTasksComplete:
         diag = check(_rule(RuleKind.MARKDOWN_TASKS_COMPLETE), f)
         assert diag.status is Status.FAIL
 
+    def test_checkboxes_inside_code_block_ignored(self, tmp_path):
+        f = tmp_path / "doc.md"
+        f.write_text(
+            "Real tasks:\n- [x] done\n\n```\n- [ ] inside code block\n```\n"
+        )
+        diag = check(_rule(RuleKind.MARKDOWN_TASKS_COMPLETE), f)
+        assert diag.status is Status.PASS
+        ev = next(e for e in diag.evidence if e.kind == "markdown_tasks")
+        assert ev.data["unchecked"] == 0
+        assert ev.data["checked"] == 1
+
+    def test_unavailable_on_non_utf8_file(self, tmp_path):
+        f = tmp_path / "latin1.md"
+        f.write_bytes(b"- [x] done \xff\n")
+        diag = check(_rule(RuleKind.MARKDOWN_TASKS_COMPLETE), f)
+        assert diag.status is Status.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# UnicodeDecodeError → unavailable (P2 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestUnicodeDecodeError:
+    def test_text_required_non_utf8_is_unavailable(self, tmp_path):
+        f = tmp_path / "latin1.txt"
+        f.write_bytes(b"hello \xff world")
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "hello"}), f)
+        assert diag.status is Status.UNAVAILABLE
+
+    def test_text_forbidden_non_utf8_is_unavailable(self, tmp_path):
+        f = tmp_path / "latin1.txt"
+        f.write_bytes(b"hello \xff world")
+        diag = check(_rule(RuleKind.TEXT_FORBIDDEN, {"pattern": "hello"}), f)
+        assert diag.status is Status.UNAVAILABLE
+
 
 # ---------------------------------------------------------------------------
 # Unsupported rule kind
