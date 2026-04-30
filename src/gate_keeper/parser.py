@@ -32,7 +32,7 @@ _ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _TASK_BOX_RE = re.compile(r"^[ \t]*[-*+]\s+\[[ xX]\]\s+(.*)")
 _BULLET_RE = re.compile(r"^[ \t]*[-*+]\s+(.*)")
 _ORDERED_RE = re.compile(r"^[ \t]*\d+[.)]\s+(.*)")
-_CODE_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+_CODE_FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})")
 
 
 def _has_normative(text: str) -> bool:
@@ -76,6 +76,7 @@ def parse(path: str, content: str) -> RuleSet:
     candidates: list[_Candidate] = []
     in_code_fence = False
     fence_char = ""
+    fence_len = 0
 
     i = 0
     while i < len(lines):
@@ -85,12 +86,15 @@ def parse(path: str, content: str) -> RuleSet:
         # Code-fence toggle — skip everything inside a fenced block.
         fence_m = _CODE_FENCE_RE.match(raw)
         if fence_m:
+            marker = fence_m.group(2)
             if not in_code_fence:
                 in_code_fence = True
-                fence_char = fence_m.group(1)[0]
-            elif raw.strip().startswith(fence_char * 3):
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
                 in_code_fence = False
                 fence_char = ""
+                fence_len = 0
             i += 1
             continue
 

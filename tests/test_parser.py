@@ -242,6 +242,21 @@ class TestCodeFenceExclusion:
         md = "````\nmust not parse this\n````\n"
         assert _texts(md) == []
 
+    def test_indented_fence_skipped(self):
+        md = "   ```\nmust not parse this\n   ```\n"
+        assert _texts(md) == []
+
+    def test_short_close_does_not_end_long_fence(self):
+        # A ``` close must not terminate a ```` opener early.
+        md = "````\nmust not parse this\n```\nstill inside fence\n````\n"
+        assert _texts(md) == []
+
+    def test_longer_close_ends_long_fence(self):
+        # A ````` close is fine for a ```` opener (>= length).
+        md = "````\nmust not parse this\n`````\n- Must come after.\n"
+        texts = _texts(md)
+        assert texts == ["Must come after."]
+
 
 # ---------------------------------------------------------------------------
 # Source location metadata
