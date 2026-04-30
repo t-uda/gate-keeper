@@ -228,17 +228,23 @@ def resolve_target(rule: Rule, target: str) -> tuple[PrTarget | None, Diagnostic
     if err is not None:
         return None, gh_json_diag(rule, "pr-view", err)
 
-    # Validate required fields
+    # Validate required fields. We check both presence AND that the value is of
+    # the expected type so a malformed response (e.g. ``number: null``) is
+    # surfaced as a Diagnostic rather than raising during int coercion.
     if "url" not in data:
         return None, gh_missing_field_diag(rule, "pr-view", "url")
     if "number" not in data:
+        return None, gh_missing_field_diag(rule, "pr-view", "number")
+    if not isinstance(data["url"], str) or not data["url"]:
+        return None, gh_missing_field_diag(rule, "pr-view", "url")
+    if not isinstance(data["number"], int) or isinstance(data["number"], bool):
         return None, gh_missing_field_diag(rule, "pr-view", "number")
 
     # Build refreshed PrTarget using gh-canonical values
     refreshed = PrTarget(
         owner=t.owner,
         repo=t.repo,
-        number=int(data["number"]),
+        number=data["number"],
         url=data["url"],
     )
     return refreshed, None

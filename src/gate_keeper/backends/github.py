@@ -35,22 +35,43 @@ name = "github"
 
 
 def check(rule: Rule, target: str | Path) -> Diagnostic:
-    """Return UNAVAILABLE; per-rule GitHub checks land in issues #9-#13.
+    """Resolve the target, then report UNAVAILABLE for the rule kind.
 
-    The message follows the same shape as future auth/network failures so
-    callers can recognise the pattern without special-casing the stub.
+    Per-rule GitHub checks land in issues #10-#13. Until then this entry point
+    still goes through ``resolve_target`` so any target-level failure (bad
+    target shape, missing ``gh``, auth failure, repo/PR not found, malformed
+    response) surfaces with the right diagnostic shape and the resolver is
+    exercised end-to-end via the registered backend path.
+
+    On successful resolution the diagnostic still reports UNAVAILABLE — this
+    is fail-closed by design until the per-rule logic exists.
     """
+    target_str = str(target)
+    pr, diag = resolve_target(rule, target_str)
+    if diag is not None:
+        return diag
+
     return Diagnostic(
         rule_id=rule.id,
         source=rule.source,
         backend=Backend.GITHUB,
         status=Status.UNAVAILABLE,
         severity=rule.severity,
-        message=f"github backend rule kind {rule.kind.value!r} not yet implemented (#9-#13)",
+        message=(
+            f"target resolved to {pr.owner}/{pr.repo}#{pr.number}; "
+            f"rule kind {rule.kind.value!r} not yet implemented (#10-#13)"
+        ),
         evidence=[
             Evidence(
                 kind="backend_stub",
-                data={"backend": "github", "rule_kind": rule.kind.value},
+                data={
+                    "backend": "github",
+                    "rule_kind": rule.kind.value,
+                    "owner": pr.owner,
+                    "repo": pr.repo,
+                    "number": pr.number,
+                    "url": pr.url,
+                },
             )
         ],
     )
