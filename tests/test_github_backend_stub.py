@@ -51,7 +51,7 @@ class TestGithubBackendStub:
     def test_check_message_names_rule_kind_when_target_resolves(self, monkeypatch):
         """When the target resolves, a stub kind still names the rule kind in its message.
 
-        GITHUB_THREADS_RESOLVED is not yet implemented (#12), so it returns
+        GITHUB_NON_AUTHOR_APPROVAL is not yet implemented (#13), so it returns
         UNAVAILABLE with the rule kind in the message even after resolution.
         """
         from gate_keeper.backends import _gh, _target
@@ -66,10 +66,10 @@ class TestGithubBackendStub:
             )
 
         monkeypatch.setattr(_target, "run_gh", _fake_run_gh)
-        rule = _github_rule(RuleKind.GITHUB_THREADS_RESOLVED)
+        rule = _github_rule(RuleKind.GITHUB_NON_AUTHOR_APPROVAL)
         diag = gh_backend.check(rule, "owner/repo#42")
         assert diag.status is Status.UNAVAILABLE
-        assert "github_threads_resolved" in diag.message
+        assert "github_non_author_approval" in diag.message
 
     def test_check_invalid_target_surfaces_target_parse_error(self, tmp_path):
         """A non-PR target now surfaces a parse-error diagnostic via the resolver."""
