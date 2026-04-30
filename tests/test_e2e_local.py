@@ -209,7 +209,8 @@ class TestCompileSmoke:
         from gate_keeper.cli import main
 
         repo_root = Path(__file__).parent.parent
-        main(["compile", str(repo_root / "docs" / "example-rules.md"), "--format", "json"])
+        rc = main(["compile", str(repo_root / "docs" / "example-rules.md"), "--format", "json"])
+        assert rc == 0
         out = capsys.readouterr().out
         data = json.loads(out)
         backends = {r["backend_hint"] for r in data["rules"]}
