@@ -11,12 +11,11 @@ EXAMPLE_DOC = REPO_ROOT / "docs" / "example-rules.md"
 
 
 def test_compile_json_smoke(capsys):
-    """Compile the example document: exit 0 and valid JSON output."""
+    """Compile the example document: exit 0 and valid RuleSet JSON."""
     rc = main(["compile", str(EXAMPLE_DOC), "--format", "json"])
     assert rc == 0
     captured = capsys.readouterr()
     data = json.loads(captured.out)
-    assert "document" in data
     assert "rules" in data
     assert isinstance(data["rules"], list)
     assert len(data["rules"]) > 0

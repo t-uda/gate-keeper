@@ -65,14 +65,7 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     ruleset = parser.parse(str(path), content)
     ruleset = classifier.classify(ruleset)
 
-    output = {
-        "document": {
-            "path": str(path),
-            "rules_count": len(ruleset.rules),
-        },
-        "rules": [rule.to_dict() for rule in ruleset.rules],
-    }
-    print(json.dumps(output, indent=2))
+    print(json.dumps(ruleset.to_dict(), indent=2))
     return EXIT_OK
 
 
