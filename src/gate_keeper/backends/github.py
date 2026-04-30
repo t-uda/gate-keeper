@@ -560,9 +560,12 @@ def _fetch_review_threads(
             ),
         )
 
-    # Pagination guard: hasNextPage true → UNAVAILABLE
+    # Pagination guard: hasNextPage must be an explicit ``False`` to treat the
+    # first page as complete. ``True`` *and* any missing/malformed value
+    # (``None``, a string, absent key) all fail closed as UNAVAILABLE — a
+    # truncated first page must never silently PASS.
     has_next = page_info.get("hasNextPage")
-    if has_next is True:
+    if has_next is not False:
         end_cursor = page_info.get("endCursor")
         if not isinstance(end_cursor, str):
             end_cursor = None

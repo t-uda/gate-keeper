@@ -337,6 +337,76 @@ class TestPagination:
         diag = gh_backend.check(rule, "owner/repo#42")
         assert diag.status is not Status.PASS
 
+    def test_missing_has_next_page_fails_closed(self, monkeypatch):
+        """If pageInfo.hasNextPage is absent, treat as paginated (UNAVAILABLE)."""
+        body = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"endCursor": None},  # hasNextPage missing
+                        }
+                    }
+                }
+            }
+        })
+        _patch_both(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            _ok(body),
+        )
+        rule = _make_github_rule()
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "gh_pagination_unavailable"
+
+    def test_null_has_next_page_fails_closed(self, monkeypatch):
+        body = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": None, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        })
+        _patch_both(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            _ok(body),
+        )
+        rule = _make_github_rule()
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "gh_pagination_unavailable"
+
+    def test_non_bool_has_next_page_fails_closed(self, monkeypatch):
+        body = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": "false", "endCursor": None},
+                        }
+                    }
+                }
+            }
+        })
+        _patch_both(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            _ok(body),
+        )
+        rule = _make_github_rule()
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "gh_pagination_unavailable"
+
 
 # ---------------------------------------------------------------------------
 # GraphQL errors in response → UNAVAILABLE / gh_graphql_error
