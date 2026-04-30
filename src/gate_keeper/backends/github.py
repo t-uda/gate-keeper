@@ -166,14 +166,41 @@ def _check_labels_absent(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
         if isinstance(item, dict) and "name" in item and isinstance(item["name"], str):
             pr_label_names.append(item["name"])
 
-    # Determine configured blocking labels.
+    # Determine configured blocking labels. ``params.labels`` MUST be either
+    # absent (use defaults) or a list of strings. Anything else (a bare string,
+    # a list with non-string items, etc.) fails closed as UNAVAILABLE — the IR
+    # is the contract; tolerating drift here would silently change rule
+    # semantics.
     params_labels = rule.params.get("labels")
     if params_labels is None:
-        # Key absent → use defaults.
         blocking: list[str] = list(_DEFAULT_BLOCKING_LABELS)
-    else:
-        # Key present; use as-is (including empty list which means no blocking).
+    elif (
+        isinstance(params_labels, list)
+        and all(isinstance(item, str) for item in params_labels)
+    ):
         blocking = list(params_labels)
+    else:
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.GITHUB,
+            status=Status.UNAVAILABLE,
+            severity=rule.severity,
+            message=(
+                f"rule.params.labels for {rule.id!r} must be a list of strings; "
+                f"got {type(params_labels).__name__}"
+            ),
+            evidence=[
+                Evidence(
+                    kind="rule_params_invalid",
+                    data={
+                        "param": "labels",
+                        "expected": "list[str]",
+                        "actual_type": type(params_labels).__name__,
+                    },
+                )
+            ],
+        )
 
     # Case-insensitive intersection.
     blocking_lower = {b.lower() for b in blocking}
@@ -217,7 +244,11 @@ def _check_tasks_complete(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
     if "body" not in data or data["body"] is None:
         return gh_missing_field_diag(rule, "pr-view", "body")
 
-    body: str = data["body"]
+    body = data["body"]
+    if not isinstance(body, str):
+        # Type mismatch; fail closed instead of letting strip_fenced_blocks raise.
+        return gh_missing_field_diag(rule, "pr-view", "body")
+
     scannable = strip_fenced_blocks(body)
     checked = len(TASK_CHECKED_RE.findall(scannable))
     unchecked = len(TASK_UNCHECKED_RE.findall(scannable))

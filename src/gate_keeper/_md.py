@@ -16,36 +16,66 @@ TASK_CHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[[xX]\]", re.MULTILINE)
 TASK_UNCHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[ \]", re.MULTILINE)
 
 # ---------------------------------------------------------------------------
-# Fenced-block detection
+# Fenced-block detection (CommonMark §4.5)
 # ---------------------------------------------------------------------------
+#
+# An opening fence is a line indented at most 3 spaces consisting of 3+ matching
+# fence characters (` or ~), followed by an optional info string and trailing
+# whitespace. Backtick fences MUST NOT contain backticks in their info string;
+# tilde fences may contain anything. The closing fence must use the same
+# character, be at least as long as the opening, indented at most 3 spaces, and
+# be followed only by whitespace.
 
-FENCE_START_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+FENCE_START_RE = re.compile(
+    r"^ {0,3}"                       # at most 3 leading spaces
+    r"(?P<marker>`{3,}|~{3,})"       # the fence run
+    r"(?P<info>[^`\n]*)?"            # info string (no backticks for backtick fences;
+                                     # tilde fences are slightly more permissive but
+                                     # this is good enough for MVP)
+    r"\s*$"                          # only whitespace allowed after info string
+)
 
 
 def strip_fenced_blocks(text: str) -> str:
     """Return *text* with fenced code block contents removed (fence lines included).
 
-    Opening fence: a line whose stripped form starts with three or more backticks
-    or tildes.  The closing fence must use the same fence character and be at least
-    as long as the opening fence.  Nested or mismatched fences are left as-is.
-    An unterminated fence consumes the rest of the document.
+    Follows CommonMark §4.5 closely enough for MVP usage:
+      * opening fence indented ≤3 spaces, 3+ matching ``\\`/~`` characters;
+      * info string allowed but, for backtick fences, must not contain backticks;
+      * closing fence: same character, at least as long, ≤3-space indent, only
+        whitespace after the marker;
+      * an unterminated fence consumes the rest of the document.
+
+    Lines that look like fences but violate any of these rules (e.g. ``    \\`\\`\\`py``
+    indented with 4+ spaces, or `\\`\\`\\`\\` followed by free-form trailing text on a
+    backtick fence) are left in place and treated as ordinary content.
     """
     out: list[str] = []
     in_fence = False
     fence_char = ""
     fence_len = 0
     for line in text.splitlines(keepends=True):
-        m = FENCE_START_RE.match(line)
+        # Strip a single trailing newline before matching so the regex's trailing
+        # ``\s*$`` anchor works regardless of EOL.
+        stripped = line.rstrip("\r\n")
+        m = FENCE_START_RE.match(stripped)
         if m:
-            marker = m.group(1)
+            marker = m.group("marker")
+            info = m.group("info") or ""
             if not in_fence:
+                # Opening fence: backtick fences disallow backticks in info string.
+                if marker[0] == "`" and "`" in info:
+                    out.append(line)
+                    continue
                 in_fence = True
                 fence_char = marker[0]
                 fence_len = len(marker)
-            elif marker[0] == fence_char and len(marker) >= fence_len:
+            elif marker[0] == fence_char and len(marker) >= fence_len and not info.strip():
+                # Closing fence: same char, ≥ length, no info string.
                 in_fence = False
                 fence_char = ""
                 fence_len = 0
+            # else: mismatched marker inside an open fence — drop it as content
         elif not in_fence:
             out.append(line)
     return "".join(out)

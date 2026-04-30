@@ -308,6 +308,37 @@ class TestCheckLabelsAbsent:
         assert diag.status is Status.PASS
         assert diag.evidence[0].data["matched"] == []
 
+    def test_invalid_params_labels_type_unavailable(self, monkeypatch):
+        """params.labels with a non-list value fails closed (UNAVAILABLE)."""
+        _patch_both(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            _ok(_pr_view_json(state="OPEN", isDraft=False, labels=[], body="")),
+        )
+        rule = _make_github_rule(
+            RuleKind.GITHUB_LABELS_ABSENT,
+            params={"labels": "do-not-merge"},  # bare string is wrong shape
+        )
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "rule_params_invalid"
+        assert diag.evidence[0].data["param"] == "labels"
+
+    def test_invalid_params_labels_non_string_items_unavailable(self, monkeypatch):
+        """params.labels with non-string items fails closed."""
+        _patch_both(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            _ok(_pr_view_json(state="OPEN", isDraft=False, labels=[], body="")),
+        )
+        rule = _make_github_rule(
+            RuleKind.GITHUB_LABELS_ABSENT,
+            params={"labels": ["ok", 42]},
+        )
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "rule_params_invalid"
+
     def test_missing_params_labels_key_uses_defaults(self, monkeypatch):
         """When params has no 'labels' key at all, the default blocking list is used."""
         _patch_both(
@@ -353,6 +384,28 @@ class TestCheckTasksComplete:
         diag = gh_backend.check(rule, "owner/repo#42")
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].kind == "gh_missing_field"
+
+    def test_non_string_body_fails_closed(self, monkeypatch):
+        """A non-string body (e.g. malformed gh response) must NOT crash; UNAVAILABLE."""
+        # Build the JSON payload by hand because _pr_view_json filters None.
+        import json
+
+        bad_payload = json.dumps({
+            "state": "OPEN",
+            "isDraft": False,
+            "labels": [],
+            "body": 42,  # numeric, not a string
+        })
+        _patch_both(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            _ok(bad_payload),
+        )
+        rule = _make_github_rule(RuleKind.GITHUB_TASKS_COMPLETE)
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "gh_missing_field"
+        assert diag.evidence[0].data["field"] == "body"
 
     def test_empty_body_passes(self, monkeypatch):
         _patch_both(

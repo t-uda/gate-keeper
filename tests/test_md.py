@@ -135,3 +135,36 @@ class TestTaskBoxRegexes:
 
     def test_checked_does_not_match_unchecked(self):
         assert TASK_CHECKED_RE.search("- [ ] todo") is None
+
+
+class TestStripFencedBlocksCommonMark:
+    """Regression tests for stricter CommonMark fence handling."""
+
+    def test_indented_more_than_3_spaces_is_not_a_fence(self):
+        """A line with 4+ leading spaces is code-block-by-indentation, not a fence."""
+        text = "before\n    ```python\n- [ ] outside any fence\n    ```\nafter\n"
+        result = strip_fenced_blocks(text)
+        # Because ``    \`\`\`python`` is NOT a fence, the task box that follows
+        # remains visible.
+        assert "outside any fence" in result
+
+    def test_backtick_fence_with_backtick_in_info_string_rejected(self):
+        """A backtick fence whose info string contains a backtick is not an opening fence."""
+        # ```` ```py` ```` is not a valid opening fence per CommonMark.
+        text = "before\n```py`bad\n- [ ] still outside\n```\nafter\n"
+        result = strip_fenced_blocks(text)
+        assert "still outside" in result
+
+    def test_three_space_indent_is_still_a_fence(self):
+        """0–3 spaces of indentation is allowed for a fence."""
+        text = "before\n   ```\n- [ ] inside\n   ```\nafter\n"
+        result = strip_fenced_blocks(text)
+        assert "inside" not in result
+
+    def test_closing_fence_with_trailing_text_is_not_a_close(self):
+        """A line `\\`\\`\\`stuff` while inside a fence is not a closing fence."""
+        text = "before\n```\nfirst\n```not-closing\nstill inside\n```\nafter\n"
+        result = strip_fenced_blocks(text)
+        assert "first" not in result
+        assert "still inside" not in result
+        assert "after" in result
