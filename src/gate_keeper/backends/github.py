@@ -25,6 +25,10 @@ from gate_keeper.backends._gh import (  # noqa: F401  (re-export)
     parse_json,
     run_gh,
 )
+from gate_keeper.backends._target import (  # noqa: F401  (re-export)
+    PrTarget,
+    resolve_target,
+)
 from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
 
 name = "github"
