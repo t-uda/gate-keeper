@@ -174,6 +174,14 @@ def test_text_evidence_no_data_renders_kind_only():
     assert "flag_set" in text
 
 
+def test_text_evidence_newlines_escaped():
+    ev = _ev("msg_evidence", body="line1\nline2")
+    diags = [_diag(evidence=[ev])]
+    lines = render_text(diags).splitlines()
+    assert len(lines) == 1
+    assert "\\n" in lines[0]
+
+
 # ---------------------------------------------------------------------------
 # JSON renderer — all-pass
 # ---------------------------------------------------------------------------

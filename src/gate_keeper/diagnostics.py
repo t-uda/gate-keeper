@@ -27,11 +27,15 @@ def usage_error(message: str) -> tuple[str, int]:
     return f"error: {message}", EXIT_USAGE
 
 
+def _safe_value(v: object) -> str:
+    return str(v).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _compact_evidence(diagnostic: Diagnostic) -> str:
     parts = []
     for e in diagnostic.evidence:
         if e.data:
-            pairs = ", ".join(f"{k}={v}" for k, v in e.data.items())
+            pairs = ", ".join(f"{k}={_safe_value(v)}" for k, v in e.data.items())
             parts.append(f"{e.kind}({pairs})")
         else:
             parts.append(e.kind)
