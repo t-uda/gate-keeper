@@ -103,6 +103,39 @@ shape beyond those two top-level keys.
 | `github_labels_absent` | `labels` | `["blocked","do-not-merge","needs-decision"]` | List of blocking label names (case-insensitive). Absent key uses default list; explicit `[]` means no blocking labels → always PASS. |
 | `github_checks_success` | _(none)_ | — | Evaluates every entry in `statusCheckRollup` as required; only `SUCCESS` state/conclusion passes. Branch protection remains the authoritative control plane. |
 
+## `github_non_author_approval` — formal evidence and limitations
+
+The `github_non_author_approval` rule kind reads `gh pr view --json latestReviews,author`
+and evaluates a single deterministic condition. `latestReviews` is GitHub's
+precomputed slice of one review per reviewer (the latest state for that
+reviewer), which avoids any pagination concern on the full reviews connection.
+
+**PASS** when at least one reviewer satisfies ALL of:
+- Login is not the PR author.
+- Not a bot (`is_bot=True` or login ending in `[bot]`).
+- Latest review state (as reported by `latestReviews`) is `"APPROVED"`.
+
+**FAIL** otherwise — including when no qualifying reviewer exists.
+
+### What this check proves
+
+| Condition | Proven? |
+| --------- | ------- |
+| At least one non-author non-bot `APPROVED` review | Yes — deterministic from `gh` data. |
+| Reviewer is a project member / CODEOWNER | No — `authorAssociation` not evaluated. |
+| Review is semantically "substantive" | No — out of scope for MVP. |
+| Comment-only reviews satisfy the rule | No — `COMMENTED` never satisfies. |
+| `DISMISSED` reviews satisfy the rule | No — conservative; dismissed = not approved. |
+| Branch protection CODEOWNERS rules are enforced | No — branch protection is the authoritative control plane; this check is advisory evidence. |
+
+### Boundaries
+
+- Bot reviews (`is_bot=True` OR login ends with `[bot]`) never satisfy the rule.
+- Self-reviews (reviewer login == PR author login) never satisfy the rule.
+- `DISMISSED`, `COMMENTED`, `CHANGES_REQUESTED`, and `PENDING` never satisfy the rule.
+- Only the **latest** review per reviewer (by `submittedAt`) is considered.
+- Comment-only and semantically substantive review judgement are out of scope.
+
 ## Validation policy
 
 `from_dict` parsers in `src/gate_keeper/models.py` are strict and fail-closed:

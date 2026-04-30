@@ -1,12 +1,12 @@
 """GitHub backend for gate-keeper.
 
 Implements deterministic PR state, draft, label, tasklist, status-check
-rollup, and review thread validation using the ``gh`` CLI (issues #10–#12).
-Issue #13 (approvals) is still an UNAVAILABLE stub; it lands in a separate PR.
+rollup, review thread validation, and independent (non-author) approval
+checks using the ``gh`` CLI (issues #10–#13).
 
-Five rule kinds share a single ``gh pr view`` call per ``check()``
+Six rule kinds share a single ``gh pr view`` call per ``check()``
 invocation; the result is parsed once and dispatched to the appropriate
-handler.  The sixth kind (``github_threads_resolved``) makes its own
+handler.  The seventh kind (``github_threads_resolved``) makes its own
 GraphQL call via ``gh api graphql`` and does NOT use ``_fetch_pr_view``.
 
 Any failure before dispatch (missing gh, auth, JSON, missing field)
@@ -67,21 +67,45 @@ def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) ->
 
 
 # ---------------------------------------------------------------------------
-# _fetch_pr_view — single gh pr view call shared by all four handlers
+# _fetch_pr_view — narrow gh pr view call per rule kind
 # ---------------------------------------------------------------------------
+#
+# Each rule only needs the JSON fields its handler consumes. We declare the
+# field set per rule kind and ask gh for only those fields. This avoids
+# downloading an entire review history for a state/draft/label/task/check rule
+# (which can be several KB on heavily-reviewed PRs) and lets the approval rule
+# use the precomputed ``latestReviews`` field — one entry per reviewer, latest
+# state — eliminating any pagination concern on the reviews connection.
 
-_PR_VIEW_FIELDS = "state,isDraft,labels,body,statusCheckRollup"
+_FIELDS_BY_KIND: dict[RuleKind, str] = {
+    RuleKind.GITHUB_PR_OPEN: "state",
+    RuleKind.GITHUB_NOT_DRAFT: "isDraft",
+    RuleKind.GITHUB_LABELS_ABSENT: "labels",
+    RuleKind.GITHUB_TASKS_COMPLETE: "body",
+    RuleKind.GITHUB_CHECKS_SUCCESS: "statusCheckRollup",
+    RuleKind.GITHUB_NON_AUTHOR_APPROVAL: "latestReviews,author",
+}
 
 
 def _fetch_pr_view(pr: PrTarget, rule: Rule) -> tuple[dict | None, Diagnostic | None]:
-    """Call ``gh pr view`` and return (parsed_dict, None) or (None, error_diag).
+    """Call ``gh pr view`` for *only* the fields needed by ``rule.kind``.
 
-    One call per check() invocation; the result is shared across all handlers.
+    Returns ``(parsed_dict, None)`` or ``(None, error_diag)``. One call per
+    ``check()`` invocation. The narrow field selection keeps the payload small
+    for the common rules and lets the approval rule receive ``latestReviews``
+    (one row per reviewer, gh-precomputed) instead of paginating ``reviews``.
     """
+    fields = _FIELDS_BY_KIND.get(rule.kind, "")
+    if not fields:
+        # Defensive: a kind that reaches this path without a declared field set
+        # is a programmer error. Fail closed instead of running a meaningless
+        # gh call.
+        return None, gh_missing_field_diag(rule, "pr-view", "<unknown rule kind>")
+
     argv = [
         "pr", "view", str(pr.number),
         "-R", f"{pr.owner}/{pr.repo}",
-        "--json", _PR_VIEW_FIELDS,
+        "--json", fields,
     ]
     result = run_gh(argv)
     if not result.ok:
@@ -670,6 +694,133 @@ def _check_threads_resolved(rule: Rule, pr: PrTarget) -> Diagnostic:
 
 
 # ---------------------------------------------------------------------------
+# Independent (non-author) approval handler (issue #13)
+# ---------------------------------------------------------------------------
+
+
+def _is_bot_reviewer(login: str, is_bot: object) -> bool:
+    """Return True if the reviewer is a bot.
+
+    A reviewer is considered a bot when ``is_bot is True`` OR when their
+    login ends with ``[bot]``.  The ``is_bot`` field may be missing on
+    older payloads (hence ``object`` type rather than ``bool``).
+    """
+    if is_bot is True:
+        return True
+    if isinstance(login, str) and login.endswith("[bot]"):
+        return True
+    return False
+
+
+def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
+    """Pass when at least one non-author, non-bot reviewer has an APPROVED state.
+
+    Uses ``gh pr view --json latestReviews`` which returns one entry per
+    reviewer with that reviewer's *latest* review state — pre-computed by
+    GitHub. This sidesteps the pagination concern on the full ``reviews``
+    connection: ``latestReviews`` is bounded by reviewer count rather than
+    review-event count.
+
+    DISMISSED, COMMENTED, CHANGES_REQUESTED, and PENDING all fail the rule.
+    Bot reviews (``is_bot=True`` or login ending in ``[bot]``) and self-reviews
+    (reviewer login == PR author login) are excluded entirely.
+
+    Evidence kind: ``pr_independent_review``.
+    """
+    # --- Validate required fields ---
+    if "author" not in data or not isinstance(data["author"], dict):
+        return gh_missing_field_diag(rule, "pr-view", "author")
+
+    author_dict = data["author"]
+    author_login = author_dict.get("login")
+    if not isinstance(author_login, str) or not author_login:
+        return gh_missing_field_diag(rule, "pr-view", "author.login")
+
+    if "latestReviews" not in data or not isinstance(data["latestReviews"], list):
+        return gh_missing_field_diag(rule, "pr-view", "latestReviews")
+
+    reviews_raw = data["latestReviews"]
+
+    # --- Normalize reviews ---
+    # Each entry: {login, is_bot, state}
+    # We no longer need submittedAt because latestReviews is already the
+    # latest-per-reviewer slice.
+    normalized: list[dict] = []
+    for entry in reviews_raw:
+        if not isinstance(entry, dict):
+            continue
+        entry_author = entry.get("author")
+        if not isinstance(entry_author, dict):
+            continue
+        login = entry_author.get("login")
+        if not isinstance(login, str) or not login:
+            continue
+        state = entry.get("state")
+        if not isinstance(state, str) or not state:
+            continue
+        is_bot = entry_author.get("is_bot")
+        normalized.append({"login": login, "is_bot": is_bot, "state": state})
+
+    # --- Filter bots and self-reviews; classify approved vs not ---
+    ignored_bot_logins: list[str] = []
+    ignored_self_reviews = 0
+    approved_by: list[str] = []
+    non_approved_reviewers: list[dict] = []
+    seen_qualifying: set[str] = set()
+
+    for rev in normalized:
+        login = rev["login"]
+        if _is_bot_reviewer(login, rev["is_bot"]):
+            if login not in ignored_bot_logins:
+                ignored_bot_logins.append(login)
+            continue
+        if login == author_login:
+            ignored_self_reviews += 1
+            continue
+        # Defensive: if the same login appears more than once (shouldn't on
+        # latestReviews but cheap to handle), keep the first occurrence.
+        if login in seen_qualifying:
+            continue
+        seen_qualifying.add(login)
+        if rev["state"] == "APPROVED":
+            approved_by.append(login)
+        else:
+            non_approved_reviewers.append({"login": login, "state": rev["state"]})
+
+    # --- Build evidence and diagnostic ---
+    evidence_data: dict = {
+        "author": author_login,
+        "approved_by": approved_by,
+        "non_approved_reviewers": non_approved_reviewers,
+        "ignored_bot_reviewers": ignored_bot_logins,
+        "ignored_self_reviews": ignored_self_reviews,
+        **_pr_coords(pr),
+    }
+    evidence = [Evidence(kind="pr_independent_review", data=evidence_data)]
+
+    if approved_by:
+        return _diag(
+            rule,
+            Status.PASS,
+            (
+                f"PR {pr.owner}/{pr.repo}#{pr.number} has independent approval "
+                f"from: {approved_by!r}."
+            ),
+            evidence,
+        )
+
+    return _diag(
+        rule,
+        Status.FAIL,
+        (
+            f"PR {pr.owner}/{pr.repo}#{pr.number} has no qualifying independent "
+            f"APPROVED review (non-author, non-bot, latest state)."
+        ),
+        evidence,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dispatch tables
 # ---------------------------------------------------------------------------
 
@@ -680,6 +831,7 @@ _PR_VIEW_HANDLERS = {
     RuleKind.GITHUB_LABELS_ABSENT: _check_labels_absent,
     RuleKind.GITHUB_TASKS_COMPLETE: _check_tasks_complete,
     RuleKind.GITHUB_CHECKS_SUCCESS: _check_checks_success,
+    RuleKind.GITHUB_NON_AUTHOR_APPROVAL: _check_non_author_approval,
 }
 
 # Handlers that make their own gh call directly (takes rule, pr only).
@@ -698,9 +850,9 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     Resolution failures (bad target, missing gh, auth error, PR not found)
     surface as UNAVAILABLE immediately.
 
-    - Five rule kinds share a single ``gh pr view`` call (_PR_VIEW_HANDLERS).
+    - Six rule kinds share a single ``gh pr view`` call (_PR_VIEW_HANDLERS).
     - ``github_threads_resolved`` makes its own GraphQL call (_DIRECT_HANDLERS).
-    - Unimplemented kinds (#13) receive an UNAVAILABLE stub after resolution.
+    - Unrecognised kinds receive a defensive UNAVAILABLE fall-through.
     """
     target_str = str(target)
     pr, diag = resolve_target(rule, target_str)
@@ -714,7 +866,11 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
 
     handler = _PR_VIEW_HANDLERS.get(rule.kind)
     if handler is None:
-        # Rule kind not yet implemented — issue #13.
+        # Defensive fall-through: no known handler for this rule kind.
+        # A future malformed or unsupported RuleKind should not crash.
+        _supported = ", ".join(
+            sorted(k.value for k in list(_PR_VIEW_HANDLERS) + list(_DIRECT_HANDLERS))
+        )
         return Diagnostic(
             rule_id=rule.id,
             source=rule.source,
@@ -722,8 +878,8 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
             status=Status.UNAVAILABLE,
             severity=rule.severity,
             message=(
-                f"target resolved to {pr.owner}/{pr.repo}#{pr.number}; "
-                f"rule kind {rule.kind.value!r} not yet implemented (#13)"
+                f"GitHub backend does not implement rule kind {rule.kind.value!r}; "
+                f"supported: {_supported}"
             ),
             evidence=[
                 Evidence(

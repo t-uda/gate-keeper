@@ -49,27 +49,57 @@ class TestGithubBackendStub:
         assert diag.backend is Backend.GITHUB
 
     def test_check_message_names_rule_kind_when_target_resolves(self, monkeypatch):
-        """When the target resolves, a stub kind still names the rule kind in its message.
+        """When a truly unknown kind resolves, the defensive fall-through names the kind.
 
-        GITHUB_NON_AUTHOR_APPROVAL is not yet implemented (#13), so it returns
-        UNAVAILABLE with the rule kind in the message even after resolution.
+        We simulate this by calling check() with a fabricated rule kind value.
+        Since GITHUB_NON_AUTHOR_APPROVAL is now implemented, we use a kind that
+        is NOT in the dispatch tables (SEMANTIC_RUBRIC routes to the github backend
+        only if forced; here we test the defensive path directly on the handlers).
         """
+        import json
+
         from gate_keeper.backends import _gh, _target
 
+        resolve_payload = json.dumps(
+            {"number": 42, "url": "https://github.com/owner/repo/pull/42"}
+        )
+        pr_view_payload = json.dumps(
+            {"state": "OPEN", "isDraft": False, "labels": [], "body": "",
+             "statusCheckRollup": [], "reviews": [], "author": {"login": "octocat"}}
+        )
+
+        call_count = [0]
+
         def _fake_run_gh(args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _gh.GhResult(
+                    ok=True, stdout=resolve_payload, stderr="", returncode=0,
+                    cmd=("gh", *args),
+                )
             return _gh.GhResult(
-                ok=True,
-                stdout='{"number": 42, "url": "https://github.com/owner/repo/pull/42"}',
-                stderr="",
-                returncode=0,
+                ok=True, stdout=pr_view_payload, stderr="", returncode=0,
                 cmd=("gh", *args),
             )
 
         monkeypatch.setattr(_target, "run_gh", _fake_run_gh)
-        rule = _github_rule(RuleKind.GITHUB_NON_AUTHOR_APPROVAL)
-        diag = gh_backend.check(rule, "owner/repo#42")
-        assert diag.status is Status.UNAVAILABLE
-        assert "github_non_author_approval" in diag.message
+        monkeypatch.setattr(gh_backend, "run_gh", _fake_run_gh)
+
+        # Force a rule kind that is not handled by the github backend
+        # by patching the handler table directly.
+        from gate_keeper.backends import github as _ghmod
+        from gate_keeper.models import RuleKind
+
+        original = dict(_ghmod._PR_VIEW_HANDLERS)
+        try:
+            # Remove NON_AUTHOR_APPROVAL to simulate an unimplemented kind
+            del _ghmod._PR_VIEW_HANDLERS[RuleKind.GITHUB_NON_AUTHOR_APPROVAL]
+            rule = _github_rule(RuleKind.GITHUB_NON_AUTHOR_APPROVAL)
+            diag = gh_backend.check(rule, "owner/repo#42")
+            assert diag.status is Status.UNAVAILABLE
+            assert "github_non_author_approval" in diag.message
+        finally:
+            _ghmod._PR_VIEW_HANDLERS.update(original)
 
     def test_check_invalid_target_surfaces_target_parse_error(self, tmp_path):
         """A non-PR target now surfaces a parse-error diagnostic via the resolver."""
