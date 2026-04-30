@@ -7,6 +7,9 @@ import sys
 from gate_keeper import __version__
 from gate_keeper.diagnostics import EXIT_OK, EXIT_USAGE
 
+# Backend choices exposed by the registry (always includes auto).
+_BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric"]
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -37,9 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--target", required=True, help="artifact or PR to validate")
     validate_parser.add_argument(
         "--backend",
-        choices=["auto", "filesystem", "github", "llm"],
+        choices=_BACKEND_CHOICES,
         default="auto",
-        help="validation backend to use",
+        help="validation backend to use (default: auto)",
+    )
+    validate_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
     )
 
     return parser
@@ -61,12 +70,60 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"error: {args.document}: {exc.strerror}", file=sys.stderr)
         return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {args.document}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
+        return EXIT_USAGE
 
     ruleset = parser.parse(str(path), content)
     ruleset = classifier.classify(ruleset)
 
     print(json.dumps(ruleset.to_dict(), indent=2))
     return EXIT_OK
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from gate_keeper import classifier, parser, validator
+    from gate_keeper.backends import is_registered
+    from gate_keeper.diagnostics import compute_exit_code, render_json, render_text
+
+    # Validate backend choice defensively (argparse choices= should catch most).
+    backend = args.backend
+    if backend != "auto" and not is_registered(backend):
+        print(f"error: unknown backend {backend!r}", file=sys.stderr)
+        return EXIT_USAGE
+
+    # Read and compile the rule document.
+    doc_path = Path(args.rules)
+    if not doc_path.exists():
+        print(f"error: {args.rules}: No such file or directory", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        content = doc_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: {args.rules}: {exc.strerror}", file=sys.stderr)
+        return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {args.rules}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
+        return EXIT_USAGE
+
+    ruleset = parser.parse(str(doc_path), content)
+    ruleset = classifier.classify(ruleset)
+
+    # Run validation.
+    report = validator.validate(ruleset, args.target, backend=backend)
+
+    # Render output.
+    if args.format == "json":
+        print(render_json(report.diagnostics))
+    else:
+        rendered = render_text(report.diagnostics)
+        if rendered:
+            print(rendered)
+
+    return compute_exit_code(report.diagnostics)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "compile":
         return _cmd_compile(args)
+
+    if args.command == "validate":
+        return _cmd_validate(args)
 
     parser.error(f"{args.command!r} is planned but not implemented in the scaffold")
     return 2
