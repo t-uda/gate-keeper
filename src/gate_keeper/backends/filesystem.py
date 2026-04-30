@@ -9,6 +9,8 @@ import fnmatch
 import re
 from pathlib import Path
 
+name = "filesystem"
+
 from gate_keeper.models import (
     Backend,
     Diagnostic,
