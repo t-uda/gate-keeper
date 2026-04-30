@@ -1,8 +1,6 @@
 """Tests for the rule classifier."""
 from __future__ import annotations
 
-import pytest
-
 from gate_keeper.classifier import classify, classify_rule
 from gate_keeper.models import Backend, Confidence, RuleKind, Severity, SourceLocation, Rule
 from gate_keeper.parser import parse
@@ -389,3 +387,95 @@ class TestLowConfidenceVisible:
         original = parse("test.md", md)
         classified = classify(original)
         assert len(classified.rules) == len(original.rules)
+
+
+# ---------------------------------------------------------------------------
+# Codex P1 fix: filesystem rules win over PR-heading heuristic
+# ---------------------------------------------------------------------------
+
+
+class TestFilesystemBeforePRHeadingHeuristic:
+    def test_file_exists_under_pr_heading_routes_to_filesystem(self):
+        # A file-existence rule nested under a PR heading must NOT be
+        # misrouted to GITHUB_TASKS_COMPLETE by the heading heuristic.
+        rule = _classify_text(
+            "The CHANGELOG file must exist before merging",
+            heading="PR Merge Gates > Required Checks",
+        )
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.FILE_EXISTS
+        assert rule.confidence is Confidence.HIGH
+
+    def test_text_required_under_pr_heading_routes_to_filesystem(self):
+        rule = _classify_text(
+            "The README must contain a summary section",
+            heading="PR Merge Gates",
+        )
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.TEXT_REQUIRED
+        assert rule.confidence is Confidence.HIGH
+
+    def test_readme_must_exist_no_file_word(self):
+        # Existence predicate without the word "file" should still match.
+        rule = _classify_text("README.md must exist in the repo root")
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.FILE_EXISTS
+        assert rule.confidence is Confidence.HIGH
+
+    def test_file_absent_no_file_word(self):
+        rule = _classify_text("debug.log must not exist in production")
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.FILE_ABSENT
+        assert rule.confidence is Confidence.HIGH
+
+
+# ---------------------------------------------------------------------------
+# Codex P1 fix: bare task-checkbox items route to MARKDOWN_TASKS_COMPLETE
+# ---------------------------------------------------------------------------
+
+
+class TestBareCheckboxRouting:
+    def test_bare_checkbox_routes_to_markdown_tasks(self):
+        # A checkbox with no normative keyword and no PR heading routes
+        # to MARKDOWN_TASKS_COMPLETE / filesystem rather than llm-rubric.
+        rule = _classify_text("Update README")
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.MARKDOWN_TASKS_COMPLETE
+        assert rule.confidence is Confidence.MEDIUM
+
+    def test_bare_checkbox_integration(self):
+        md = "- [ ] Update the documentation\n"
+        rules = _parse_and_classify(md)
+        assert len(rules) == 1
+        assert rules[0].backend_hint is Backend.FILESYSTEM
+        assert rules[0].kind is RuleKind.MARKDOWN_TASKS_COMPLETE
+
+    def test_normative_rule_is_not_treated_as_checkbox(self):
+        # Rules with normative keywords fall through to the appropriate backend
+        # or semantic rubric — not to MARKDOWN_TASKS_COMPLETE.
+        rule = _classify_text("Code quality must be adequate")
+        assert rule.kind is not RuleKind.MARKDOWN_TASKS_COMPLETE
+
+
+# ---------------------------------------------------------------------------
+# Codex P2 fix: draft matching requires PR context
+# ---------------------------------------------------------------------------
+
+
+class TestDraftRequiresPRContext:
+    def test_draft_config_file_does_not_match_github_draft(self):
+        # "draft" in a filesystem context must not be misrouted to GitHub.
+        rule = _classify_text("The draft configuration file must exist")
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.FILE_EXISTS
+
+    def test_not_a_draft_matches_github_draft(self):
+        rule = _classify_text("The pull request must not be a draft")
+        assert rule.backend_hint is Backend.GITHUB
+        assert rule.kind is RuleKind.GITHUB_NOT_DRAFT
+        assert rule.confidence is Confidence.HIGH
+
+    def test_in_draft_state_matches_github_draft(self):
+        rule = _classify_text("PR must not be in draft state before review")
+        assert rule.backend_hint is Backend.GITHUB
+        assert rule.kind is RuleKind.GITHUB_NOT_DRAFT
