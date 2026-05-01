@@ -6,10 +6,6 @@ We verify that compute_exit_code treats these diagnostics as non-zero.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from gate_keeper.backends import llm_rubric as llm_backend
 from gate_keeper.diagnostics import EXIT_FAIL, EXIT_OK, compute_exit_code
 from gate_keeper.models import (

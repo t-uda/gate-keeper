@@ -42,7 +42,7 @@ fail-closed behavior: an unconfigured evaluator must not silently pass rules.
 
 ## Rubric input/output shape
 
-When a provider is added, `_build_rubric_input()` in `backends/llm_rubric.py`
+When a provider is added, `_build_rubric_input()` in `src/gate_keeper/backends/llm_rubric.py`
 defines the context passed to the model:
 
 ```json
@@ -65,7 +65,7 @@ The expected provider response is a `Diagnostic` with:
 
 To add a provider:
 
-1. Implement `_is_configured() -> bool` in `backends/llm_rubric.py` to detect
+1. Implement `_is_configured() -> bool` in `src/gate_keeper/backends/llm_rubric.py` to detect
    credentials (e.g. `GATE_KEEPER_LLM_PROVIDER`, `OPENAI_API_KEY`).
 2. Add a provider client call in the `if _is_configured():` branch of `check()`.
 3. Map the model response to a `Diagnostic` following the shape above.

@@ -5,8 +5,9 @@ registered so that ``--backend llm-rubric`` is a valid choice and rules that
 fall through classifier heuristics have a defined home.
 
 Extension point: when adding a real provider, implement ``_is_configured()``
-to detect provider credentials and replace the stub body in ``check()`` with a
-call to ``_invoke_provider()``.  The ``Diagnostic`` contract is unchanged.
+to detect provider credentials and replace the stub body in ``check()`` with
+provider invocation and response-parsing logic. The ``Diagnostic`` contract is
+unchanged.
 """
 from __future__ import annotations
 
