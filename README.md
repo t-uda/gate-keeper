@@ -24,8 +24,10 @@ The 3-day MVP is intentionally narrow:
 - explicit fail-closed results for unavailable context;
 - advisory `gh aw` integration docs, not a hard runtime dependency.
 
-See [docs/mvp-spec.md](docs/mvp-spec.md) and
-[docs/issue-plan.md](docs/issue-plan.md).
+See [docs/mvp-spec.md](docs/mvp-spec.md),
+[docs/issue-plan.md](docs/issue-plan.md), and
+[docs/mvp-readiness.md](docs/mvp-readiness.md) for the MVP completion
+checklist, known limitations, and upgrade path.
 
 The initial execution board is
 [gate-keeper 3-day MVP](https://github.com/users/t-uda/projects/2).
