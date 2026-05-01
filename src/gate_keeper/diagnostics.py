@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Sequence
 
-from gate_keeper.models import Diagnostic, DiagnosticReport, Status
+from gate_keeper.models import Diagnostic, DiagnosticReport, Rule, Status
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -59,6 +59,27 @@ def render_text(diagnostics: Sequence[Diagnostic]) -> str:
             f"{d.message}"
             f"{evidence_part}"
         )
+    return "\n".join(lines)
+
+
+def render_explain_text(rules: Sequence[Rule]) -> str:
+    """Render rule-to-backend routing decisions as human-readable text.
+
+    Each rule block: path:line: [backend/confidence] rule_id: kind
+      <rule text>
+      reason: <classifier explanation>
+    """
+    lines = []
+    for rule in rules:
+        explanation = rule.params.get("classifier_explanation", "no explanation available")
+        heading_part = f" ({rule.source.heading})" if rule.source.heading else ""
+        lines.append(
+            f"{rule.source.path}:{rule.source.line}:{heading_part} "
+            f"[{rule.backend_hint.value}/{rule.confidence.value}] "
+            f"{rule.id}: {rule.kind.value}"
+        )
+        lines.append(f"  {rule.text}")
+        lines.append(f"  reason: {explanation}")
     return "\n".join(lines)
 
 

@@ -32,6 +32,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format (default: json)",
     )
 
+    explain_parser = subparsers.add_parser(
+        "explain",
+        help="show how each rule in a document maps to a backend",
+    )
+    explain_parser.add_argument("document", help="path to a rule document")
+    explain_parser.add_argument(
+        "--format",
+        choices=["text"],
+        default="text",
+        help="output format (default: text)",
+    )
+
     validate_parser = subparsers.add_parser(
         "validate",
         help="validate an artifact against a rule document",
@@ -78,6 +90,36 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     ruleset = classifier.classify(ruleset)
 
     print(json.dumps(ruleset.to_dict(), indent=2))
+    return EXIT_OK
+
+
+def _cmd_explain(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from gate_keeper import classifier, parser
+    from gate_keeper.diagnostics import render_explain_text
+
+    path = Path(args.document)
+
+    if not path.exists():
+        print(f"error: {args.document}: No such file or directory", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: {args.document}: {exc.strerror}", file=sys.stderr)
+        return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {args.document}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
+        return EXIT_USAGE
+
+    ruleset = parser.parse(str(path), content)
+    ruleset = classifier.classify(ruleset)
+
+    rendered = render_explain_text(ruleset.rules)
+    if rendered:
+        print(rendered)
     return EXIT_OK
 
 
@@ -136,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "compile":
         return _cmd_compile(args)
+
+    if args.command == "explain":
+        return _cmd_explain(args)
 
     if args.command == "validate":
         return _cmd_validate(args)
