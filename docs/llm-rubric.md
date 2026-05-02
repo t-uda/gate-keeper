@@ -75,6 +75,26 @@ To add a provider:
 No other files need to change: the backend registry, classifier, and validator
 already treat `llm-rubric` as a first-class backend.
 
+## Project trunk: semantic rubric quality
+
+Wiring a real provider (gateway issue #51) is the entry point to this project's
+completion trunk, not its end.  The owner's working definition of "completion"
+for `gate-keeper` is the intellectual work that lifts the semantic rubric
+backend to production-grade quality — prompt design, evaluation reproducibility,
+cost / failure policy, hybrid deterministic+semantic rule kinds, semantic
+self-gating, diagnostic output quality, and a severity ladder grounded in
+measured reliability.
+
+That work is tracked under the umbrella issue **#63 (semantic rubric backend
+quality — project completion trunk)**.  Distribution and adoption polish
+(PyPI publish, CI workflow templates, config file, getting-started guide,
+multi-document composition, generic standard rule library) are *not* on this
+trunk; the related issues (#52–#58) are deferred indefinitely.
+
+The list in `docs/mvp-readiness.md` under "Upgrade Path After MVP" is an idea
+dump from the MVP cut, not a prioritized roadmap.  Treat #63 as the source of
+truth for what "next" means.
+
 ## Why deterministic gates remain authoritative
 
 `gate-keeper` is a **compiler for merge gates**, not an AI reviewer.  Its value
