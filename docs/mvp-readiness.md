@@ -102,6 +102,14 @@ verifiable without hidden context. Check off items with `uv run` commands and
 
 ## Upgrade Path After MVP
 
+> **Note**: The list below is an idea dump from the MVP cut, **not** a prioritized
+> roadmap.  The project's actual post-MVP trunk is *semantic rubric backend
+> quality* (umbrella tracker: #63, gateway: #51); see `docs/llm-rubric.md`
+> "Project trunk" section.  Items below may or may not become work items.
+> Provider selection is not fixed (Anthropic and OpenAI are both viable); the
+> implementation contract for credential transport is explicit dotenv loading —
+> see issue #51 for details.
+
 1. **LLM rubric backend**: Wire in an Anthropic or OpenAI provider to enable
    semantic rule evaluation. Add a `--model` or environment-variable configuration
    path. Promote high-confidence LLM results to `warning` severity; keep `advisory`
