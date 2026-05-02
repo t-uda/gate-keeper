@@ -94,10 +94,15 @@ trunk; the related issues (#52–#58) are deferred indefinitely.
 The list in `docs/mvp-readiness.md` under "Upgrade Path After MVP" is an idea
 dump from the MVP cut, not a prioritized roadmap.  Treat #63 as the source of
 truth for what "next" means for semantic-rubric quality work, and treat gateway
-issue #51 as the source of truth for provider wiring.  In particular, follow the
-Anthropic-only, explicit-dotenv contract from #51 rather than any older guidance
-on this page about generic provider autodetection via environment variables such
-as `OPENAI_API_KEY`.
+issue #51 as the source of truth for provider wiring details.
+
+Provider selection is **not fixed** — Anthropic and OpenAI are both viable
+targets.  The one implementation constraint from issue #51 is credential
+transport: load the provider env file explicitly via `python-dotenv` rather than
+reading from `os.environ` directly (the `os.environ` pass-through route was
+rejected to avoid collisions with the host container's global API-key
+environment).  The extension-point guidance on this page (`GATE_KEEPER_LLM_PROVIDER`,
+`OPENAI_API_KEY`, etc.) remains valid as-is.
 
 ## Why deterministic gates remain authoritative
 
