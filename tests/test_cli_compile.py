@@ -1,4 +1,5 @@
 """Tests for gate-keeper compile command."""
+
 from __future__ import annotations
 
 import json

@@ -1,9 +1,8 @@
 """Tests for the Markdown rule document parser."""
+
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from gate_keeper.models import Backend, Confidence, RuleKind, Severity
 from gate_keeper.parser import parse, parse_file
@@ -14,6 +13,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "parser"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse(content: str) -> list:
     return parse("test.md", content).rules
@@ -26,6 +26,7 @@ def _texts(content: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # ATX heading context
 # ---------------------------------------------------------------------------
+
 
 class TestHeadingContext:
     def test_rule_under_heading_carries_heading(self):
@@ -58,6 +59,7 @@ class TestHeadingContext:
 # ---------------------------------------------------------------------------
 # Bullet list rules
 # ---------------------------------------------------------------------------
+
 
 class TestBulletRules:
     def test_normative_bullet_extracted(self):
@@ -129,6 +131,7 @@ class TestBulletRules:
 # Ordered list rules
 # ---------------------------------------------------------------------------
 
+
 class TestOrderedListRules:
     def test_normative_ordered_item_extracted(self):
         texts = _texts("1. Every PR must have a description.\n")
@@ -154,6 +157,7 @@ class TestOrderedListRules:
 # ---------------------------------------------------------------------------
 # Task checkboxes
 # ---------------------------------------------------------------------------
+
 
 class TestTaskCheckboxes:
     def test_unchecked_task_extracted(self):
@@ -186,6 +190,7 @@ class TestTaskCheckboxes:
 # ---------------------------------------------------------------------------
 # Normative paragraphs
 # ---------------------------------------------------------------------------
+
 
 class TestNormativeParagraphs:
     def test_normative_paragraph_extracted(self):
@@ -221,6 +226,7 @@ class TestNormativeParagraphs:
 # ---------------------------------------------------------------------------
 # Code fence exclusion
 # ---------------------------------------------------------------------------
+
 
 class TestCodeFenceExclusion:
     def test_backtick_fence_content_ignored(self):
@@ -262,6 +268,7 @@ class TestCodeFenceExclusion:
 # Source location metadata
 # ---------------------------------------------------------------------------
 
+
 class TestSourceLocation:
     def test_line_number_is_one_based(self):
         rules = _parse("- Must review.\n")
@@ -302,6 +309,7 @@ class TestSourceLocation:
 # IR field defaults
 # ---------------------------------------------------------------------------
 
+
 class TestIRDefaults:
     def test_kind_is_semantic_rubric(self):
         rules = _parse("- Must review.\n")
@@ -328,15 +336,14 @@ class TestIRDefaults:
 # Fixture file integration
 # ---------------------------------------------------------------------------
 
+
 class TestFixtureFiles:
     def test_basic_rules_fixture(self):
         rules = parse_file(FIXTURES / "basic-rules.md").rules
         texts = [r.text for r in rules]
         # Three normative bullets + three task checkboxes; two normative ordered items
         # Non-normative bullets and narrative ignored
-        normative_bullets = [t for t in texts if any(
-            kw in t.lower() for kw in ("must", "should", "never")
-        )]
+        normative_bullets = [t for t in texts if any(kw in t.lower() for kw in ("must", "should", "never"))]
         assert len(normative_bullets) >= 3
         # Task checkboxes always present regardless of keywords
         task_texts = {"Tests pass", "Code reviewed", "Documentation updated"}

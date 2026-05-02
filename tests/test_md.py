@@ -4,6 +4,7 @@ Focused tests for strip_fenced_blocks and the task-box regexes.
 The task-box patterns are also exercised indirectly via
 test_filesystem_backend.py::TestMarkdownTasksComplete.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -111,22 +112,28 @@ class TestStripFencedBlocks:
 
 
 class TestTaskBoxRegexes:
-    @pytest.mark.parametrize("line", [
-        "- [ ] item",
-        "* [ ] item",
-        "+ [ ] item",
-        "  - [ ] indented",
-        "\t- [ ] tab-indented",
-    ])
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "- [ ] item",
+            "* [ ] item",
+            "+ [ ] item",
+            "  - [ ] indented",
+            "\t- [ ] tab-indented",
+        ],
+    )
     def test_unchecked_matches(self, line):
         assert TASK_UNCHECKED_RE.search(line) is not None
 
-    @pytest.mark.parametrize("line", [
-        "- [x] done",
-        "- [X] done",
-        "* [x] done",
-        "  - [X] indented",
-    ])
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "- [x] done",
+            "- [X] done",
+            "* [x] done",
+            "  - [X] indented",
+        ],
+    )
     def test_checked_matches(self, line):
         assert TASK_CHECKED_RE.search(line) is not None
 

@@ -3,6 +3,7 @@
 Each backend receives a Rule and a target, and returns a Diagnostic.
 Implementations must never raise — unexpected errors become ERROR diagnostics.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

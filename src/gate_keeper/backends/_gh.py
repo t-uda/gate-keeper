@@ -11,6 +11,7 @@ Provides:
 None of these functions perform per-rule logic; they are shared infrastructure
 consumed by per-rule checks landing in issues #9-#13.
 """
+
 from __future__ import annotations
 
 import json

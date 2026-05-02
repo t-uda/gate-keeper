@@ -1,4 +1,5 @@
 """Tests for gate-keeper explain command."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,7 +27,10 @@ def test_explain_shows_source_lines(capsys):
     captured = capsys.readouterr()
     lines = captured.out.splitlines()
     # At least one header line of the form  path:N: [backend/confidence] id: kind
-    header_lines = [l for l in lines if ".md:" in l and "[" in l and "/high" in l or "/medium" in l or "/low" in l]
+    level_suffixes = ("/high", "/medium", "/low")
+    header_lines = [
+        line for line in lines if ".md:" in line and "[" in line and any(s in line for s in level_suffixes)
+    ]
     assert len(header_lines) > 0
 
 
@@ -52,7 +56,7 @@ def test_explain_shows_reason(capsys):
     rc = main(["explain", str(EXAMPLE_DOC)])
     assert rc == 0
     captured = capsys.readouterr()
-    reason_lines = [l for l in captured.out.splitlines() if l.strip().startswith("reason:")]
+    reason_lines = [line for line in captured.out.splitlines() if line.strip().startswith("reason:")]
     assert len(reason_lines) > 0
 
 

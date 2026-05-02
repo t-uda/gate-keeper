@@ -11,12 +11,10 @@ For the threads handler the two gh calls happen sequentially:
 So _make_run_gh_sequence is used with a two-element queue when both
 calls are exercised.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any
-
-import pytest
 
 from gate_keeper.backends import _gh, _target
 from gate_keeper.backends import github as gh_backend
@@ -33,7 +31,6 @@ from gate_keeper.models import (
     Status,
 )
 from gate_keeper.validator import validate
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,21 +103,23 @@ def _graphql_response(
     end_cursor: str | None = "Y3Vy",
 ) -> str:
     """Build a well-formed GraphQL response JSON string."""
-    return json.dumps({
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": nodes,
-                        "pageInfo": {
-                            "hasNextPage": has_next_page,
-                            "endCursor": end_cursor,
-                        },
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": nodes,
+                            "pageInfo": {
+                                "hasNextPage": has_next_page,
+                                "endCursor": end_cursor,
+                            },
+                        }
                     }
                 }
             }
         }
-    })
+    )
 
 
 def _make_thread(
@@ -162,6 +161,7 @@ def _check(monkeypatch, nodes: list[dict], **kwargs) -> Diagnostic:
 # Zero nodes → PASS
 # ---------------------------------------------------------------------------
 
+
 class TestZeroNodes:
     def test_empty_nodes_passes(self, monkeypatch):
         diag = _check(monkeypatch, [])
@@ -185,6 +185,7 @@ class TestZeroNodes:
 # One resolved node only → PASS
 # ---------------------------------------------------------------------------
 
+
 class TestAllResolved:
     def test_single_resolved_passes(self, monkeypatch):
         diag = _check(monkeypatch, [_make_thread(is_resolved=True)])
@@ -206,6 +207,7 @@ class TestAllResolved:
 # ---------------------------------------------------------------------------
 # One unresolved node → FAIL
 # ---------------------------------------------------------------------------
+
 
 class TestOneUnresolved:
     def test_single_unresolved_fails(self, monkeypatch):
@@ -231,6 +233,7 @@ class TestOneUnresolved:
 # Mix: one resolved + one unresolved → FAIL, only unresolved in list
 # ---------------------------------------------------------------------------
 
+
 class TestMixedThreads:
     def test_mix_one_resolved_one_unresolved_fails(self, monkeypatch):
         nodes = [
@@ -251,12 +254,10 @@ class TestMixedThreads:
 # Three unresolved → FAIL, count=3
 # ---------------------------------------------------------------------------
 
+
 class TestMultipleUnresolved:
     def test_three_unresolved_fails_count_three(self, monkeypatch):
-        nodes = [
-            _make_thread(is_resolved=False, path=f"file{i}.py", line=i * 10)
-            for i in range(3)
-        ]
+        nodes = [_make_thread(is_resolved=False, path=f"file{i}.py", line=i * 10) for i in range(3)]
         diag = _check(monkeypatch, nodes)
         assert diag.status is Status.FAIL
         ev = diag.evidence[0]
@@ -268,6 +269,7 @@ class TestMultipleUnresolved:
 # ---------------------------------------------------------------------------
 # Non-bool isResolved → treated as unresolved (conservative)
 # ---------------------------------------------------------------------------
+
 
 class TestNonBoolIsResolved:
     def test_string_is_resolved_treated_as_unresolved(self, monkeypatch):
@@ -311,6 +313,7 @@ class TestNonBoolIsResolved:
 # Pagination: hasNextPage true → UNAVAILABLE
 # ---------------------------------------------------------------------------
 
+
 class TestPagination:
     def test_has_next_page_is_unavailable(self, monkeypatch):
         _patch_both(
@@ -339,18 +342,20 @@ class TestPagination:
 
     def test_missing_has_next_page_fails_closed(self, monkeypatch):
         """If pageInfo.hasNextPage is absent, treat as paginated (UNAVAILABLE)."""
-        body = json.dumps({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "nodes": [],
-                            "pageInfo": {"endCursor": None},  # hasNextPage missing
+        body = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [],
+                                "pageInfo": {"endCursor": None},  # hasNextPage missing
+                            }
                         }
                     }
                 }
             }
-        })
+        )
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
@@ -362,18 +367,20 @@ class TestPagination:
         assert diag.evidence[0].kind == "gh_pagination_unavailable"
 
     def test_null_has_next_page_fails_closed(self, monkeypatch):
-        body = json.dumps({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "nodes": [],
-                            "pageInfo": {"hasNextPage": None, "endCursor": None},
+        body = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": None, "endCursor": None},
+                            }
                         }
                     }
                 }
             }
-        })
+        )
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
@@ -385,18 +392,20 @@ class TestPagination:
         assert diag.evidence[0].kind == "gh_pagination_unavailable"
 
     def test_non_bool_has_next_page_fails_closed(self, monkeypatch):
-        body = json.dumps({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "nodes": [],
-                            "pageInfo": {"hasNextPage": "false", "endCursor": None},
+        body = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": "false", "endCursor": None},
+                            }
                         }
                     }
                 }
             }
-        })
+        )
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
@@ -412,14 +421,17 @@ class TestPagination:
 # GraphQL errors in response → UNAVAILABLE / gh_graphql_error
 # ---------------------------------------------------------------------------
 
+
 class TestGraphqlErrors:
     def _graphql_error_response(self, errors: list[dict]) -> str:
         return json.dumps({"errors": errors})
 
     def test_graphql_errors_unavailable(self, monkeypatch):
-        error_response = self._graphql_error_response([
-            {"message": "Could not resolve to a Repository"},
-        ])
+        error_response = self._graphql_error_response(
+            [
+                {"message": "Could not resolve to a Repository"},
+            ]
+        )
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(error_response))
         rule = _make_github_rule()
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -456,6 +468,7 @@ class TestGraphqlErrors:
 # Missing data key → UNAVAILABLE / gh_missing_field
 # ---------------------------------------------------------------------------
 
+
 class TestMissingFields:
     def test_missing_data_key_unavailable(self, monkeypatch):
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(json.dumps({"other": "stuff"})))
@@ -487,9 +500,7 @@ class TestMissingFields:
         assert "pullRequest" in ev.data["field"]
 
     def test_missing_review_threads_key_unavailable(self, monkeypatch):
-        response = json.dumps({
-            "data": {"repository": {"pullRequest": {"other": "stuff"}}}
-        })
+        response = json.dumps({"data": {"repository": {"pullRequest": {"other": "stuff"}}}})
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _ok(response))
         rule = _make_github_rule()
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -503,6 +514,7 @@ class TestMissingFields:
 # gh non-zero exit → UNAVAILABLE / gh_failure
 # ---------------------------------------------------------------------------
 
+
 class TestGhFailures:
     def test_gh_nonzero_exit_unavailable(self, monkeypatch):
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), _fail(stderr="rate limit exceeded", returncode=1))
@@ -513,9 +525,11 @@ class TestGhFailures:
         assert ev.kind == "gh_failure"
 
     def test_gh_missing_binary_unavailable(self, monkeypatch):
-        monkeypatch.setattr(_target, "run_gh", _make_run_gh_sequence([
-            _fail(stderr="gh binary not found", returncode=127, binary_missing=True)
-        ]))
+        monkeypatch.setattr(
+            _target,
+            "run_gh",
+            _make_run_gh_sequence([_fail(stderr="gh binary not found", returncode=127, binary_missing=True)]),
+        )
         rule = _make_github_rule()
         diag = gh_backend.check(rule, "owner/repo#42")
         assert diag.status is Status.UNAVAILABLE
@@ -524,9 +538,7 @@ class TestGhFailures:
         assert ev.kind == "gh_missing"
 
     def test_gh_json_parse_error_unavailable(self, monkeypatch):
-        bad_json = _gh.GhResult(
-            ok=True, stdout="not valid json {{{", stderr="", returncode=0, cmd=("gh",)
-        )
+        bad_json = _gh.GhResult(ok=True, stdout="not valid json {{{", stderr="", returncode=0, cmd=("gh",))
         _patch_both(monkeypatch, _ok(_RESOLVE_OK), bad_json)
         rule = _make_github_rule()
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -538,6 +550,7 @@ class TestGhFailures:
 # ---------------------------------------------------------------------------
 # Command construction verification
 # ---------------------------------------------------------------------------
+
 
 class TestCommandConstruction:
     def test_graphql_command_contains_expected_args(self, monkeypatch):
@@ -558,7 +571,6 @@ class TestCommandConstruction:
         rule = _make_github_rule()
         gh_backend.check(rule, "owner/repo#42")
 
-        argv_str = " ".join(captured_args)
         assert "api" in captured_args
         assert "graphql" in captured_args
         # Verify query content mentions reviewThreads with first: 100
@@ -575,6 +587,7 @@ class TestCommandConstruction:
 # ---------------------------------------------------------------------------
 # Diagnostic round-trip: to_dict → from_dict
 # ---------------------------------------------------------------------------
+
 
 class TestDiagRoundTrip:
     def _rt(self, diag: Diagnostic) -> Diagnostic:
@@ -627,6 +640,7 @@ class TestDiagRoundTrip:
 # ---------------------------------------------------------------------------
 # End-to-end via validate()
 # ---------------------------------------------------------------------------
+
 
 class TestEndToEndValidator:
     def test_zero_unresolved_threads_exit_0(self, monkeypatch):

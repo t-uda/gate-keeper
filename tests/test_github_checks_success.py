@@ -4,12 +4,11 @@ Uses the same _patch_both / _ok / _RESOLVE_OK helpers as
 tests/test_github_pr_state.py.  A local _pr_view_checks_json helper
 builds a gh pr view payload that includes statusCheckRollup.
 """
+
 from __future__ import annotations
 
 import json
 from typing import Any
-
-import pytest
 
 from gate_keeper.backends import _gh, _target
 from gate_keeper.backends import github as gh_backend
@@ -27,7 +26,6 @@ from gate_keeper.models import (
     Status,
 )
 from gate_keeper.validator import validate
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers (mirrors test_github_pr_state.py)
@@ -100,6 +98,7 @@ def _check_rule(monkeypatch, rollup: Any = None, *, include_rollup: bool = True)
 # ---------------------------------------------------------------------------
 # Unit: _classify_check_entry
 # ---------------------------------------------------------------------------
+
 
 class TestClassifyCheckEntry:
     def test_status_context_success(self):
@@ -230,6 +229,7 @@ class TestClassifyCheckEntry:
 # Handler: missing / malformed rollup field
 # ---------------------------------------------------------------------------
 
+
 class TestMissingRollup:
     def test_missing_statuscheckrollup_field_unavailable(self, monkeypatch):
         diag = _check_rule(monkeypatch, include_rollup=False)
@@ -287,6 +287,7 @@ class TestRollupShapeFlexibility:
 # Handler: empty rollup → vacuous PASS
 # ---------------------------------------------------------------------------
 
+
 class TestEmptyRollup:
     def test_empty_rollup_passes(self, monkeypatch):
         diag = _check_rule(monkeypatch, rollup=[])
@@ -310,6 +311,7 @@ class TestEmptyRollup:
 # ---------------------------------------------------------------------------
 # Handler: single SUCCESS entries
 # ---------------------------------------------------------------------------
+
 
 class TestSingleSuccessEntries:
     def test_single_checkrun_success_passes(self, monkeypatch):
@@ -369,6 +371,7 @@ class TestSingleSuccessEntries:
 # Handler: failures / non-successful checks
 # ---------------------------------------------------------------------------
 
+
 class TestNonSuccessfulChecks:
     def test_one_failure_fails(self, monkeypatch):
         rollup = [
@@ -387,9 +390,7 @@ class TestNonSuccessfulChecks:
 
     def test_pending_fails(self, monkeypatch):
         """StatusContext with state PENDING fails."""
-        rollup = [
-            {"__typename": "StatusContext", "context": "ci/test", "state": "PENDING"}
-        ]
+        rollup = [{"__typename": "StatusContext", "context": "ci/test", "state": "PENDING"}]
         diag = _check_rule(monkeypatch, rollup=rollup)
         assert diag.status is Status.FAIL
         ev = diag.evidence[0]
@@ -441,9 +442,7 @@ class TestNonSuccessfulChecks:
         assert ev.data["non_successful"][0]["state"] == "QUEUED"
 
     def test_statuscontext_error_fails(self, monkeypatch):
-        rollup = [
-            {"__typename": "StatusContext", "context": "ci/deploy", "state": "ERROR"}
-        ]
+        rollup = [{"__typename": "StatusContext", "context": "ci/deploy", "state": "ERROR"}]
         diag = _check_rule(monkeypatch, rollup=rollup)
         assert diag.status is Status.FAIL
 
@@ -481,9 +480,7 @@ class TestNonSuccessfulChecks:
         assert diag.status is Status.FAIL
         ev = diag.evidence[0]
         assert ev.data["successful"] == ["lint"]
-        assert ev.data["non_successful"] == [
-            {"name": "ci/integration", "state": "FAILURE"}
-        ]
+        assert ev.data["non_successful"] == [{"name": "ci/integration", "state": "FAILURE"}]
         assert ev.data["total"] == 2
         assert ev.data["summary"] == "1/2 checks passed"
 
@@ -491,6 +488,7 @@ class TestNonSuccessfulChecks:
 # ---------------------------------------------------------------------------
 # Evidence: round-trip through to_dict / from_dict
 # ---------------------------------------------------------------------------
+
 
 class TestDiagRoundTrip:
     def _round_trip(self, diag: Diagnostic) -> Diagnostic:
@@ -538,6 +536,7 @@ class TestDiagRoundTrip:
 # ---------------------------------------------------------------------------
 # End-to-end via validate()
 # ---------------------------------------------------------------------------
+
 
 class TestEndToEndValidator:
     def test_all_success_passes_exit_0(self, monkeypatch):

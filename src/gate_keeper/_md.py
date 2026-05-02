@@ -4,6 +4,7 @@ Provides regex patterns and utilities for detecting Markdown task checkboxes
 and stripping fenced code blocks. Both the filesystem and github backends
 import from here to avoid duplication.
 """
+
 from __future__ import annotations
 
 import re
@@ -27,12 +28,12 @@ TASK_UNCHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[ \]", re.MULTILINE)
 # be followed only by whitespace.
 
 FENCE_START_RE = re.compile(
-    r"^ {0,3}"                       # at most 3 leading spaces
-    r"(?P<marker>`{3,}|~{3,})"       # the fence run
-    r"(?P<info>[^`\n]*)?"            # info string (no backticks for backtick fences;
-                                     # tilde fences are slightly more permissive but
-                                     # this is good enough for MVP)
-    r"\s*$"                          # only whitespace allowed after info string
+    r"^ {0,3}"  # at most 3 leading spaces
+    r"(?P<marker>`{3,}|~{3,})"  # the fence run
+    r"(?P<info>[^`\n]*)?"  # info string (no backticks for backtick fences;
+    # tilde fences are slightly more permissive but
+    # this is good enough for MVP)
+    r"\s*$"  # only whitespace allowed after info string
 )
 
 

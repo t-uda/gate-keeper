@@ -4,6 +4,7 @@ Verifies the full compile → classify → validate → exit-code pipeline throu
 the CLI entry point without any network access. GitHub backend tests in this
 file monkeypatch run_gh to avoid live calls.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,30 +37,47 @@ class TestLocalPassFixture:
 
     def test_file_exists_pass_exits_zero(self, capsys):
         """README.md must exist — pass/README.md exists → exit 0."""
-        rc = main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(PASS_README),
-            "--backend", "filesystem",
-            "--format", "text",
-        ])
+        rc = main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--format",
+                "text",
+            ]
+        )
         assert rc == EXIT_OK
 
     def test_file_exists_pass_emits_pass_diagnostic(self, capsys):
-        main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(PASS_README),
-            "--backend", "filesystem",
-        ])
+        main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+            ]
+        )
         captured = capsys.readouterr()
         assert "[filesystem/pass]" in captured.out
 
     def test_validate_pass_json_format_exit_zero(self, capsys):
-        rc = main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(PASS_README),
-            "--backend", "filesystem",
-            "--format", "json",
-        ])
+        rc = main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
         assert rc == EXIT_OK
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -77,41 +95,63 @@ class TestLocalFailFixture:
 
     def test_file_exists_missing_exits_one(self, capsys):
         """README.md must exist — fail/README.md is absent → exit 1."""
-        rc = main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(FAIL_README),
-            "--backend", "filesystem",
-            "--format", "text",
-        ])
+        rc = main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(FAIL_README),
+                "--backend",
+                "filesystem",
+                "--format",
+                "text",
+            ]
+        )
         assert rc == EXIT_FAIL
 
     def test_file_exists_missing_emits_fail_diagnostic(self, capsys):
-        main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(FAIL_README),
-            "--backend", "filesystem",
-        ])
+        main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(FAIL_README),
+                "--backend",
+                "filesystem",
+            ]
+        )
         captured = capsys.readouterr()
         assert "[filesystem/fail]" in captured.out
 
     def test_file_exists_missing_emits_useful_message(self, capsys):
         """Failing diagnostic includes the path and a useful description."""
-        main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(FAIL_README),
-            "--backend", "filesystem",
-        ])
+        main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(FAIL_README),
+                "--backend",
+                "filesystem",
+            ]
+        )
         captured = capsys.readouterr()
         assert str(FAIL_README) in captured.out
         assert "not exist" in captured.out or "absent" in captured.out or "fail" in captured.out
 
     def test_json_format_fail_has_evidence(self, capsys):
-        main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(FAIL_README),
-            "--backend", "filesystem",
-            "--format", "json",
-        ])
+        main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(FAIL_README),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data["diagnostics"]
@@ -164,20 +204,31 @@ class TestExampleRulesLocalTarget:
 
     def test_example_rules_local_target_auto_returns_exit_code(self, capsys):
         """Runs without exception; filesystem rules may pass, github rules unavailable."""
-        rc = main([
-            "validate", str(EXAMPLE_RULES),
-            "--target", str(PASS_DIR),
-            "--backend", "auto",
-        ])
+        rc = main(
+            [
+                "validate",
+                str(EXAMPLE_RULES),
+                "--target",
+                str(PASS_DIR),
+                "--backend",
+                "auto",
+            ]
+        )
         assert rc in (EXIT_OK, EXIT_FAIL)
 
     def test_example_rules_local_target_produces_diagnostics(self, capsys):
-        main([
-            "validate", str(EXAMPLE_RULES),
-            "--target", str(PASS_DIR),
-            "--backend", "auto",
-            "--format", "json",
-        ])
+        main(
+            [
+                "validate",
+                str(EXAMPLE_RULES),
+                "--target",
+                str(PASS_DIR),
+                "--backend",
+                "auto",
+                "--format",
+                "json",
+            ]
+        )
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert "diagnostics" in data
@@ -203,22 +254,26 @@ def _unavailable_result() -> _gh.GhResult:
     )
 
 
-_RESOLVE_PAYLOAD = json.dumps({
-    "number": 99,
-    "url": "https://github.com/owner/repo/pull/99",
-})
+_RESOLVE_PAYLOAD = json.dumps(
+    {
+        "number": 99,
+        "url": "https://github.com/owner/repo/pull/99",
+    }
+)
 
-_PR_VIEW_PAYLOAD = json.dumps({
-    "state": "OPEN",
-    "isDraft": False,
-    "labels": [],
-    "body": "no tasks here",
-    "statusCheckRollup": [],
-    "reviews": [],
-    "headRefName": "feat/branch",
-    "baseRefName": "main",
-    "author": {"login": "alice"},
-})
+_PR_VIEW_PAYLOAD = json.dumps(
+    {
+        "state": "OPEN",
+        "isDraft": False,
+        "labels": [],
+        "body": "no tasks here",
+        "statusCheckRollup": [],
+        "reviews": [],
+        "headRefName": "feat/branch",
+        "baseRefName": "main",
+        "author": {"login": "alice"},
+    }
+)
 
 
 class TestGithubCommandConstruction:
@@ -244,22 +299,32 @@ class TestGithubCommandConstruction:
     def test_pr_view_called_for_github_rule(self, monkeypatch, capsys):
         """GitHub backend issues a gh pr view command for GitHub rule kinds."""
         calls = self._capture_gh_calls(monkeypatch)
-        main([
-            "validate", str(EXAMPLE_RULES),
-            "--target", "https://github.com/owner/repo/pull/99",
-            "--backend", "github",
-        ])
+        main(
+            [
+                "validate",
+                str(EXAMPLE_RULES),
+                "--target",
+                "https://github.com/owner/repo/pull/99",
+                "--backend",
+                "github",
+            ]
+        )
         gh_commands = [c for c in calls if "pr" in c and "view" in c]
         assert gh_commands, "expected at least one 'gh pr view' call"
 
     def test_pr_view_includes_json_flag(self, monkeypatch, capsys):
         """gh pr view commands use --json for structured output."""
         calls = self._capture_gh_calls(monkeypatch)
-        main([
-            "validate", str(EXAMPLE_RULES),
-            "--target", "https://github.com/owner/repo/pull/99",
-            "--backend", "github",
-        ])
+        main(
+            [
+                "validate",
+                str(EXAMPLE_RULES),
+                "--target",
+                "https://github.com/owner/repo/pull/99",
+                "--backend",
+                "github",
+            ]
+        )
         pr_view_calls = [c for c in calls if "pr" in c and "view" in c]
         for call in pr_view_calls:
             assert "--json" in call, f"gh pr view call missing --json: {call}"
@@ -275,15 +340,21 @@ class TestGithubCommandConstruction:
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", spy_run_gh)
         monkeypatch.setattr("gate_keeper.backends.github.run_gh", spy_run_gh)
 
-        main([
-            "validate", str(SMOKE_RULES),
-            "--target", str(PASS_README),
-            "--backend", "filesystem",
-        ])
+        main(
+            [
+                "validate",
+                str(SMOKE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+            ]
+        )
         assert gh_calls == [], "filesystem backend must not call gh"
 
     def test_missing_gh_binary_produces_unavailable_not_crash(self, monkeypatch, capsys):
         """When gh binary is missing, GitHub rules emit UNAVAILABLE (fail-closed)."""
+
         def fake_missing(args: tuple[str, ...]) -> _gh.GhResult:
             return _gh.GhResult(
                 ok=False,
@@ -297,12 +368,18 @@ class TestGithubCommandConstruction:
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", fake_missing)
         monkeypatch.setattr("gate_keeper.backends.github.run_gh", fake_missing)
 
-        rc = main([
-            "validate", str(EXAMPLE_RULES),
-            "--target", "https://github.com/owner/repo/pull/1",
-            "--backend", "github",
-            "--format", "json",
-        ])
+        rc = main(
+            [
+                "validate",
+                str(EXAMPLE_RULES),
+                "--target",
+                "https://github.com/owner/repo/pull/1",
+                "--backend",
+                "github",
+                "--format",
+                "json",
+            ]
+        )
         assert rc == EXIT_FAIL
         captured = capsys.readouterr()
         data = json.loads(captured.out)

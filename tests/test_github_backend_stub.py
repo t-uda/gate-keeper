@@ -3,9 +3,8 @@
 Acceptance criterion 2: "No unavailable evidence path exits 0."
 We verify that compute_exit_code treats these diagnostics as non-zero.
 """
-from __future__ import annotations
 
-from pathlib import Path
+from __future__ import annotations
 
 import pytest
 
@@ -60,12 +59,17 @@ class TestGithubBackendStub:
 
         from gate_keeper.backends import _gh, _target
 
-        resolve_payload = json.dumps(
-            {"number": 42, "url": "https://github.com/owner/repo/pull/42"}
-        )
+        resolve_payload = json.dumps({"number": 42, "url": "https://github.com/owner/repo/pull/42"})
         pr_view_payload = json.dumps(
-            {"state": "OPEN", "isDraft": False, "labels": [], "body": "",
-             "statusCheckRollup": [], "reviews": [], "author": {"login": "octocat"}}
+            {
+                "state": "OPEN",
+                "isDraft": False,
+                "labels": [],
+                "body": "",
+                "statusCheckRollup": [],
+                "reviews": [],
+                "author": {"login": "octocat"},
+            }
         )
 
         call_count = [0]
@@ -74,11 +78,17 @@ class TestGithubBackendStub:
             call_count[0] += 1
             if call_count[0] == 1:
                 return _gh.GhResult(
-                    ok=True, stdout=resolve_payload, stderr="", returncode=0,
+                    ok=True,
+                    stdout=resolve_payload,
+                    stderr="",
+                    returncode=0,
                     cmd=("gh", *args),
                 )
             return _gh.GhResult(
-                ok=True, stdout=pr_view_payload, stderr="", returncode=0,
+                ok=True,
+                stdout=pr_view_payload,
+                stderr="",
+                returncode=0,
                 cmd=("gh", *args),
             )
 
