@@ -34,12 +34,14 @@ The initial execution board is
 
 ## Development
 
-Requires Python 3.11 and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.10 or later and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
 uv run gate-keeper --help
 uv run pytest
+uvx ruff check .
+uvx pyright
 ```
 
-CI runs the same `uv sync` and `uv run pytest` steps on Python 3.11.
+CI runs the same `uv sync` and `uv run pytest` steps on Python 3.10.

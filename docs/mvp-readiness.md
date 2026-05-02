@@ -56,7 +56,7 @@ verifiable without hidden context. Check off items with `uv run` commands and
   SourceLocation).
 - [x] `docs/llm-rubric.md` explains the stub and its fail-closed behavior.
 - [x] `docs/example-rules.md` demonstrates filesystem and GitHub rule types.
-- [x] README documents Python 3.11 requirement and development commands.
+- [x] README documents Python 3.10 requirement and development commands.
 - [x] README links to this checklist.
 
 ## Tests and CI
@@ -68,7 +68,7 @@ verifiable without hidden context. Check off items with `uv run` commands and
 - [x] GitHub tests verify fail-closed behavior for missing binary, auth failure,
   and pagination.
 - [x] CI workflow (`.github/workflows/ci.yml`) runs `uv sync` and `uv run pytest`
-  on Python 3.11 for every push and pull request.
+  on Python 3.10 for every push and pull request.
 
 ## Known Limitations
 

@@ -19,6 +19,8 @@
 uv sync
 uv run gate-keeper --help
 uv run pytest
+uvx ruff check .
+uvx pyright
 ~~~
 
 ## Code Conventions
