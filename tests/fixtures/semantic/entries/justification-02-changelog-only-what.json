@@ -1,0 +1,12 @@
+{
+  "rule_text": "Each changelog entry explains the user-visible reason for the change, not just what changed.",
+  "target": {
+    "kind": "path",
+    "value": "changelog_no_rationale.md"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["why", "missing", "rationale"],
+  "category": "justification",
+  "intended_backend": "llm-rubric",
+  "notes": "Entries say 'Updated', 'Refactored', 'Cleaned up' with no user-visible rationale."
+}

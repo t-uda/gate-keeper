@@ -1,0 +1,12 @@
+{
+  "rule_text": "Boolean CLI flags are named in the positive form (no `--no-foo` for the default-on case).",
+  "target": {
+    "kind": "inline",
+    "value": "--strict           Treat advisory diagnostics as errors.\n--colour           Colourise the text output.\n--explain          Include classifier explanations in the report.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["positive", "strict", "colour"],
+  "category": "naming",
+  "intended_backend": "llm-rubric",
+  "notes": "Three flags, all positive form."
+}

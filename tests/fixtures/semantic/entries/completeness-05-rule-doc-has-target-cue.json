@@ -1,0 +1,12 @@
+{
+  "rule_text": "Each rule names the artefact it judges.",
+  "target": {
+    "kind": "inline",
+    "value": "- The pull request title is at most 70 characters.\n- The CHANGELOG file has an Unreleased section.\n- The repository contains a LICENSE file at the top level.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["pull request", "CHANGELOG", "LICENSE"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Each bullet identifies its target artefact (PR title, CHANGELOG, LICENSE)."
+}

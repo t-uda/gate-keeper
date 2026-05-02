@@ -1,0 +1,12 @@
+{
+  "rule_text": "Boolean CLI flags are named in the positive form (no `--no-foo` for the default-on case).",
+  "target": {
+    "kind": "inline",
+    "value": "--no-strict        Do not treat advisory diagnostics as errors. (default)\n--no-colour        Disable colour. (default)\n--no-explain       Hide classifier explanations. (default)\n"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["--no-", "negative", "default-on"],
+  "category": "naming",
+  "intended_backend": "llm-rubric",
+  "notes": "All flags are `--no-X` with the default-on case described in negative form."
+}

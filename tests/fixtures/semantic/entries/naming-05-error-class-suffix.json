@@ -1,0 +1,12 @@
+{
+  "rule_text": "Exception class names end with `Error`.",
+  "target": {
+    "kind": "inline",
+    "value": "class RuleParseError(Exception):\n    ...\n\nclass BackendUnavailableError(Exception):\n    ...\n\nclass ClassifierAmbiguityError(Exception):\n    ...\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["Error", "suffix", "Exception"],
+  "category": "naming",
+  "intended_backend": "llm-rubric",
+  "notes": "All three exception classes end in 'Error'."
+}

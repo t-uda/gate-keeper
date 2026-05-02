@@ -1,0 +1,12 @@
+{
+  "rule_text": "The README quickstart contains the install step, an authoring step, and a run step.",
+  "target": {
+    "kind": "path",
+    "value": "readme_quickstart_complete.md"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["install", "write", "run"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Quickstart numbered list covers install, author rules, run validate."
+}

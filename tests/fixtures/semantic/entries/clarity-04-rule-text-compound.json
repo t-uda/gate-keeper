@@ -1,0 +1,12 @@
+{
+  "rule_text": "Each rule bullet expresses a single judgable claim.",
+  "target": {
+    "kind": "inline",
+    "value": "- The README documents install, configuration, the validate command, the compile command, and CI integration, and includes a quickstart that fits in 30 lines.\n"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["multiple", "compound", "and"],
+  "category": "clarity",
+  "intended_backend": "llm-rubric",
+  "notes": "Single bullet bundles five distinct documentation requirements with conjunctions."
+}

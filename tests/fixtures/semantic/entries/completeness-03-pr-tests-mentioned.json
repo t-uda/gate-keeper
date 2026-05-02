@@ -1,0 +1,12 @@
+{
+  "rule_text": "The PR description states how the change was tested.",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_strong.md"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["pytest", "Verification", "manual"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Has a Verification section listing pytest run and a manual CLI invocation."
+}

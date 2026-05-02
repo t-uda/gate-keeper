@@ -1,0 +1,12 @@
+{
+  "rule_text": "The PR description states how the change was tested.",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_weak.md"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["no", "tests", "verification"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Body says 'Should be fine.' with no test or verification evidence."
+}

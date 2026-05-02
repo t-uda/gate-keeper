@@ -1,0 +1,12 @@
+{
+  "rule_text": "Function names describe what the function returns or does, not how it is implemented.",
+  "target": {
+    "kind": "inline",
+    "value": "def parse_target(value: str) -> Target:\n    ...\n\ndef classify_rule(rule: Rule) -> Backend:\n    ...\n\ndef render_diagnostic(diag: Diagnostic) -> str:\n    ...\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["parse", "classify", "render", "purpose"],
+  "category": "naming",
+  "intended_backend": "llm-rubric",
+  "notes": "All three names are verb-purpose, no implementation leakage."
+}

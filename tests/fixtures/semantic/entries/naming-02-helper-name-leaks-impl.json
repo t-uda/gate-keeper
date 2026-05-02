@@ -1,0 +1,12 @@
+{
+  "rule_text": "Function names describe what the function returns or does, not how it is implemented.",
+  "target": {
+    "kind": "inline",
+    "value": "def regex_loop_for_target(value: str) -> Target:\n    ...\n\ndef dict_lookup_then_fallback(rule: Rule) -> Backend:\n    ...\n\ndef stringbuilder_diagnostic(diag: Diagnostic) -> str:\n    ...\n"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["regex", "dict", "stringbuilder", "implementation"],
+  "category": "naming",
+  "intended_backend": "llm-rubric",
+  "notes": "Each name encodes the implementation strategy (regex loop, dict lookup, stringbuilder) instead of intent."
+}

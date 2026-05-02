@@ -1,0 +1,12 @@
+{
+  "rule_text": "The commit message body explains why the change was made.",
+  "target": {
+    "kind": "inline",
+    "value": "fix(classifier): switch to longest-match dispatch\n\nGreedy first-match was selecting `github_pr_open` over `github_non_author_approval`\nbecause the former's pattern was registered first. Reproduced in #211 against a\ndraft PR; longest-match resolves it without breaking existing rule fixtures.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["greedy", "first-match", "#211", "draft"],
+  "category": "justification",
+  "intended_backend": "llm-rubric",
+  "notes": "Body names the failure mode (greedy first-match), the reproducer (#211), and why the fix is safe."
+}

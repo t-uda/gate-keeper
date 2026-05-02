@@ -1,0 +1,12 @@
+{
+  "rule_text": "Error messages name the offending input and the expected shape.",
+  "target": {
+    "kind": "inline",
+    "value": "Rule.severity: 'critical' is not a valid Severity; expected one of ['advisory', 'error', 'warning']\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["critical", "expected", "Severity"],
+  "category": "clarity",
+  "intended_backend": "llm-rubric",
+  "notes": "Names the bad value ('critical') and the valid set."
+}
