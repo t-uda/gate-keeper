@@ -93,7 +93,11 @@ trunk; the related issues (#52–#58) are deferred indefinitely.
 
 The list in `docs/mvp-readiness.md` under "Upgrade Path After MVP" is an idea
 dump from the MVP cut, not a prioritized roadmap.  Treat #63 as the source of
-truth for what "next" means.
+truth for what "next" means for semantic-rubric quality work, and treat gateway
+issue #51 as the source of truth for provider wiring.  In particular, follow the
+Anthropic-only, explicit-dotenv contract from #51 rather than any older guidance
+on this page about generic provider autodetection via environment variables such
+as `OPENAI_API_KEY`.
 
 ## Why deterministic gates remain authoritative
 
