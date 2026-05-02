@@ -6,6 +6,7 @@ high-confidence filesystem (explicit predicates), then weaker heuristics, and
 finally semantic fallback. Filesystem checks run before the PR-heading catch-all
 so that file/text rules embedded in PR documents still route to the right backend.
 """
+
 from __future__ import annotations
 
 import re
@@ -133,80 +134,161 @@ def _classify_rule(rule: Rule) -> Rule:
 
     # --- High-confidence GitHub ---
     if _DRAFT_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_NOT_DRAFT, Backend.GITHUB, Confidence.HIGH,
-                     "explicit PR draft-state keyword")
+        return _make(
+            rule,
+            RuleKind.GITHUB_NOT_DRAFT,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit PR draft-state keyword",
+        )
 
     if _PR_OPEN_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_PR_OPEN, Backend.GITHUB, Confidence.HIGH,
-                     "explicit PR open-state reference")
+        return _make(
+            rule, RuleKind.GITHUB_PR_OPEN, Backend.GITHUB, Confidence.HIGH, "explicit PR open-state reference"
+        )
 
     if _CHECKS_HIGH_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_CHECKS_SUCCESS, Backend.GITHUB, Confidence.HIGH,
-                     "explicit CI/status-check keyword")
+        return _make(
+            rule,
+            RuleKind.GITHUB_CHECKS_SUCCESS,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit CI/status-check keyword",
+        )
 
     if _THREADS_HIGH_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_THREADS_RESOLVED, Backend.GITHUB, Confidence.HIGH,
-                     "explicit review-thread or resolved-thread keyword")
+        return _make(
+            rule,
+            RuleKind.GITHUB_THREADS_RESOLVED,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit review-thread or resolved-thread keyword",
+        )
 
     if _APPROVAL_HIGH_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_NON_AUTHOR_APPROVAL, Backend.GITHUB, Confidence.HIGH,
-                     "explicit non-author-approval or independent-review keyword")
+        return _make(
+            rule,
+            RuleKind.GITHUB_NON_AUTHOR_APPROVAL,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit non-author-approval or independent-review keyword",
+        )
 
     if _LABELS_HIGH_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_LABELS_ABSENT, Backend.GITHUB, Confidence.HIGH,
-                     "explicit blocking-label or do-not-merge keyword")
+        return _make(
+            rule,
+            RuleKind.GITHUB_LABELS_ABSENT,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit blocking-label or do-not-merge keyword",
+        )
 
     if _PR_TASK_HIGH_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_TASKS_COMPLETE, Backend.GITHUB, Confidence.HIGH,
-                     "explicit PR task/checklist reference")
+        return _make(
+            rule,
+            RuleKind.GITHUB_TASKS_COMPLETE,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit PR task/checklist reference",
+        )
 
     # --- Medium-confidence GitHub (keyword signals without full explicit phrasing) ---
     if _APPROVAL_MEDIUM_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_NON_AUTHOR_APPROVAL, Backend.GITHUB, Confidence.MEDIUM,
-                     "approval/reviewer keyword without explicit non-author phrasing")
+        return _make(
+            rule,
+            RuleKind.GITHUB_NON_AUTHOR_APPROVAL,
+            Backend.GITHUB,
+            Confidence.MEDIUM,
+            "approval/reviewer keyword without explicit non-author phrasing",
+        )
 
     if _LABELS_MEDIUM_RE.search(text):
-        return _make(rule, RuleKind.GITHUB_LABELS_ABSENT, Backend.GITHUB, Confidence.MEDIUM,
-                     "label keyword without explicit blocking context")
+        return _make(
+            rule,
+            RuleKind.GITHUB_LABELS_ABSENT,
+            Backend.GITHUB,
+            Confidence.MEDIUM,
+            "label keyword without explicit blocking context",
+        )
 
     if _CHECKS_MEDIUM_RE.search(text) and _PR_HEADING_RE.search(heading):
-        return _make(rule, RuleKind.GITHUB_CHECKS_SUCCESS, Backend.GITHUB, Confidence.MEDIUM,
-                     "check keyword under a PR/merge-gate heading")
+        return _make(
+            rule,
+            RuleKind.GITHUB_CHECKS_SUCCESS,
+            Backend.GITHUB,
+            Confidence.MEDIUM,
+            "check keyword under a PR/merge-gate heading",
+        )
 
     # --- High-confidence filesystem (checked before the PR-heading heuristic so
     #     that explicit file/text rules under a PR section route to filesystem) ---
     if _FILE_ABSENT_HIGH_RE.search(text):
-        return _make(rule, RuleKind.FILE_ABSENT, Backend.FILESYSTEM, Confidence.HIGH,
-                     "explicit must-not-exist or is-absent predicate")
+        return _make(
+            rule,
+            RuleKind.FILE_ABSENT,
+            Backend.FILESYSTEM,
+            Confidence.HIGH,
+            "explicit must-not-exist or is-absent predicate",
+        )
 
     if _FILE_EXISTS_HIGH_RE.search(text):
-        return _make(rule, RuleKind.FILE_EXISTS, Backend.FILESYSTEM, Confidence.HIGH,
-                     "explicit must-exist or must-be-present predicate")
+        return _make(
+            rule,
+            RuleKind.FILE_EXISTS,
+            Backend.FILESYSTEM,
+            Confidence.HIGH,
+            "explicit must-exist or must-be-present predicate",
+        )
 
     if _TEXT_FORBIDDEN_HIGH_RE.search(text):
-        return _make(rule, RuleKind.TEXT_FORBIDDEN, Backend.FILESYSTEM, Confidence.HIGH,
-                     "explicit must-not-contain or forbidden-text wording")
+        return _make(
+            rule,
+            RuleKind.TEXT_FORBIDDEN,
+            Backend.FILESYSTEM,
+            Confidence.HIGH,
+            "explicit must-not-contain or forbidden-text wording",
+        )
 
     if _TEXT_REQUIRED_HIGH_RE.search(text):
-        return _make(rule, RuleKind.TEXT_REQUIRED, Backend.FILESYSTEM, Confidence.HIGH,
-                     "explicit must-contain or text-required wording")
+        return _make(
+            rule,
+            RuleKind.TEXT_REQUIRED,
+            Backend.FILESYSTEM,
+            Confidence.HIGH,
+            "explicit must-contain or text-required wording",
+        )
 
     # --- Medium-confidence filesystem ---
     if _PATH_MEDIUM_RE.search(text):
-        return _make(rule, RuleKind.PATH_MATCHES, Backend.FILESYSTEM, Confidence.MEDIUM,
-                     "path/directory keyword without explicit existence predicate")
+        return _make(
+            rule,
+            RuleKind.PATH_MATCHES,
+            Backend.FILESYSTEM,
+            Confidence.MEDIUM,
+            "path/directory keyword without explicit existence predicate",
+        )
 
     # --- PR/GitHub heading heuristic (no stronger signal matched above) ---
     if _PR_HEADING_RE.search(heading):
-        return _make(rule, RuleKind.GITHUB_TASKS_COMPLETE, Backend.GITHUB, Confidence.MEDIUM,
-                     "item under a PR/merge-gate heading with no stronger signal")
+        return _make(
+            rule,
+            RuleKind.GITHUB_TASKS_COMPLETE,
+            Backend.GITHUB,
+            Confidence.MEDIUM,
+            "item under a PR/merge-gate heading with no stronger signal",
+        )
 
     # --- Bare task-checkbox heuristic ---
     # Rules without a normative keyword can only have been emitted by the parser
     # from a task-checkbox line (bullets and paragraphs require normative keywords).
     if not _NORMATIVE_RE.search(text):
-        return _make(rule, RuleKind.MARKDOWN_TASKS_COMPLETE, Backend.FILESYSTEM, Confidence.MEDIUM,
-                     "no normative keyword — likely a bare task-checkbox item")
+        return _make(
+            rule,
+            RuleKind.MARKDOWN_TASKS_COMPLETE,
+            Backend.FILESYSTEM,
+            Confidence.MEDIUM,
+            "no normative keyword — likely a bare task-checkbox item",
+        )
 
     # --- Fallback: ambiguous semantic judgement ---
     return rule  # retains semantic_rubric / llm-rubric / low confidence from parser

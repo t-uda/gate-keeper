@@ -3,10 +3,8 @@
 All backend interactions use lightweight stubs registered via the registry so
 no filesystem I/O or network access is required.
 """
-from __future__ import annotations
 
-from pathlib import Path
-from typing import Callable
+from __future__ import annotations
 
 import pytest
 
@@ -16,7 +14,6 @@ from gate_keeper.models import (
     Confidence,
     Diagnostic,
     DiagnosticReport,
-    Evidence,
     Rule,
     RuleKind,
     Severity,
@@ -24,7 +21,6 @@ from gate_keeper.models import (
     Status,
 )
 from gate_keeper.validator import validate
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,6 +47,7 @@ def _rule(
 
 def _make_ruleset(*rules: Rule):
     from gate_keeper.models import RuleSet
+
     return RuleSet(rules=list(rules))
 
 

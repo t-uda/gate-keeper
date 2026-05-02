@@ -9,6 +9,7 @@ Provides:
 Consumers (#10-#13) should call resolve_target() at the start of each
 per-rule check and short-circuit with the returned Diagnostic on failure.
 """
+
 from __future__ import annotations
 
 import re
@@ -36,18 +37,16 @@ from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
 
 _URL_RE = re.compile(
     r"^https?://(?:www\.)?github\.com"
-    r"/([^/\s]+)"      # owner
-    r"/([^/\s]+)"      # repo
-    r"/pull/(\d+)"     # PR number
-    r"/?(?:[?#].*)?"   # optional trailing slash, query, fragment
+    r"/([^/\s]+)"  # owner
+    r"/([^/\s]+)"  # repo
+    r"/pull/(\d+)"  # PR number
+    r"/?(?:[?#].*)?"  # optional trailing slash, query, fragment
     r"$",
     re.IGNORECASE,
 )
 
 # 2. OWNER/REPO#NUMBER shorthand
-_SHORTHAND_RE = re.compile(
-    r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#(\d+)$"
-)
+_SHORTHAND_RE = re.compile(r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#(\d+)$")
 
 
 # ---------------------------------------------------------------------------

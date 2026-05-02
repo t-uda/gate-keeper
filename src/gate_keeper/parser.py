@@ -5,6 +5,7 @@ paragraphs into candidate Rule IR entries.  Classification (kind /
 backend_hint) is deferred to issue #3; all extracted rules carry the neutral
 defaults (semantic_rubric / llm-rubric / low confidence).
 """
+
 from __future__ import annotations
 
 import re
@@ -133,9 +134,7 @@ def parse(path: str, content: str) -> RuleSet:
         if bullet_m:
             text = bullet_m.group(1).strip()
             if _has_normative(text):
-                candidates.append(
-                    _Candidate(text=text, line_start=line_no, heading=heading)
-                )
+                candidates.append(_Candidate(text=text, line_start=line_no, heading=heading))
             i += 1
             continue
 
@@ -144,9 +143,7 @@ def parse(path: str, content: str) -> RuleSet:
         if ordered_m:
             text = ordered_m.group(1).strip()
             if _has_normative(text):
-                candidates.append(
-                    _Candidate(text=text, line_start=line_no, heading=heading)
-                )
+                candidates.append(_Candidate(text=text, line_start=line_no, heading=heading))
             i += 1
             continue
 

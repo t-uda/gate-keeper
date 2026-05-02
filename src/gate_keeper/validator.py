@@ -21,6 +21,7 @@ Rule ordering
 -------------
 Diagnostics are emitted in the same order as ``ruleset.rules``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -102,9 +103,7 @@ def validate(
         One ``Diagnostic`` per rule, in source order.  Never raises.
     """
     if backend != "auto" and not _registry.is_registered(backend):
-        raise ValueError(
-            f"unknown backend {backend!r}; registered names: {_registry.BACKEND_NAMES}"
-        )
+        raise ValueError(f"unknown backend {backend!r}; registered names: {_registry.BACKEND_NAMES}")
 
     diagnostics: list[Diagnostic] = []
     for rule in ruleset.rules:
@@ -125,10 +124,7 @@ def validate(
                 backend=attributed,
                 status=Status.UNAVAILABLE,
                 severity=rule.severity,
-                message=(
-                    f"no backend registered for {resolved_name!r}; "
-                    "cannot validate rule"
-                ),
+                message=(f"no backend registered for {resolved_name!r}; cannot validate rule"),
                 evidence=[
                     Evidence(
                         kind="registry_miss",

@@ -123,9 +123,7 @@ class SourceLocation:
         _require_keys(data, {"path", "line"}, {"heading"}, "SourceLocation")
         line = _expect_int(data["line"], "SourceLocation.line")
         if line < 1:
-            raise ValueError(
-                f"SourceLocation.line: expected 1-based line number, got {line}"
-            )
+            raise ValueError(f"SourceLocation.line: expected 1-based line number, got {line}")
         return cls(
             path=_expect_str(data["path"], "SourceLocation.path"),
             line=line,
@@ -274,9 +272,7 @@ class RuleSet:
                 duplicates.add(rule.id)
             seen.add(rule.id)
         if duplicates:
-            raise ValueError(
-                f"RuleSet.rules: duplicate rule ids: {sorted(duplicates)}"
-            )
+            raise ValueError(f"RuleSet.rules: duplicate rule ids: {sorted(duplicates)}")
         return cls(rules=rules)
 
     def to_dict(self) -> dict[str, Any]:

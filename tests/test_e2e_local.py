@@ -4,6 +4,7 @@ Drives the full local pipeline without GitHub auth or network access.
 Each test covers a specific filesystem rule kind against purpose-built fixtures
 under tests/fixtures/local/{pass,fail}/.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -26,11 +27,7 @@ def _ruleset():
 
 
 def _rules(kind: RuleKind) -> list:
-    return [
-        r
-        for r in _ruleset().rules
-        if r.kind is kind and r.backend_hint is Backend.FILESYSTEM
-    ]
+    return [r for r in _ruleset().rules if r.kind is kind and r.backend_hint is Backend.FILESYSTEM]
 
 
 # ---------------------------------------------------------------------------

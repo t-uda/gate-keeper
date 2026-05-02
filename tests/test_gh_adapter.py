@@ -9,12 +9,10 @@ Covers:
 - Pagination and missing-field evidence
 - Token redaction in stderr_excerpt inside evidence
 """
+
 from __future__ import annotations
 
 import subprocess
-from unittest.mock import MagicMock
-
-import pytest
 
 from gate_keeper.backends._gh import (
     GhResult,
@@ -75,7 +73,9 @@ def _make_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
 
 class TestRunGhMissing:
     def test_file_not_found_returns_failed_result(self, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("not found")))
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("not found"))
+        )
         result = run_gh(["pr", "view"])
         assert result.ok is False
         assert result.binary_missing is True
@@ -91,9 +91,7 @@ class TestRunGhMissing:
     def test_negative_returncode_is_not_missing(self):
         # SIGHUP terminates with returncode -1; this must NOT be misclassified
         # as "binary missing" — only the binary_missing flag carries that meaning.
-        result = GhResult(
-            ok=False, stdout="", stderr="", returncode=-1, cmd=("gh", "pr", "view")
-        )
+        result = GhResult(ok=False, stdout="", stderr="", returncode=-1, cmd=("gh", "pr", "view"))
         assert classify_gh_failure(result) == "failure"
 
 
@@ -104,14 +102,18 @@ class TestRunGhMissing:
 
 class TestRunGhNonZeroExit:
     def test_nonzero_exit_ok_false(self, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(stderr="something went wrong", returncode=1))
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: _make_completed(stderr="something went wrong", returncode=1)
+        )
         result = run_gh(["pr", "view", "42"])
         assert result.ok is False
         assert result.returncode == 1
         assert result.stderr == "something went wrong"
 
     def test_zero_exit_ok_true(self, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(stdout='{"number":1}', returncode=0))
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: _make_completed(stdout='{"number":1}', returncode=0)
+        )
         result = run_gh(["pr", "view"])
         assert result.ok is True
         assert result.returncode == 0
@@ -507,6 +509,7 @@ class TestTokenRedactionInEvidence:
         )
         # Manually redact as run_gh would have done
         from gate_keeper.backends._gh import _redact
+
         redacted_stderr = _redact(result.stderr)
         result_redacted = GhResult(
             ok=False,
@@ -555,10 +558,7 @@ class TestTokenRedactionInEvidence:
             # Per-arg redaction may produce either the token sentinel or the
             # auth-header sentinel; both are acceptable as long as the secret
             # is gone.
-            assert (
-                "[redacted-token]" in cmd_value
-                or "[redacted-auth-header]" in cmd_value
-            )
+            assert "[redacted-token]" in cmd_value or "[redacted-auth-header]" in cmd_value
 
     def test_github_pat_in_argv_redacted_from_evidence_cmd(self):
         fake_token = "github_pat_" + "K" * 60

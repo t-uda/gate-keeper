@@ -4,6 +4,7 @@ Acceptance criterion: "Running LLM-backed validation without configuration
 returns a non-passing diagnostic."
 We verify that compute_exit_code treats these diagnostics as non-zero.
 """
+
 from __future__ import annotations
 
 from gate_keeper.backends import llm_rubric as llm_backend

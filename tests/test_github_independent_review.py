@@ -7,12 +7,11 @@ Each test monkeypatches:
 Helper ``_pr_view_json`` accepts keyword fields including ``reviews`` and ``author``
 so callers can construct arbitrary payloads without raw JSON strings.
 """
+
 from __future__ import annotations
 
 import json
 from typing import Any
-
-import pytest
 
 from gate_keeper.backends import _gh, _target
 from gate_keeper.backends import github as gh_backend
@@ -393,6 +392,7 @@ class TestDiagnosticRoundTrip:
 
     def _make_diag(self, status: Status, approved_by: list[str], non_approved: list[dict]) -> Diagnostic:
         from gate_keeper.models import Evidence, SourceLocation
+
         return Diagnostic(
             rule_id="test-approval",
             source=SourceLocation(path="rules.md", line=1),
@@ -432,6 +432,7 @@ class TestDiagnosticRoundTrip:
 
     def test_unavailable_diag_round_trips(self):
         from gate_keeper.models import Evidence, SourceLocation
+
         d = Diagnostic(
             rule_id="test-approval",
             source=SourceLocation(path="rules.md", line=1),
@@ -463,12 +464,8 @@ class TestEndToEnd:
             author=_author("octocat"),
             reviews=[_review("alice", "APPROVED", submitted_at="2026-04-29T10:00:00Z")],
         )
-        monkeypatch.setattr(
-            _target, "run_gh", _make_run_gh_sequence([_ok(_RESOLVE_OK)])
-        )
-        monkeypatch.setattr(
-            gh_backend, "run_gh", _make_run_gh_sequence([_ok(json.dumps(payload))])
-        )
+        monkeypatch.setattr(_target, "run_gh", _make_run_gh_sequence([_ok(_RESOLVE_OK)]))
+        monkeypatch.setattr(gh_backend, "run_gh", _make_run_gh_sequence([_ok(json.dumps(payload))]))
 
         rule = _make_non_author_approval_rule()
         ruleset = RuleSet(rules=[rule])
@@ -484,12 +481,8 @@ class TestEndToEnd:
             author=_author("octocat"),
             reviews=[],
         )
-        monkeypatch.setattr(
-            _target, "run_gh", _make_run_gh_sequence([_ok(_RESOLVE_OK)])
-        )
-        monkeypatch.setattr(
-            gh_backend, "run_gh", _make_run_gh_sequence([_ok(json.dumps(payload))])
-        )
+        monkeypatch.setattr(_target, "run_gh", _make_run_gh_sequence([_ok(_RESOLVE_OK)]))
+        monkeypatch.setattr(gh_backend, "run_gh", _make_run_gh_sequence([_ok(json.dumps(payload))]))
 
         rule = _make_non_author_approval_rule()
         ruleset = RuleSet(rules=[rule])

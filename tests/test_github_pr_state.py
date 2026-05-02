@@ -8,12 +8,10 @@ A helper ``_make_run_gh`` produces a fake ``run_gh`` that cycles through a list
 of pre-configured ``GhResult`` objects in order, so the two calls (resolve +
 fetch) can return different payloads.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any
-
-import pytest
 
 from gate_keeper.backends import _gh, _target
 from gate_keeper.backends import github as gh_backend
@@ -29,7 +27,6 @@ from gate_keeper.models import (
     Status,
 )
 from gate_keeper.validator import validate
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,6 +91,7 @@ def _pr_view_json(**fields) -> str:
 # PR Open
 # ---------------------------------------------------------------------------
 
+
 class TestCheckPrOpen:
     def test_open_state_passes(self, monkeypatch):
         _patch_both(
@@ -145,6 +143,7 @@ class TestCheckPrOpen:
 # ---------------------------------------------------------------------------
 # Not Draft
 # ---------------------------------------------------------------------------
+
 
 class TestCheckNotDraft:
     def test_not_draft_passes(self, monkeypatch):
@@ -199,6 +198,7 @@ class TestCheckNotDraft:
 # Labels Absent
 # ---------------------------------------------------------------------------
 
+
 class TestCheckLabelsAbsent:
     def test_missing_labels_field_unavailable(self, monkeypatch):
         _patch_both(
@@ -228,11 +228,14 @@ class TestCheckLabelsAbsent:
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
-            _ok(_pr_view_json(
-                state="OPEN", isDraft=False,
-                labels=[{"name": "do-not-merge"}],
-                body="",
-            )),
+            _ok(
+                _pr_view_json(
+                    state="OPEN",
+                    isDraft=False,
+                    labels=[{"name": "do-not-merge"}],
+                    body="",
+                )
+            ),
         )
         rule = _make_github_rule(RuleKind.GITHUB_LABELS_ABSENT)
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -244,11 +247,14 @@ class TestCheckLabelsAbsent:
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
-            _ok(_pr_view_json(
-                state="OPEN", isDraft=False,
-                labels=[{"name": "DO-NOT-MERGE"}],
-                body="",
-            )),
+            _ok(
+                _pr_view_json(
+                    state="OPEN",
+                    isDraft=False,
+                    labels=[{"name": "DO-NOT-MERGE"}],
+                    body="",
+                )
+            ),
         )
         rule = _make_github_rule(RuleKind.GITHUB_LABELS_ABSENT)
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -260,11 +266,14 @@ class TestCheckLabelsAbsent:
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
-            _ok(_pr_view_json(
-                state="OPEN", isDraft=False,
-                labels=[{"name": "blocked"}, {"name": "feature"}],
-                body="",
-            )),
+            _ok(
+                _pr_view_json(
+                    state="OPEN",
+                    isDraft=False,
+                    labels=[{"name": "blocked"}, {"name": "feature"}],
+                    body="",
+                )
+            ),
         )
         rule = _make_github_rule(RuleKind.GITHUB_LABELS_ABSENT)
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -275,11 +284,14 @@ class TestCheckLabelsAbsent:
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
-            _ok(_pr_view_json(
-                state="OPEN", isDraft=False,
-                labels=[{"name": "custom-block"}],
-                body="",
-            )),
+            _ok(
+                _pr_view_json(
+                    state="OPEN",
+                    isDraft=False,
+                    labels=[{"name": "custom-block"}],
+                    body="",
+                )
+            ),
         )
         rule = _make_github_rule(
             RuleKind.GITHUB_LABELS_ABSENT,
@@ -294,11 +306,14 @@ class TestCheckLabelsAbsent:
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
-            _ok(_pr_view_json(
-                state="OPEN", isDraft=False,
-                labels=[{"name": "do-not-merge"}],
-                body="",
-            )),
+            _ok(
+                _pr_view_json(
+                    state="OPEN",
+                    isDraft=False,
+                    labels=[{"name": "do-not-merge"}],
+                    body="",
+                )
+            ),
         )
         rule = _make_github_rule(
             RuleKind.GITHUB_LABELS_ABSENT,
@@ -344,11 +359,14 @@ class TestCheckLabelsAbsent:
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
-            _ok(_pr_view_json(
-                state="OPEN", isDraft=False,
-                labels=[{"name": "needs-decision"}],
-                body="",
-            )),
+            _ok(
+                _pr_view_json(
+                    state="OPEN",
+                    isDraft=False,
+                    labels=[{"name": "needs-decision"}],
+                    body="",
+                )
+            ),
         )
         rule = _make_github_rule(RuleKind.GITHUB_LABELS_ABSENT)  # no params
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -360,6 +378,7 @@ class TestCheckLabelsAbsent:
 # ---------------------------------------------------------------------------
 # Tasks Complete
 # ---------------------------------------------------------------------------
+
 
 class TestCheckTasksComplete:
     def test_null_body_unavailable(self, monkeypatch):
@@ -390,12 +409,14 @@ class TestCheckTasksComplete:
         # Build the JSON payload by hand because _pr_view_json filters None.
         import json
 
-        bad_payload = json.dumps({
-            "state": "OPEN",
-            "isDraft": False,
-            "labels": [],
-            "body": 42,  # numeric, not a string
-        })
+        bad_payload = json.dumps(
+            {
+                "state": "OPEN",
+                "isDraft": False,
+                "labels": [],
+                "body": 42,  # numeric, not a string
+            }
+        )
         _patch_both(
             monkeypatch,
             _ok(_RESOLVE_OK),
@@ -481,6 +502,7 @@ class TestCheckTasksComplete:
 # Evidence structure
 # ---------------------------------------------------------------------------
 
+
 class TestEvidenceStructure:
     """Verify that evidence payloads contain the expected coordinate fields."""
 
@@ -522,6 +544,7 @@ class TestEvidenceStructure:
 # Fetch failures (gh error, auth, JSON) propagate before dispatch
 # ---------------------------------------------------------------------------
 
+
 class TestFetchFailures:
     def test_gh_missing_binary_returns_unavailable(self, monkeypatch):
         """If gh is missing at resolve time, we get UNAVAILABLE immediately."""
@@ -547,9 +570,7 @@ class TestFetchFailures:
 
     def test_fetch_json_error_returns_unavailable(self, monkeypatch):
         monkeypatch.setattr(_target, "run_gh", _make_run_gh_sequence([_ok(_RESOLVE_OK)]))
-        bad_json = _gh.GhResult(
-            ok=True, stdout="not-json", stderr="", returncode=0, cmd=("gh",)
-        )
+        bad_json = _gh.GhResult(ok=True, stdout="not-json", stderr="", returncode=0, cmd=("gh",))
         monkeypatch.setattr(gh_backend, "run_gh", _make_run_gh_sequence([bad_json]))
         rule = _make_github_rule(RuleKind.GITHUB_PR_OPEN)
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -560,6 +581,7 @@ class TestFetchFailures:
 # ---------------------------------------------------------------------------
 # End-to-end via validator
 # ---------------------------------------------------------------------------
+
 
 class TestEndToEndValidator:
     def test_pr_open_rule_passes_via_validator(self, monkeypatch):

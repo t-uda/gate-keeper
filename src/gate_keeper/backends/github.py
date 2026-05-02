@@ -12,6 +12,7 @@ GraphQL call via ``gh api graphql`` and does NOT use ``_fetch_pr_view``.
 Any failure before dispatch (missing gh, auth, JSON, missing field)
 propagates as UNAVAILABLE — all paths fail closed.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -103,9 +104,13 @@ def _fetch_pr_view(pr: PrTarget, rule: Rule) -> tuple[dict | None, Diagnostic | 
         return None, gh_missing_field_diag(rule, "pr-view", "<unknown rule kind>")
 
     argv = [
-        "pr", "view", str(pr.number),
-        "-R", f"{pr.owner}/{pr.repo}",
-        "--json", fields,
+        "pr",
+        "view",
+        str(pr.number),
+        "-R",
+        f"{pr.owner}/{pr.repo}",
+        "--json",
+        fields,
     ]
     result = run_gh(argv)
     if not result.ok:
@@ -125,6 +130,7 @@ def _fetch_pr_view(pr: PrTarget, rule: Rule) -> tuple[dict | None, Diagnostic | 
 # Per-kind handlers
 # ---------------------------------------------------------------------------
 
+
 def _pr_coords(pr: PrTarget) -> dict:
     """Return the shared coordinate fields appended to every evidence payload."""
     return {"owner": pr.owner, "repo": pr.repo, "number": pr.number, "url": pr.url}
@@ -143,7 +149,12 @@ def _check_pr_open(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
 
     if state == "OPEN":
         return _diag(rule, Status.PASS, f"PR {pr.owner}/{pr.repo}#{pr.number} is open.", evidence)
-    return _diag(rule, Status.FAIL, f"PR {pr.owner}/{pr.repo}#{pr.number} is not open (state: {state!r}).", evidence)
+    return _diag(
+        rule,
+        Status.FAIL,
+        f"PR {pr.owner}/{pr.repo}#{pr.number} is not open (state: {state!r}).",
+        evidence,
+    )
 
 
 def _check_not_draft(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
@@ -202,10 +213,7 @@ def _check_labels_absent(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
     params_labels = rule.params.get("labels")
     if params_labels is None:
         blocking: list[str] = list(_DEFAULT_BLOCKING_LABELS)
-    elif (
-        isinstance(params_labels, list)
-        and all(isinstance(item, str) for item in params_labels)
-    ):
+    elif isinstance(params_labels, list) and all(isinstance(item, str) for item in params_labels):
         blocking = list(params_labels)
     else:
         return Diagnostic(
@@ -444,10 +452,7 @@ def _check_checks_success(rule: Rule, pr: PrTarget, data: dict) -> Diagnostic:
     return _diag(
         rule,
         Status.FAIL,
-        (
-            f"PR {pr.owner}/{pr.repo}#{pr.number}: {summary}; "
-            f"non-successful checks: {non_names!r}."
-        ),
+        (f"PR {pr.owner}/{pr.repo}#{pr.number}: {summary}; non-successful checks: {non_names!r}."),
         evidence,
     )
 
@@ -486,11 +491,16 @@ def _fetch_review_threads(
     - ``(None, None, diag)`` on any failure.
     """
     argv = [
-        "api", "graphql",
-        "-f", f"query={_THREADS_QUERY}",
-        "-f", f"owner={pr.owner}",
-        "-f", f"repo={pr.repo}",
-        "-F", f"number={pr.number}",
+        "api",
+        "graphql",
+        "-f",
+        f"query={_THREADS_QUERY}",
+        "-f",
+        f"owner={pr.owner}",
+        "-f",
+        f"repo={pr.repo}",
+        "-F",
+        f"number={pr.number}",
     ]
     result = run_gh(argv)
 
@@ -570,18 +580,14 @@ def _fetch_review_threads(
         return (
             None,
             None,
-            gh_missing_field_diag(
-                rule, "graphql", "data.repository.pullRequest.reviewThreads.nodes"
-            ),
+            gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.reviewThreads.nodes"),
         )
 
     if not isinstance(page_info, dict):
         return (
             None,
             None,
-            gh_missing_field_diag(
-                rule, "graphql", "data.repository.pullRequest.reviewThreads.pageInfo"
-            ),
+            gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.reviewThreads.pageInfo"),
         )
 
     # Pagination guard: hasNextPage must be an explicit ``False`` to treat the
@@ -624,7 +630,9 @@ def _check_threads_resolved(rule: Rule, pr: PrTarget) -> Diagnostic:
     for node in nodes:  # type: ignore[union-attr]
         if not isinstance(node, dict):
             # Treat non-dict nodes conservatively as unresolved
-            unresolved.append({"path": None, "line": None, "first_comment_author": None, "first_comment_url": None})
+            unresolved.append(
+                {"path": None, "line": None, "first_comment_author": None, "first_comment_url": None}
+            )
             continue
 
         is_resolved = node.get("isResolved")
@@ -655,12 +663,14 @@ def _check_threads_resolved(rule: Rule, pr: PrTarget) -> Diagnostic:
                         if isinstance(url, str):
                             first_comment_url = url
 
-            unresolved.append({
-                "path": path,
-                "line": line,
-                "first_comment_author": first_comment_author,
-                "first_comment_url": first_comment_url,
-            })
+            unresolved.append(
+                {
+                    "path": path,
+                    "line": line,
+                    "first_comment_author": first_comment_author,
+                    "first_comment_url": first_comment_url,
+                }
+            )
 
     total = len(nodes)  # type: ignore[arg-type]
     unresolved_count = len(unresolved)
@@ -802,10 +812,7 @@ def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnost
         return _diag(
             rule,
             Status.PASS,
-            (
-                f"PR {pr.owner}/{pr.repo}#{pr.number} has independent approval "
-                f"from: {approved_by!r}."
-            ),
+            (f"PR {pr.owner}/{pr.repo}#{pr.number} has independent approval from: {approved_by!r}."),
             evidence,
         )
 
@@ -858,6 +865,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     pr, diag = resolve_target(rule, target_str)
     if diag is not None:
         return diag
+    assert pr is not None
 
     # Direct handlers: make their own gh call, don't need pr-view.
     direct = _DIRECT_HANDLERS.get(rule.kind)
@@ -868,9 +876,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     if handler is None:
         # Defensive fall-through: no known handler for this rule kind.
         # A future malformed or unsupported RuleKind should not crash.
-        _supported = ", ".join(
-            sorted(k.value for k in list(_PR_VIEW_HANDLERS) + list(_DIRECT_HANDLERS))
-        )
+        _supported = ", ".join(sorted(k.value for k in list(_PR_VIEW_HANDLERS) + list(_DIRECT_HANDLERS)))
         return Diagnostic(
             rule_id=rule.id,
             source=rule.source,
@@ -878,8 +884,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
             status=Status.UNAVAILABLE,
             severity=rule.severity,
             message=(
-                f"GitHub backend does not implement rule kind {rule.kind.value!r}; "
-                f"supported: {_supported}"
+                f"GitHub backend does not implement rule kind {rule.kind.value!r}; supported: {_supported}"
             ),
             evidence=[
                 Evidence(
@@ -900,5 +905,6 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     data, fetch_diag = _fetch_pr_view(pr, rule)
     if fetch_diag is not None:
         return fetch_diag
+    assert data is not None
 
     return handler(rule, pr, data)

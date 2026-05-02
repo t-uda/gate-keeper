@@ -3,18 +3,20 @@
 Evaluates a single compiled Rule against a local target path.
 Never raises — all exceptions are translated into diagnostics.
 """
+
 from __future__ import annotations
 
 import fnmatch
 import re
 from pathlib import Path
 
-name = "filesystem"
-
 from gate_keeper._md import (
-    FENCE_START_RE as _FENCE_START_RE,
     TASK_CHECKED_RE as _TASK_CHECKED_RE,
+)
+from gate_keeper._md import (
     TASK_UNCHECKED_RE as _TASK_UNCHECKED_RE,
+)
+from gate_keeper._md import (
     strip_fenced_blocks as _strip_fenced_blocks_impl,
 )
 from gate_keeper.models import (
@@ -25,6 +27,8 @@ from gate_keeper.models import (
     RuleKind,
     Status,
 )
+
+name = "filesystem"
 
 _FILESYSTEM_KINDS = frozenset(
     {
@@ -163,13 +167,16 @@ def _text_required(rule: Rule, target: Path) -> Diagnostic:
     content, err = _read_file(rule, target)
     if err is not None:
         return err
+    assert content is not None
     path_str = str(target)
     use_regex = bool(rule.params.get("regex", False))
     if use_regex:
         match_count = len(re.findall(pattern, content))
     else:
         match_count = content.count(pattern)
-    evidence = [Evidence(kind="text_match", data={"path": path_str, "pattern": pattern, "match_count": match_count})]
+    evidence = [
+        Evidence(kind="text_match", data={"path": path_str, "pattern": pattern, "match_count": match_count})
+    ]
     if match_count > 0:
         return _diag(rule, Status.PASS, f"{path_str} contains {pattern!r}.", evidence)
     return _diag(rule, Status.FAIL, f"{path_str} does not contain {pattern!r}.", evidence)
@@ -187,15 +194,20 @@ def _text_forbidden(rule: Rule, target: Path) -> Diagnostic:
     content, err = _read_file(rule, target)
     if err is not None:
         return err
+    assert content is not None
     path_str = str(target)
     use_regex = bool(rule.params.get("regex", False))
     if use_regex:
         match_count = len(re.findall(pattern, content))
     else:
         match_count = content.count(pattern)
-    evidence = [Evidence(kind="text_match", data={"path": path_str, "pattern": pattern, "match_count": match_count})]
+    evidence = [
+        Evidence(kind="text_match", data={"path": path_str, "pattern": pattern, "match_count": match_count})
+    ]
     if match_count == 0:
-        return _diag(rule, Status.PASS, f"{path_str} does not contain forbidden pattern {pattern!r}.", evidence)
+        return _diag(
+            rule, Status.PASS, f"{path_str} does not contain forbidden pattern {pattern!r}.", evidence
+        )
     return _diag(rule, Status.FAIL, f"{path_str} contains forbidden pattern {pattern!r}.", evidence)
 
 
@@ -212,12 +224,18 @@ def _markdown_tasks_complete(rule: Rule, target: Path) -> Diagnostic:
     content, err = _read_file(rule, target)
     if err is not None:
         return err
+    assert content is not None
     path_str = str(target)
     scannable = _strip_fenced_blocks(content)
     checked = len(_TASK_CHECKED_RE.findall(scannable))
     unchecked = len(_TASK_UNCHECKED_RE.findall(scannable))
     total = checked + unchecked
-    evidence = [Evidence(kind="markdown_tasks", data={"path": path_str, "checked": checked, "unchecked": unchecked, "total": total})]
+    evidence = [
+        Evidence(
+            kind="markdown_tasks",
+            data={"path": path_str, "checked": checked, "unchecked": unchecked, "total": total},
+        )
+    ]
     if unchecked:
         return _diag(rule, Status.FAIL, f"{path_str} has {unchecked} unchecked task(s) of {total}.", evidence)
     return _diag(rule, Status.PASS, f"{path_str} has all {total} task(s) checked.", evidence)

@@ -6,12 +6,11 @@ Covers:
 - Command construction: exact argv captured
 - Round-trip schema compliance for all produced Diagnostic shapes
 """
+
 from __future__ import annotations
 
-import pytest
-
-from gate_keeper.backends._target import PrTarget, parse_target, resolve_target
 from gate_keeper.backends._gh import GhResult
+from gate_keeper.backends._target import PrTarget, parse_target, resolve_target
 from gate_keeper.models import (
     Backend,
     Confidence,
@@ -20,7 +19,6 @@ from gate_keeper.models import (
     RuleKind,
     Severity,
     SourceLocation,
-    Status,
 )
 
 # ---------------------------------------------------------------------------
@@ -298,12 +296,18 @@ class TestResolveTargetFailures:
         assert ev_data["owner"] == "octocat"
         assert ev_data["repo"] == "hello"
         assert ev_data["number"] == 123
-        assert "Could not resolve" in ev_data["stderr_excerpt"] or "not found" in ev_data["stderr_excerpt"].lower()
+        assert (
+            "Could not resolve" in ev_data["stderr_excerpt"]
+            or "not found" in ev_data["stderr_excerpt"].lower()
+        )
 
     def test_pr_not_found_stderr_excerpt_included(self, monkeypatch):
         stderr_msg = "GraphQL: Could not resolve to a Repository with the name 'octo/missing'"
         result = GhResult(
-            ok=False, stdout="", stderr=stderr_msg, returncode=1,
+            ok=False,
+            stdout="",
+            stderr=stderr_msg,
+            returncode=1,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -314,7 +318,10 @@ class TestResolveTargetFailures:
 
     def test_malformed_json_returns_gh_json_error_diag(self, monkeypatch):
         result = GhResult(
-            ok=True, stdout="{not json}", stderr="", returncode=0,
+            ok=True,
+            stdout="{not json}",
+            stderr="",
+            returncode=0,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -326,7 +333,10 @@ class TestResolveTargetFailures:
     def test_missing_url_field_returns_gh_missing_field_diag(self, monkeypatch):
         # url absent, number present
         result = GhResult(
-            ok=True, stdout='{"number":123}', stderr="", returncode=0,
+            ok=True,
+            stdout='{"number":123}',
+            stderr="",
+            returncode=0,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -353,7 +363,10 @@ class TestResolveTargetFailures:
 
     def test_generic_gh_failure_returns_gh_failure_diag(self, monkeypatch):
         result = GhResult(
-            ok=False, stdout="", stderr="some unexpected server error", returncode=1,
+            ok=False,
+            stdout="",
+            stderr="some unexpected server error",
+            returncode=1,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -456,7 +469,10 @@ class TestDiagRoundTrip:
 
     def test_gh_json_error_round_trips(self, monkeypatch):
         result = GhResult(
-            ok=True, stdout="{not json}", stderr="", returncode=0,
+            ok=True,
+            stdout="{not json}",
+            stderr="",
+            returncode=0,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -467,7 +483,10 @@ class TestDiagRoundTrip:
 
     def test_gh_missing_field_round_trips(self, monkeypatch):
         result = GhResult(
-            ok=True, stdout='{"number":123}', stderr="", returncode=0,
+            ok=True,
+            stdout='{"number":123}',
+            stderr="",
+            returncode=0,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -478,7 +497,10 @@ class TestDiagRoundTrip:
 
     def test_gh_failure_round_trips(self, monkeypatch):
         result = GhResult(
-            ok=False, stdout="", stderr="some unexpected error", returncode=1,
+            ok=False,
+            stdout="",
+            stderr="some unexpected error",
+            returncode=1,
             cmd=("gh", "pr", "view", "123", "-R", "octocat/hello", "--json", "number,url"),
         )
         monkeypatch.setattr("gate_keeper.backends._target.run_gh", lambda args: result)
@@ -496,8 +518,10 @@ class TestDiagRoundTrip:
 class TestReExports:
     def test_resolve_target_re_exported(self):
         from gate_keeper.backends.github import resolve_target as rt
+
         assert rt is resolve_target
 
     def test_pr_target_re_exported(self):
         from gate_keeper.backends.github import PrTarget as PT
+
         assert PT is PrTarget

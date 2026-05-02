@@ -9,6 +9,7 @@ to detect provider credentials and replace the stub body in ``check()`` with
 provider invocation and response-parsing logic. The ``Diagnostic`` contract is
 unchanged.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

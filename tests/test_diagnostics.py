@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from gate_keeper.diagnostics import (
     EXIT_FAIL,
     EXIT_OK,
@@ -24,10 +22,10 @@ from gate_keeper.models import (
     Status,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _loc(path: str = "rules.md", line: int = 5, heading: str | None = None) -> SourceLocation:
     return SourceLocation(path=path, line=line, heading=heading)
@@ -61,6 +59,7 @@ def _ev(kind: str = "test_evidence", **data) -> Evidence:
 # ---------------------------------------------------------------------------
 # Exit-code policy
 # ---------------------------------------------------------------------------
+
 
 def test_all_pass_exits_0():
     diags = [_diag(status=Status.PASS), _diag(rule_id="r2", status=Status.PASS)]
@@ -96,6 +95,7 @@ def test_exit_usage_constant_is_2():
 # Exit-2 helper
 # ---------------------------------------------------------------------------
 
+
 def test_usage_error_returns_exit_2():
     msg, code = usage_error("cannot read input.md")
     assert code == EXIT_USAGE
@@ -110,6 +110,7 @@ def test_usage_error_prefixes_error():
 # ---------------------------------------------------------------------------
 # Text renderer — all-pass
 # ---------------------------------------------------------------------------
+
 
 def test_text_all_pass_contains_required_fields():
     diags = [_diag(status=Status.PASS, message="all good", path="doc.md", line=12)]
@@ -137,6 +138,7 @@ def test_text_one_diagnostic_per_line():
 # Text renderer — fail
 # ---------------------------------------------------------------------------
 
+
 def test_text_one_fail_surfaced():
     diags = [
         _diag(rule_id="r1", status=Status.PASS, message="fine"),
@@ -151,6 +153,7 @@ def test_text_one_fail_surfaced():
 # ---------------------------------------------------------------------------
 # Text renderer — evidence
 # ---------------------------------------------------------------------------
+
 
 def test_text_evidence_included():
     ev = _ev("text_match", path="AGENTS.md", match_count=3)
@@ -185,6 +188,7 @@ def test_text_evidence_newlines_escaped():
 # ---------------------------------------------------------------------------
 # JSON renderer — all-pass
 # ---------------------------------------------------------------------------
+
 
 def test_json_all_pass_status_preserved():
     diags = [_diag(status=Status.PASS)]
@@ -223,6 +227,7 @@ def test_json_snapshot_stable():
 # JSON renderer — fail
 # ---------------------------------------------------------------------------
 
+
 def test_json_one_fail_surfaced():
     diags = [_diag(rule_id="r1", status=Status.FAIL, message="broke")]
     output = json.loads(render_json(diags))
@@ -233,6 +238,7 @@ def test_json_one_fail_surfaced():
 # ---------------------------------------------------------------------------
 # JSON renderer — unavailable distinguishable from fail
 # ---------------------------------------------------------------------------
+
 
 def test_json_unavailable_distinguishable_from_fail():
     diags = [
@@ -254,6 +260,7 @@ def test_json_unavailable_exits_1():
 # ---------------------------------------------------------------------------
 # JSON renderer — determinism
 # ---------------------------------------------------------------------------
+
 
 def test_json_deterministic_ordering():
     diags = [_diag(rule_id="r1", status=Status.PASS), _diag(rule_id="r2", status=Status.FAIL)]

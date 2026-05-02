@@ -1,9 +1,8 @@
 """Tests for gate_keeper.backends.filesystem."""
+
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from gate_keeper.backends.filesystem import check
 from gate_keeper.models import (
@@ -156,7 +155,9 @@ class TestTextRequired:
 
     def test_regex_mode_fail(self):
         target = _FIXTURES / "content.txt"
-        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": r"NEVER_MATCHES_\d{99}", "regex": True}), target)
+        diag = check(
+            _rule(RuleKind.TEXT_REQUIRED, {"pattern": r"NEVER_MATCHES_\d{99}", "regex": True}), target
+        )
         assert diag.status is Status.FAIL
 
     def test_evidence_match_count(self):
@@ -263,9 +264,7 @@ class TestMarkdownTasksComplete:
 
     def test_checkboxes_inside_code_block_ignored(self, tmp_path):
         f = tmp_path / "doc.md"
-        f.write_text(
-            "Real tasks:\n- [x] done\n\n```\n- [ ] inside code block\n```\n"
-        )
+        f.write_text("Real tasks:\n- [x] done\n\n```\n- [ ] inside code block\n```\n")
         diag = check(_rule(RuleKind.MARKDOWN_TASKS_COMPLETE), f)
         assert diag.status is Status.PASS
         ev = next(e for e in diag.evidence if e.kind == "markdown_tasks")
@@ -328,6 +327,7 @@ class TestDiagnosticContract:
 
     def _assert_valid(self, diag):
         from gate_keeper.models import Diagnostic
+
         d = Diagnostic.from_dict(diag.to_dict())
         assert d.rule_id == diag.rule_id
         assert d.status == diag.status

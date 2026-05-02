@@ -12,7 +12,6 @@ from gate_keeper.models import (
     Diagnostic,
     DiagnosticReport,
     Evidence,
-    Rule,
     RuleKind,
     RuleSet,
     Severity,
@@ -92,9 +91,7 @@ def _diagnostic_payload() -> dict:
                 "status": "fail",
                 "severity": "error",
                 "message": "missing pattern",
-                "evidence": [
-                    {"kind": "text_match", "data": {"match_count": 0}}
-                ],
+                "evidence": [{"kind": "text_match", "data": {"match_count": 0}}],
                 "remediation": "add the pattern",
             }
         ]

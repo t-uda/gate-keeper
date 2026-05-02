@@ -7,17 +7,17 @@ look up backends by name without importing modules directly.
 Registered names (all three must be present for `--backend` choices):
   ``filesystem``, ``github``, ``llm-rubric``
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
 
-from gate_keeper.models import Diagnostic, Rule
-
 # Import backend modules — avoid circular deps by keeping these as plain imports.
 from gate_keeper.backends import filesystem as _fs
 from gate_keeper.backends import github as _gh
 from gate_keeper.backends import llm_rubric as _llm
+from gate_keeper.models import Diagnostic, Rule
 
 # Registry: name -> check callable
 _REGISTRY: dict[str, Callable[[Rule, str | Path], Diagnostic]] = {

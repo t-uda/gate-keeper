@@ -1,10 +1,10 @@
 """Tests for the rule classifier."""
+
 from __future__ import annotations
 
 from gate_keeper.classifier import classify, classify_rule
-from gate_keeper.models import Backend, Confidence, RuleKind, Severity, SourceLocation, Rule
+from gate_keeper.models import Backend, Confidence, Rule, RuleKind, Severity, SourceLocation
 from gate_keeper.parser import parse
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -315,11 +315,7 @@ class TestParserIntegration:
         assert rules[0].confidence is Confidence.LOW
 
     def test_mixed_ruleset_preserves_all_rules(self):
-        md = (
-            "- The CHANGELOG file must exist.\n"
-            "- CI checks must pass.\n"
-            "- Code quality must meet standards.\n"
-        )
+        md = "- The CHANGELOG file must exist.\n- CI checks must pass.\n- Code quality must meet standards.\n"
         rules = _parse_and_classify(md)
         assert len(rules) == 3
         backends = {r.backend_hint for r in rules}
@@ -353,10 +349,7 @@ class TestExplanationInParams:
 
 class TestLowConfidenceVisible:
     def test_low_confidence_rules_present_in_mixed_ruleset(self):
-        md = (
-            "- CI checks must pass.\n"
-            "- Code quality must meet team standards.\n"
-        )
+        md = "- CI checks must pass.\n- Code quality must meet team standards.\n"
         rules = _parse_and_classify(md)
         confidences = {r.confidence for r in rules}
         assert Confidence.HIGH in confidences
@@ -367,9 +360,9 @@ class TestLowConfidenceVisible:
 
     def test_high_medium_low_all_represented(self):
         md = (
-            "- CI checks must pass.\n"                          # HIGH github
-            "- An approval is required before merge.\n"         # MEDIUM github
-            "- Code quality must be adequate.\n"                # LOW llm-rubric
+            "- CI checks must pass.\n"  # HIGH github
+            "- An approval is required before merge.\n"  # MEDIUM github
+            "- Code quality must be adequate.\n"  # LOW llm-rubric
         )
         rules = _parse_and_classify(md)
         conf_map = {r.confidence for r in rules}
@@ -378,12 +371,7 @@ class TestLowConfidenceVisible:
         assert Confidence.LOW in conf_map
 
     def test_classify_preserves_rule_count(self):
-        md = (
-            "- Must review.\n"
-            "- Should test.\n"
-            "- Never skip CI.\n"
-            "- The README file must exist.\n"
-        )
+        md = "- Must review.\n- Should test.\n- Never skip CI.\n- The README file must exist.\n"
         original = parse("test.md", md)
         classified = classify(original)
         assert len(classified.rules) == len(original.rules)
