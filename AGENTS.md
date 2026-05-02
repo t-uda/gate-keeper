@@ -38,6 +38,7 @@ uvx pyright
 - IR contract: src/gate_keeper/models.py (schema in docs/rule-ir.md).
 - GitHub support sits behind a backend boundary so core works without network or `gh`.
 - `uv` is the supported workflow runner.
+- Active completion trunks: umbrella #63 (semantic rubric quality, gateway #51) and umbrella #80 (textlint via `Backend.EXTERNAL` adapter pattern). External tools integrate as adapters under that backend, not as new `Backend` enum values.
 
 ## Maintenance Notes
 
