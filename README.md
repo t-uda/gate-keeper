@@ -45,3 +45,30 @@ uvx pyright
 ```
 
 CI runs the same `uv sync` and `uv run pytest` steps on Python 3.10.
+
+## Optional: LLM rubric backend
+
+`gate-keeper` ships with an `llm-rubric` backend that handles `semantic_rubric`
+rules — those that cannot be verified deterministically. By default the
+backend is unconfigured and returns a fail-closed `unavailable` diagnostic, so
+no LLM calls are made.
+
+To enable it, create a per-project dotenv file at
+`~/.config/hermes-projects/gate-keeper.env` (`chmod 600`) on the host with one
+of:
+
+```sh
+GATE_KEEPER_LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```sh
+GATE_KEEPER_LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+```
+
+Credentials are read from this file via `python-dotenv` only — `os.environ`
+is intentionally not consulted, to avoid collisions with the host container's
+global API-key environment. See
+[docs/llm-rubric.md](docs/llm-rubric.md) and the hermes-engineering
+`docs/auth-matrix.md` "Issue #147" section for the rationale.

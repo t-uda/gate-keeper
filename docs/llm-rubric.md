@@ -26,9 +26,10 @@ considering that:
 
 Use `severity=advisory` or `severity=warning` for semantic rules.
 
-## Current MVP behavior
+## Default behavior (no provider configured)
 
-No LLM provider is configured in the MVP. Every `semantic_rubric` rule returns:
+If no provider is configured (the host-side dotenv file is absent or
+incomplete), every `semantic_rubric` rule returns:
 
 ```
 status:      unavailable
@@ -37,13 +38,56 @@ evidence[0]: provider_unconfigured { rule_text, rule_kind, target }
 remediation: Configure an LLM provider to enable semantic rule evaluation.
 ```
 
-`unavailable` is a non-passing status; the CLI exits `1`.  This is intentional
+`unavailable` is a non-passing status; the CLI exits `1`. This is intentional
 fail-closed behavior: an unconfigured evaluator must not silently pass rules.
+
+## Host-side credential setup
+
+`gate-keeper` reads provider credentials **only** from a per-project dotenv
+file at:
+
+```
+/home/vscode/.config/hermes-projects/gate-keeper.env
+```
+
+It is loaded explicitly via `python-dotenv`'s `dotenv_values` into a
+process-local dict; **`os.environ` is intentionally not consulted**. This is
+deliberate — the env-passthrough route was rejected upstream because the
+container's global API-key environment collides with the OAuth paths used by
+Claude Code, Codex, and Gemini. See
+[hermes-engineering#149](https://github.com/uda-lab/hermes-engineering/pull/149)
+and the `docs/auth-matrix.md` "Issue #147" section.
+
+Setup:
+
+1. (host, one-time) After hermes-engineering devcontainer creation,
+   `~/.config/hermes-projects/` exists with mode `700`.
+2. (host) Create `~/.config/hermes-projects/gate-keeper.env` and `chmod 600`.
+   Use one of:
+
+   **Anthropic:**
+   ```sh
+   GATE_KEEPER_LLM_PROVIDER=anthropic
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+   **OpenAI:**
+   ```sh
+   GATE_KEEPER_LLM_PROVIDER=openai
+   OPENAI_API_KEY=sk-...
+   ```
+
+3. (container, automatic) `gate-keeper` reads the file via `python-dotenv`
+   at backend invocation time.
+
+If `GATE_KEEPER_LLM_PROVIDER` is missing, set to a value other than
+`anthropic` or `openai`, or the corresponding API key is absent, behavior
+falls back to the unconfigured `unavailable` diagnostic above.
 
 ## Rubric input/output shape
 
-When a provider is added, `_build_rubric_input()` in `src/gate_keeper/backends/llm_rubric.py`
-defines the context passed to the model:
+`_build_rubric_input()` in `src/gate_keeper/backends/llm_rubric.py` defines the
+context passed to the model:
 
 ```json
 {
@@ -53,27 +97,41 @@ defines the context passed to the model:
 }
 ```
 
-The expected provider response is a `Diagnostic` with:
+When a provider responds successfully, the diagnostic carries:
 
-- `status`: `pass` or `fail` (never `unavailable` when the provider responds).
-- `message`: a single-line summary of the evaluation.
-- `evidence`: at minimum one entry with `kind="llm_judgment"` and the model's
-  explanation in `data`.
-- `remediation` (optional): suggested action when `status=fail`.
+- `status`: `pass` or `fail`.
+- `message`: a one-line explanation from the model.
+- `evidence[0]`: `{ kind: "llm_judgment", data: { model, judgment, explanation } }`.
+- `remediation`: set when `status=fail`, omitted otherwise.
 
-## Extension point
+## Failure modes
 
-To add a provider:
+Any provider failure path maps to `unavailable` — never to `pass` or `fail`.
+Failure modes recorded in `evidence[0]`:
 
-1. Implement `_is_configured() -> bool` in `src/gate_keeper/backends/llm_rubric.py` to detect
-   credentials (e.g. `GATE_KEEPER_LLM_PROVIDER`, `OPENAI_API_KEY`).
-2. Add a provider client call in the `if _is_configured():` branch of `check()`.
-3. Map the model response to a `Diagnostic` following the shape above.
-4. Keep the unconfigured fallback (`_is_configured() == False`) unchanged so the
-   fail-closed contract holds when credentials are absent.
+| Failure | `evidence[0].kind` | `data.failure_mode` |
+| --- | --- | --- |
+| File missing or provider unset | `provider_unconfigured` | n/a |
+| SDK/HTTP error, timeout, etc. | `provider_error` | exception class name |
+| Response is not the expected JSON shape | `provider_error` | `unparseable_response` |
 
-No other files need to change: the backend registry, classifier, and validator
-already treat `llm-rubric` as a first-class backend.
+There is no retry. Investigate the failure mode, then rerun.
+
+## Extending to additional providers
+
+Currently `anthropic` and `openai` are wired. To add another provider:
+
+1. Add a `_call_<provider>(api_key, system, user, model)` function returning the
+   raw response text.
+2. Add the provider name to `_SUPPORTED_PROVIDERS` and the dispatch branch in
+   `check()`.
+3. Document the env-file shape (`<PROVIDER>_API_KEY` plus
+   `GATE_KEEPER_LLM_PROVIDER=<provider>`).
+4. Add monkeypatched tests for `pass` / `fail` / provider error / unparseable
+   response paths.
+
+The backend registry, classifier, and validator already treat `llm-rubric` as
+a first-class backend, so no other files need to change.
 
 ## Project trunk: semantic rubric quality
 
