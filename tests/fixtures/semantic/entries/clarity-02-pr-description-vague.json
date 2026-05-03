@@ -1,0 +1,12 @@
+{
+  "rule_text": "The PR description names the user-visible change in the first sentence.",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_weak.md"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["vague", "Update classifier", "user-visible"],
+  "category": "clarity",
+  "intended_backend": "llm-rubric",
+  "notes": "Title 'Update classifier' and body 'Some changes ... Should be fine.' do not name a user-visible change."
+}

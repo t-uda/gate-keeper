@@ -1,0 +1,12 @@
+{
+  "rule_text": "The README quickstart contains the install step, an authoring step, and a run step.",
+  "target": {
+    "kind": "path",
+    "value": "readme_quickstart_incomplete.md"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["run", "missing", "validate"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Quickstart mentions install and authoring but no command to actually run gate-keeper."
+}

@@ -1,0 +1,12 @@
+{
+  "rule_text": "The design note states at least one tradeoff that was rejected and why.",
+  "target": {
+    "kind": "inline",
+    "value": "We chose longest-match dispatch over a priority field on each pattern. A priority field would let authors pin matches explicitly, but it pushes ordering knowledge out of the regex set into a separate ranking — and we already saw in #211 that humans miss this kind of cross-cutting state. Longest-match keeps the precedence rule local to the pattern itself.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["priority", "rejected", "#211", "local"],
+  "category": "justification",
+  "intended_backend": "llm-rubric",
+  "notes": "Names the rejected alternative (priority field) and gives a concrete reason it was rejected."
+}

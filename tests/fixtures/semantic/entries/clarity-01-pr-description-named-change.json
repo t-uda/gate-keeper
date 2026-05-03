@@ -1,0 +1,12 @@
+{
+  "rule_text": "The PR description names the user-visible change in the first sentence.",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_strong.md"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["classifier", "longest-match", "first sentence"],
+  "category": "clarity",
+  "intended_backend": "llm-rubric",
+  "notes": "Strong PR description leads with a specific change ('Switch rule classifier to longest-match dispatch')."
+}

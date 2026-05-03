@@ -1,0 +1,12 @@
+{
+  "rule_text": "Each rule bullet expresses a single judgable claim.",
+  "target": {
+    "kind": "inline",
+    "value": "- The README documents the install command.\n- The README documents how to run the validate command.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["single", "claim", "bullet"],
+  "category": "clarity",
+  "intended_backend": "llm-rubric",
+  "notes": "Two bullets, each with exactly one claim."
+}

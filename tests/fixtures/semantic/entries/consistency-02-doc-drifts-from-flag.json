@@ -1,0 +1,12 @@
+{
+  "rule_text": "The README's documented CLI flags match the flags the CLI actually accepts.",
+  "target": {
+    "kind": "inline",
+    "value": "README:\n  gate-keeper validate DOCUMENT --target TARGET [--strict] [--quiet]\n\nCLI parser registers:\n  positional: DOCUMENT\n  required: --target\n  optional flags: --strict, --explain\n"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["--quiet", "--explain", "drift"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "README documents `--quiet` (not registered) and omits `--explain` (registered)."
+}

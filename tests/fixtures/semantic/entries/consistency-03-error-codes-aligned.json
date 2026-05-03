@@ -1,0 +1,12 @@
+{
+  "rule_text": "Documented exit codes match the exit codes the CLI returns.",
+  "target": {
+    "kind": "inline",
+    "value": "README: 0 pass, 1 fail, 2 usage error.\nCLI source: returns 0 on all-pass, 1 on any fail, 2 on argparse / IO errors.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["0", "1", "2", "match"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Three documented exit codes line up with three returned exit codes."
+}

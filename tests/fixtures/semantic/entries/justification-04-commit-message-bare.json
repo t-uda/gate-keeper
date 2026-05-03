@@ -1,0 +1,12 @@
+{
+  "rule_text": "The commit message body explains why the change was made.",
+  "target": {
+    "kind": "inline",
+    "value": "fix classifier\n\nfix the bug\n"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["why", "missing", "fix the bug"],
+  "category": "justification",
+  "intended_backend": "llm-rubric",
+  "notes": "Body restates the subject without explaining motivation or context."
+}
