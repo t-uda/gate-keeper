@@ -124,9 +124,7 @@ class TestRunCliNonZeroExit:
         assert result.stdout == "all good"
 
     def test_argv_starts_with_executable(self, monkeypatch):
-        monkeypatch.setattr(
-            subprocess, "run", lambda *a, **kw: _make_completed(returncode=1)
-        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(returncode=1))
         result = run_cli("eslint", ["--fix", "src/"])
         assert result.cmd == ("eslint", "--fix", "src/")
 
@@ -209,9 +207,7 @@ class TestRunCliRedactor:
 
     def test_redactor_applied_to_partial_stderr_on_timeout(self, monkeypatch):
         def _raise(*a, **kw):
-            raise subprocess.TimeoutExpired(
-                cmd=["tool"], timeout=2.0, stderr="leak=xyz"
-            )
+            raise subprocess.TimeoutExpired(cmd=["tool"], timeout=2.0, stderr="leak=xyz")
 
         monkeypatch.setattr(subprocess, "run", _raise)
         result = run_cli(
@@ -248,15 +244,10 @@ class TestClassifyCliFailure:
         )
 
     def test_binary_missing_flag_is_missing(self):
-        assert (
-            classify_cli_failure(self._result(127, binary_missing=True))
-            is CliFault.MISSING
-        )
+        assert classify_cli_failure(self._result(127, binary_missing=True)) is CliFault.MISSING
 
     def test_timed_out_flag_is_timeout(self):
-        assert (
-            classify_cli_failure(self._result(-2, timed_out=True)) is CliFault.TIMEOUT
-        )
+        assert classify_cli_failure(self._result(-2, timed_out=True)) is CliFault.TIMEOUT
 
     def test_os_error_returncode_is_os_error(self):
         # Returncode -3 without timed_out/binary_missing flags maps to OS_ERROR.
@@ -312,9 +303,7 @@ class TestDiagBuilders:
     def test_cli_failed_diag_truncates_long_stderr(self):
         rule = _rule()
         long_stderr = "x" * 5000
-        result = CliResult(
-            ok=False, stdout="", stderr=long_stderr, returncode=1, cmd=("tool",)
-        )
+        result = CliResult(ok=False, stdout="", stderr=long_stderr, returncode=1, cmd=("tool",))
         diag = cli_failed_diag(rule, Backend.FILESYSTEM, "op", result)
         excerpt = diag.evidence[0].data["stderr_excerpt"]
         assert len(excerpt) < len(long_stderr)
@@ -437,9 +426,7 @@ class TestFailureDiagDispatch:
 
     def test_generic_nonzero_routes_to_cli_failure(self):
         rule = _rule()
-        result = CliResult(
-            ok=False, stdout="", stderr="boom", returncode=1, cmd=("tool",)
-        )
+        result = CliResult(ok=False, stdout="", stderr="boom", returncode=1, cmd=("tool",))
         diag = failure_diag(rule, Backend.FILESYSTEM, "lint", result)
         assert diag.evidence[0].kind == "cli_failure"
         assert diag.status is Status.UNAVAILABLE
@@ -481,27 +468,21 @@ class TestDiagRoundTrip:
         assert rebuilt.evidence[0].data["executable"] == "textlint"
 
     def test_cli_failed_diag_round_trips(self):
-        result = CliResult(
-            ok=False, stdout="", stderr="err", returncode=1, cmd=("tool", "arg")
-        )
+        result = CliResult(ok=False, stdout="", stderr="err", returncode=1, cmd=("tool", "arg"))
         diag = cli_failed_diag(_rule(), Backend.FILESYSTEM, "op", result)
         rebuilt = self._round_trip(diag)
         assert rebuilt.evidence[0].data["op"] == "op"
         assert rebuilt.evidence[0].data["returncode"] == 1
 
     def test_cli_timeout_diag_round_trips(self):
-        result = CliResult(
-            ok=False, stdout="", stderr="t", returncode=-2, cmd=("t",), timed_out=True
-        )
+        result = CliResult(ok=False, stdout="", stderr="t", returncode=-2, cmd=("t",), timed_out=True)
         diag = cli_timeout_diag(_rule(), Backend.FILESYSTEM, "op", result)
         rebuilt = self._round_trip(diag)
         assert rebuilt.status is Status.ERROR
         assert rebuilt.evidence[0].kind == "cli_timeout"
 
     def test_cli_os_error_diag_round_trips(self):
-        result = CliResult(
-            ok=False, stdout="", stderr="o", returncode=-3, cmd=("t",)
-        )
+        result = CliResult(ok=False, stdout="", stderr="o", returncode=-3, cmd=("t",))
         diag = cli_os_error_diag(_rule(), Backend.FILESYSTEM, "op", result)
         rebuilt = self._round_trip(diag)
         assert rebuilt.status is Status.ERROR
