@@ -163,10 +163,11 @@ sentence) that the model can locate or not locate in the supplied commit text.
 
 ## 4. Relationship to existing docs
 
-**`docs/example-rules.md`** shows the full spectrum of rule types that
-`gate-keeper` compiles — filesystem checks, GitHub PR checks, and semantic rules
-mixed in a single document. The semantic bullets in that file are minimal
-illustrative examples; the patterns in this guide govern how to write them
+**`docs/example-rules.md`** shows filesystem checks and GitHub PR checks
+compiled by `gate-keeper`. It does not contain semantic rules. For concrete
+semantic-rule specimens, see `tests/fixtures/semantic/entries/*.json` (the
+benchmark fixture set) and `tests/fixtures/semantic/README.md` (fixture schema
+and vocabulary). The patterns in this guide govern how to write semantic rules
 well.
 
 **`docs/llm-rubric.md`** documents the `llm-rubric` backend: advisory status,
