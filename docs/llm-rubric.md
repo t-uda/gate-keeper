@@ -97,12 +97,35 @@ context passed to the model:
 }
 ```
 
+### Structured judgment schema (`LlmJudgment`)
+
+The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v1"`)
+to respond with a JSON object matching the `LlmJudgment` dataclass:
+
+```json
+{
+  "judgment":                    "pass" | "fail",
+  "primary_reason":              "<one sentence>",
+  "supporting_evidence_quotes":  ["<verbatim quote>", ...],
+  "suggested_action":            "<concrete fix>" | null
+}
+```
+
+Constraints enforced by `_parse_llm_judgment()`:
+- `judgment` must be exactly `"pass"` or `"fail"`.
+- `primary_reason` must be a non-empty string (single sentence).
+- `supporting_evidence_quotes` must contain at least one entry when `judgment` is `"fail"`; may be empty on `"pass"`.
+- `suggested_action` must be a non-empty string on `"fail"` and is coerced to `null` on `"pass"`.
+- Extra fields in the JSON response are silently ignored (forward-compatible).
+
+### Successful diagnostic shape
+
 When a provider responds successfully, the diagnostic carries:
 
 - `status`: `pass` or `fail`.
-- `message`: a one-line explanation from the model.
-- `evidence[0]`: `{ kind: "llm_judgment", data: { model, judgment, explanation } }`.
-- `remediation`: set when `status=fail`, omitted otherwise.
+- `message`: the `primary_reason` from the structured judgment.
+- `evidence[0]`: `{ kind: "llm_judgment", data: { model, prompt_version, judgment, primary_reason, supporting_evidence_quotes, suggested_action } }`.
+- `remediation`: set to `suggested_action` when `status=fail`; `null` on `pass`.
 
 ## Failure modes
 

@@ -4,13 +4,19 @@ Covers both the unconfigured fallback (fail-closed ``unavailable``) and the
 configured-provider paths (``pass``, ``fail``, provider error, unparseable
 response). Provider clients and the dotenv loader are monkeypatched so no
 network call is ever made.
+
+Updated in #67 to assert on the new structured ``LlmJudgment`` evidence shape.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
 from gate_keeper.backends import llm_rubric as llm_backend
+from gate_keeper.backends.llm_rubric import LlmJudgment, LlmJudgmentParseError
 from gate_keeper.diagnostics import EXIT_FAIL, EXIT_OK, compute_exit_code
 from gate_keeper.models import (
     Backend,
@@ -22,6 +28,28 @@ from gate_keeper.models import (
     Status,
 )
 from gate_keeper.validator import validate
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_VALID_PASS_JSON = json.dumps(
+    {
+        "judgment": "pass",
+        "primary_reason": "Documentation reads clearly.",
+        "supporting_evidence_quotes": [],
+        "suggested_action": None,
+    }
+)
+
+_VALID_FAIL_JSON = json.dumps(
+    {
+        "judgment": "fail",
+        "primary_reason": "Section headings are missing.",
+        "supporting_evidence_quotes": ["README.md has no '## Usage' heading"],
+        "suggested_action": "Add a '## Usage' section with a code example.",
+    }
+)
 
 
 def _semantic_rule(kind: RuleKind = RuleKind.SEMANTIC_RUBRIC) -> Rule:
@@ -36,6 +64,11 @@ def _semantic_rule(kind: RuleKind = RuleKind.SEMANTIC_RUBRIC) -> Rule:
         confidence=Confidence.LOW,
         params={},
     )
+
+
+# ---------------------------------------------------------------------------
+# Unconfigured / stub path
+# ---------------------------------------------------------------------------
 
 
 class TestLlmRubricBackendStub:
@@ -119,6 +152,11 @@ class TestLlmRubricBackendStub:
         assert compute_exit_code(report.diagnostics) == EXIT_FAIL
 
 
+# ---------------------------------------------------------------------------
+# dotenv loader
+# ---------------------------------------------------------------------------
+
+
 class TestDotenvLoader:
     def test_returns_empty_when_file_absent(self, tmp_path):
         missing = tmp_path / "no-such.env"
@@ -142,6 +180,11 @@ class TestDotenvLoader:
         monkeypatch.delenv("GATE_KEEPER_TEST_SENTINEL", raising=False)
         llm_backend._load_env_file(path)
         assert "GATE_KEEPER_TEST_SENTINEL" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# _is_configured
+# ---------------------------------------------------------------------------
 
 
 class TestIsConfigured:
@@ -188,8 +231,18 @@ class TestIsConfigured:
         assert llm_backend._is_configured() is True
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _patch_env(monkeypatch, env: dict[str, str]) -> None:
     monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **k: env)
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch — Anthropic (#67: updated to structured schema)
+# ---------------------------------------------------------------------------
 
 
 class TestProviderDispatchAnthropic:
@@ -203,9 +256,7 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda key, system, user, model: (
-                '{"judgment": "pass", "explanation": "Documentation reads clearly."}'
-            ),
+            lambda key, system, user, model: _VALID_PASS_JSON,
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.PASS
@@ -213,7 +264,10 @@ class TestProviderDispatchAnthropic:
         assert diag.evidence[0].kind == "llm_judgment"
         assert diag.evidence[0].data["judgment"] == "pass"
         assert diag.evidence[0].data["model"] == llm_backend.ANTHROPIC_DEFAULT_MODEL
-        assert diag.evidence[0].data["explanation"] == "Documentation reads clearly."
+        assert diag.evidence[0].data["prompt_version"] == llm_backend.PROMPT_VERSION
+        assert diag.evidence[0].data["primary_reason"] == "Documentation reads clearly."
+        assert isinstance(diag.evidence[0].data["supporting_evidence_quotes"], list)
+        assert diag.evidence[0].data["suggested_action"] is None
         assert diag.remediation is None
         assert compute_exit_code([diag]) == EXIT_OK
 
@@ -222,15 +276,17 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda key, system, user, model: (
-                '{"judgment": "fail", "explanation": "Section headings are missing."}'
-            ),
+            lambda key, system, user, model: _VALID_FAIL_JSON,
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.FAIL
         assert diag.evidence[0].kind == "llm_judgment"
         assert diag.evidence[0].data["judgment"] == "fail"
-        assert diag.remediation is not None
+        assert diag.evidence[0].data["primary_reason"] == "Section headings are missing."
+        assert len(diag.evidence[0].data["supporting_evidence_quotes"]) >= 1
+        assert diag.evidence[0].data["suggested_action"] == "Add a '## Usage' section with a code example."
+        # Diagnostic.remediation should be suggested_action
+        assert diag.remediation == "Add a '## Usage' section with a code example."
         assert compute_exit_code([diag]) == EXIT_FAIL
 
     def test_provider_exception_maps_to_unavailable(self, monkeypatch, tmp_path):
@@ -265,7 +321,14 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: '{"judgment": "maybe", "explanation": "unsure"}',
+            lambda *_a, **_k: json.dumps(
+                {
+                    "judgment": "maybe",
+                    "primary_reason": "unsure",
+                    "supporting_evidence_quotes": [],
+                    "suggested_action": None,
+                }
+            ),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.UNAVAILABLE
@@ -277,7 +340,7 @@ class TestProviderDispatchAnthropic:
 
         def _anthropic(*_a, **_k):
             called["anthropic"] = True
-            return '{"judgment": "pass", "explanation": "ok"}'
+            return _VALID_PASS_JSON
 
         def _openai(*_a, **_k):
             called["openai"] = True
@@ -287,6 +350,11 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(llm_backend, "_call_openai", _openai)
         llm_backend.check(_semantic_rule(), tmp_path)
         assert called == {"anthropic": True, "openai": False}
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch — OpenAI (#67: updated to structured schema)
+# ---------------------------------------------------------------------------
 
 
 class TestProviderDispatchOpenAI:
@@ -300,23 +368,25 @@ class TestProviderDispatchOpenAI:
         monkeypatch.setattr(
             llm_backend,
             "_call_openai",
-            lambda *_a, **_k: '{"judgment": "pass", "explanation": "Reads clearly."}',
+            lambda *_a, **_k: _VALID_PASS_JSON,
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.PASS
         assert diag.evidence[0].data["model"] == llm_backend.OPENAI_DEFAULT_MODEL
         assert diag.evidence[0].data["judgment"] == "pass"
+        assert diag.evidence[0].data["prompt_version"] == llm_backend.PROMPT_VERSION
 
     def test_fail_response_maps_to_fail(self, monkeypatch, tmp_path):
         _patch_env(monkeypatch, self._ENV)
         monkeypatch.setattr(
             llm_backend,
             "_call_openai",
-            lambda *_a, **_k: '{"judgment": "fail", "explanation": "Missing sections."}',
+            lambda *_a, **_k: _VALID_FAIL_JSON,
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.FAIL
         assert diag.evidence[0].data["model"] == llm_backend.OPENAI_DEFAULT_MODEL
+        assert diag.evidence[0].data["judgment"] == "fail"
 
     def test_provider_exception_maps_to_unavailable(self, monkeypatch, tmp_path):
         _patch_env(monkeypatch, self._ENV)
@@ -331,29 +401,211 @@ class TestProviderDispatchOpenAI:
         assert diag.evidence[0].data["failure_mode"] == "TimeoutError"
 
 
+# ---------------------------------------------------------------------------
+# _parse_llm_judgment — unit tests for new structured parser (#67)
+# ---------------------------------------------------------------------------
+
+
+class TestParseLlmJudgment:
+    """New tests covering all acceptance-criteria cases from #67."""
+
+    def test_valid_pass(self):
+        result = llm_backend._parse_llm_judgment(_VALID_PASS_JSON)
+        assert isinstance(result, LlmJudgment)
+        assert result.judgment == "pass"
+        assert result.primary_reason == "Documentation reads clearly."
+        assert result.supporting_evidence_quotes == []
+        assert result.suggested_action is None
+
+    def test_valid_fail_with_quotes_and_action(self):
+        result = llm_backend._parse_llm_judgment(_VALID_FAIL_JSON)
+        assert isinstance(result, LlmJudgment)
+        assert result.judgment == "fail"
+        assert result.primary_reason == "Section headings are missing."
+        assert len(result.supporting_evidence_quotes) >= 1
+        assert result.suggested_action == "Add a '## Usage' section with a code example."
+
+    def test_missing_required_field_judgment(self):
+        payload = json.dumps(
+            {
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+        assert "judgment" in result.detail
+
+    def test_missing_required_field_primary_reason(self):
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+
+    def test_missing_required_field_supporting_evidence_quotes(self):
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+
+    def test_extra_field_is_ignored(self):
+        """Extra JSON fields must be silently ignored (graceful forward compat)."""
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Looks good.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+                "unknown_future_field": "should be ignored",
+                "another_extra": 42,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgment)
+        assert result.judgment == "pass"
+
+    def test_invalid_judgment_enum_value(self):
+        payload = json.dumps(
+            {
+                "judgment": "maybe",
+                "primary_reason": "unsure",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "invalid_judgment_value"
+
+    def test_malformed_json(self):
+        result = llm_backend._parse_llm_judgment("not json at all {{")
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "invalid_json"
+
+    def test_empty_string(self):
+        result = llm_backend._parse_llm_judgment("")
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "empty_response"
+
+    def test_raw_response_excerpt_populated(self):
+        """Parse errors must carry first ~200 chars of the raw response."""
+        long_garbage = "x" * 300
+        result = llm_backend._parse_llm_judgment(long_garbage)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert len(result.raw_response_excerpt) <= 200
+
+    def test_fail_without_quotes_returns_error(self):
+        """fail judgment with empty quotes list is a validation error."""
+        payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "Missing sections.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": "Add them.",
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+
+    def test_fail_without_suggested_action_returns_error(self):
+        payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "Missing sections.",
+                "supporting_evidence_quotes": ["some quote"],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+
+    def test_pass_suggested_action_forced_to_none(self):
+        """Even if model returns suggested_action on pass, it must be coerced to None."""
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Looks good.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": "Some spurious action from model",
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgment)
+        assert result.suggested_action is None
+
+    def test_non_object_json_returns_error(self):
+        result = llm_backend._parse_llm_judgment('["pass"]')
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "invalid_json"
+
+
+# ---------------------------------------------------------------------------
+# _parse_response backward-compat shim (legacy tests, kept for regression)
+# ---------------------------------------------------------------------------
+
+
 class TestParseResponseDirect:
-    def test_pass_with_explanation(self):
-        judgment, explanation = llm_backend._parse_response('{"judgment": "pass", "explanation": "ok"}')
+    def test_pass_with_primary_reason(self):
+        judgment, reason = llm_backend._parse_response(_VALID_PASS_JSON)
         assert judgment == "pass"
-        assert explanation == "ok"
+        assert reason == "Documentation reads clearly."
 
     def test_invalid_json_raises(self):
-        import pytest as _pytest
-
-        with _pytest.raises(ValueError):
+        with pytest.raises(ValueError):
             llm_backend._parse_response("not json at all")
 
     def test_non_object_raises(self):
-        import pytest as _pytest
-
-        with _pytest.raises(ValueError):
+        with pytest.raises(ValueError):
             llm_backend._parse_response('["pass"]')
 
-    def test_empty_explanation_raises(self):
-        import pytest as _pytest
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError):
+            llm_backend._parse_response("")
 
-        with _pytest.raises(ValueError):
-            llm_backend._parse_response('{"judgment": "pass", "explanation": ""}')
+
+# ---------------------------------------------------------------------------
+# PROMPT_VERSION constant
+# ---------------------------------------------------------------------------
+
+
+class TestPromptVersion:
+    def test_prompt_version_constant_exists(self):
+        assert hasattr(llm_backend, "PROMPT_VERSION")
+        assert llm_backend.PROMPT_VERSION == "v1"
+
+    def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
+        _patch_env(
+            monkeypatch,
+            {"GATE_KEEPER_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-ant-test"},
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _VALID_PASS_JSON,
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.evidence[0].data["prompt_version"] == "v1"
+
+
+# ---------------------------------------------------------------------------
+# Path constants (#51 regression guard)
+# ---------------------------------------------------------------------------
 
 
 class TestPathConstants:
