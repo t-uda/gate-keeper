@@ -70,6 +70,7 @@ def _semantic_rule(kind: RuleKind = RuleKind.SEMANTIC_RUBRIC) -> Rule:
 # Unconfigured / stub path
 # ---------------------------------------------------------------------------
 
+
 class TestLlmRubricBackendStub:
     def test_check_returns_unavailable(self, tmp_path):
         rule = _semantic_rule()
@@ -155,6 +156,7 @@ class TestLlmRubricBackendStub:
 # dotenv loader
 # ---------------------------------------------------------------------------
 
+
 class TestDotenvLoader:
     def test_returns_empty_when_file_absent(self, tmp_path):
         missing = tmp_path / "no-such.env"
@@ -183,6 +185,7 @@ class TestDotenvLoader:
 # ---------------------------------------------------------------------------
 # _is_configured
 # ---------------------------------------------------------------------------
+
 
 class TestIsConfigured:
     def test_false_when_provider_missing(self, monkeypatch):
@@ -232,6 +235,7 @@ class TestIsConfigured:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _patch_env(monkeypatch, env: dict[str, str]) -> None:
     monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **k: env)
 
@@ -239,6 +243,7 @@ def _patch_env(monkeypatch, env: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 # Provider dispatch — Anthropic (#67: updated to structured schema)
 # ---------------------------------------------------------------------------
+
 
 class TestProviderDispatchAnthropic:
     _ENV = {
@@ -351,6 +356,7 @@ class TestProviderDispatchAnthropic:
 # Provider dispatch — OpenAI (#67: updated to structured schema)
 # ---------------------------------------------------------------------------
 
+
 class TestProviderDispatchOpenAI:
     _ENV = {
         "GATE_KEEPER_LLM_PROVIDER": "openai",
@@ -398,6 +404,7 @@ class TestProviderDispatchOpenAI:
 # ---------------------------------------------------------------------------
 # _parse_llm_judgment — unit tests for new structured parser (#67)
 # ---------------------------------------------------------------------------
+
 
 class TestParseLlmJudgment:
     """New tests covering all acceptance-criteria cases from #67."""
@@ -552,6 +559,7 @@ class TestParseLlmJudgment:
 # _parse_response backward-compat shim (legacy tests, kept for regression)
 # ---------------------------------------------------------------------------
 
+
 class TestParseResponseDirect:
     def test_pass_with_primary_reason(self):
         judgment, reason = llm_backend._parse_response(_VALID_PASS_JSON)
@@ -575,6 +583,7 @@ class TestParseResponseDirect:
 # PROMPT_VERSION constant
 # ---------------------------------------------------------------------------
 
+
 class TestPromptVersion:
     def test_prompt_version_constant_exists(self):
         assert hasattr(llm_backend, "PROMPT_VERSION")
@@ -597,6 +606,7 @@ class TestPromptVersion:
 # ---------------------------------------------------------------------------
 # Path constants (#51 regression guard)
 # ---------------------------------------------------------------------------
+
 
 class TestPathConstants:
     def test_dotenv_path_matches_spec(self):

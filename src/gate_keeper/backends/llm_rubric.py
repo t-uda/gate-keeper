@@ -33,6 +33,7 @@ PROMPT_VERSION = "v1"
 # Structured LLM judgment schema (#67)
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class LlmJudgment:
     """Structured output schema for a single LLM rubric evaluation.
@@ -135,6 +136,7 @@ RUBRIC_SYSTEM_PROMPT = (
 # dotenv loader
 # ---------------------------------------------------------------------------
 
+
 def _load_env_file(path: Path = DOTENV_PATH) -> dict[str, str]:
     """Load the per-project dotenv file without mutating ``os.environ``.
 
@@ -163,6 +165,7 @@ def _is_configured() -> bool:
 # Rubric input builder
 # ---------------------------------------------------------------------------
 
+
 def _build_rubric_input(rule: Rule, target: str | Path) -> dict[str, Any]:
     """Return the context dict passed to the model and recorded in evidence.
 
@@ -184,6 +187,7 @@ def _build_prompt(rule: Rule, target: str | Path) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Provider call helpers
 # ---------------------------------------------------------------------------
+
 
 def _call_anthropic(api_key: str, system: str, user: str, model: str) -> str:
     from anthropic import Anthropic
@@ -221,6 +225,7 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> str:
 # ---------------------------------------------------------------------------
 # Parser / validator (#67)
 # ---------------------------------------------------------------------------
+
 
 def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
     """Parse and validate a raw model response string into ``LlmJudgment``.
@@ -318,6 +323,7 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
 # call _parse_response directly.  New code should call _parse_llm_judgment.
 # ---------------------------------------------------------------------------
 
+
 def _parse_response(text: str) -> tuple[str, str]:
     """Parse ``{"judgment", ...}`` from model output. Raises ``ValueError``.
 
@@ -335,6 +341,7 @@ def _parse_response(text: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Diagnostic constructors — #51 contract preserved byte-for-byte
 # ---------------------------------------------------------------------------
+
 
 def _unavailable_unconfigured(rule: Rule, rubric_input: dict[str, Any]) -> Diagnostic:
     return Diagnostic(
@@ -387,6 +394,7 @@ def _unavailable_provider_error(
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
+
 
 def check(rule: Rule, target: str | Path) -> Diagnostic:
     """Evaluate a semantic-rubric rule against *target*.
