@@ -4,8 +4,12 @@ Maps backend name strings to callable check functions.  Each entry wraps a
 module-level ``check(rule, target) -> Diagnostic`` function so callers can
 look up backends by name without importing modules directly.
 
-Registered names (all three must be present for `--backend` choices):
-  ``filesystem``, ``github``, ``llm-rubric``
+Registered names (all four must be present for `--backend` choices):
+  ``filesystem``, ``github``, ``llm-rubric``, ``external``
+
+The ``external`` backend is a dispatcher for third-party tool adapters
+(textlint, vale, …); see ``gate_keeper.backends.external`` and
+``docs/backend-external.md`` for the adapter contract.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 # Import backend modules — avoid circular deps by keeping these as plain imports.
+from gate_keeper.backends import external as _ext
 from gate_keeper.backends import filesystem as _fs
 from gate_keeper.backends import github as _gh
 from gate_keeper.backends import llm_rubric as _llm
@@ -24,6 +29,7 @@ _REGISTRY: dict[str, Callable[[Rule, str | Path], Diagnostic]] = {
     _fs.name: _fs.check,
     _gh.name: _gh.check,
     _llm.name: _llm.check,
+    _ext.name: _ext.check,
 }
 
 #: Sorted list of all registered backend names (used for argparse ``choices``).

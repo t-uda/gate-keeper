@@ -79,13 +79,19 @@ shape beyond those two top-level keys.
 ## Enums
 
 ### `Backend`
-`filesystem`, `github`, `llm-rubric`
+`filesystem`, `github`, `llm-rubric`, `external`
+
+The `external` backend is a single dispatcher for third-party tool adapters
+(textlint, vale, eslint, …). New tools register as adapters under this
+backend rather than minting new `Backend` enum values; see
+[`docs/backend-external.md`](backend-external.md) for the adapter contract.
 
 ### `RuleKind`
 `file_exists`, `file_absent`, `path_matches`, `text_required`, `text_forbidden`,
 `markdown_tasks_complete`, `github_pr_open`, `github_not_draft`,
 `github_labels_absent`, `github_tasks_complete`, `github_checks_success`,
-`github_threads_resolved`, `github_non_author_approval`, `semantic_rubric`
+`github_threads_resolved`, `github_non_author_approval`, `semantic_rubric`,
+`external_check`
 
 ### `Severity`
 `error`, `warning`, `advisory`
@@ -102,6 +108,7 @@ shape beyond those two top-level keys.
 | ------ | ------------ | ------- | ----- |
 | `github_labels_absent` | `labels` | `["blocked","do-not-merge","needs-decision"]` | List of blocking label names (case-insensitive). Absent key uses default list; explicit `[]` means no blocking labels → always PASS. |
 | `github_checks_success` | _(none)_ | — | Evaluates every entry in `statusCheckRollup` as required; only `SUCCESS` state/conclusion passes. Branch protection remains the authoritative control plane. |
+| `external_check` | `tool` | _(required)_ | String adapter id selecting which `external` adapter handles the rule (e.g. `"textlint"`). Missing → `unavailable` / `params_error`; unregistered → `unsupported` / `adapter_unknown`. All other `params` keys are forwarded verbatim to the adapter, which owns its own per-tool keys. See [`docs/backend-external.md`](backend-external.md). |
 
 ## `github_non_author_approval` — formal evidence and limitations
 

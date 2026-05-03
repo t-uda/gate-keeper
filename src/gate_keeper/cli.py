@@ -8,7 +8,7 @@ from gate_keeper import __version__
 from gate_keeper.diagnostics import EXIT_OK, EXIT_USAGE
 
 # Backend choices exposed by the registry (always includes auto).
-_BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric"]
+_BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric", "external"]
 
 
 def build_parser() -> argparse.ArgumentParser:
