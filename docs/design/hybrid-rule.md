@@ -81,10 +81,14 @@ context):
 
 ```
 evidence = [
-  {"kind": "hybrid_precheck", "data": {"stage": "deterministic", "tool": "textlint",
-                                        "status": "pass", ...adapter evidence...}},
-  {"kind": "hybrid_semantic",  "data": {"stage": "semantic",       "model": "...",
-                                        "judgment": "pass", "explanation": "..."}}
+  {"kind": "hybrid_deterministic", "data": {"stage": "deterministic",
+                                             "inner_kind": "<adapter kind>",
+                                             "inner_data": {...adapter evidence...}}},
+  {"kind": "hybrid_semantic",      "data": {"stage": "semantic",
+                                             "inner_kind": "<llm-rubric kind>",
+                                             "inner_data": {"model": "...",
+                                                            "judgment": "pass",
+                                                            "explanation": "..."}}}
 ]
 ```
 
@@ -112,10 +116,12 @@ carries the combined verdict; individual stage statuses are readable from `evide
 
 Special cases:
 
-- Deterministic `UNAVAILABLE` or `ERROR`: propagate as `UNAVAILABLE` on the hybrid
-  diagnostic; do not proceed to semantic. Rationale: fail-closed.
-- Semantic `UNAVAILABLE` when deterministic PASSED: propagate `UNAVAILABLE` on the
-  hybrid diagnostic. Rationale: fail-closed; the rule cannot be fully evaluated.
+- Deterministic `UNAVAILABLE`, `ERROR`, or `UNSUPPORTED`: propagate as `UNAVAILABLE`
+  on the hybrid diagnostic; do not proceed to semantic. Rationale: fail-closed.
+  `UNSUPPORTED` is treated as `UNAVAILABLE` because the check cannot be completed.
+- Semantic `UNAVAILABLE` or `UNSUPPORTED` when deterministic PASSED: propagate
+  `UNAVAILABLE` on the hybrid diagnostic. Rationale: fail-closed; the rule cannot be
+  fully evaluated.
 - Deterministic `PASS` + semantic `UNAVAILABLE` with `severity = advisory`: propagate
   `UNAVAILABLE`. Advisory severity is never a reason to suppress unavailability.
 
@@ -138,11 +144,14 @@ runtime configuration.
 
 ### 3.5 Source phrasing in Markdown
 
-**Recommendation: inline YAML front-matter block within the rule list item.**
+**Recommendation: fenced gate-keeper annotation block within the rule list item.**
 
 Rules are currently authored as bullet-list items in Markdown. A hybrid rule uses an
-extended syntax with a fenced annotation block immediately following the bullet, parsed
-by the classifier as a sub-rule specification:
+extended syntax with a fenced code block (language tag `gate-keeper`) immediately
+following the bullet. This is not "inline YAML front-matter" — it is a standard
+Markdown fenced code block. It is not visible to the current classifier without parser
+changes; detection and extraction are performed by the Markdown parser/compiler
+pipeline (deferred to sub-issue 73b), not by the classifier:
 
 ```markdown
 ## PR Description Checks
@@ -205,14 +214,20 @@ class HybridStage:
 #   }
 # }
 #
-# Rule.backend_hint = Backend.LLM_RUBRIC (highest-cost backend; used for routing
-# decisions that need a single hint, e.g. --skip-llm flags).
+# Rule.backend_hint = Backend.LLM_RUBRIC (highest-cost backend; used as the
+# single routing hint when a caller needs one value, e.g. for --backend filtering).
 ```
 
 The `backend_hint` on a hybrid rule is set to the highest-cost backend present
 (`LLM_RUBRIC` takes precedence over `EXTERNAL`, which takes precedence over `FILESYSTEM`
-or `GITHUB`). This lets existing `--backend` flag semantics skip the whole hybrid rule
-when the flag would skip the most expensive stage.
+or `GITHUB`).
+
+Note on current CLI behaviour: `--backend X` (the only relevant flag; there is no
+`--skip-llm`) forces *all* rules through backend X and returns `unsupported` for any
+rule whose kind that backend cannot handle — it does not skip rules based on
+`backend_hint`. The interaction contract between `--backend` and hybrid rules (e.g.
+whether passing `--backend filesystem` should skip only the semantic stage of a hybrid
+rule or the whole rule) is deferred to sub-issue 73b.
 
 ---
 
@@ -239,11 +254,19 @@ def dispatch_hybrid(rule: Rule, target: str | Path) -> Diagnostic:
 
     if short_circuit and pre_diag.status is not Status.PASS:
         # Deterministic stage non-PASS: return without spending tokens.
+        # Map ERROR and UNSUPPORTED to UNAVAILABLE (fail-closed; §3.3).
+        _NON_PASS_TO_HYBRID = {
+            Status.FAIL:        Status.FAIL,
+            Status.UNAVAILABLE: Status.UNAVAILABLE,
+            Status.ERROR:       Status.UNAVAILABLE,   # fail-closed
+            Status.UNSUPPORTED: Status.UNAVAILABLE,   # treat like unavailable
+        }
+        hybrid_status = _NON_PASS_TO_HYBRID.get(pre_diag.status, Status.UNAVAILABLE)
         return Diagnostic(
             rule_id=rule.id,
             source=rule.source,
             backend=Backend.LLM_RUBRIC,   # canonical backend for hybrid
-            status=pre_diag.status,
+            status=hybrid_status,
             severity=rule.severity,
             message=(
                 f"[precheck {pre_diag.status.value}] {pre_diag.message} "
@@ -274,21 +297,34 @@ def dispatch_hybrid(rule: Rule, target: str | Path) -> Diagnostic:
 
 
 def _combine_status(pre: Status, sem: Status) -> Status:
-    """FAIL from either stage dominates. UNAVAILABLE propagates over PASS."""
+    """FAIL from either stage dominates. UNAVAILABLE/ERROR/UNSUPPORTED propagate over PASS."""
     if Status.FAIL in (pre, sem):
         return Status.FAIL
-    if Status.UNAVAILABLE in (pre, sem) or Status.ERROR in (pre, sem):
-        return Status.UNAVAILABLE
+    _non_pass = {Status.UNAVAILABLE, Status.ERROR, Status.UNSUPPORTED}
+    if pre in _non_pass or sem in _non_pass:
+        return Status.UNAVAILABLE   # UNSUPPORTED treated like UNAVAILABLE (fail-closed)
     return Status.PASS
 
 
 def _label_evidence(
     items: list[Evidence], stage: str
 ) -> list[Evidence]:
-    """Wrap each Evidence item under a stage-labelled hybrid_* kind."""
+    """Wrap each Evidence item under a stage-labelled hybrid_* kind.
+
+    The original evidence is nested under ``inner_data`` / ``inner_kind`` to
+    avoid silently shadowing keys if the adapter already uses ``stage`` or
+    ``_kind`` in its own data dict.
+    """
     wrapper_kind = f"hybrid_{stage}"
     return [
-        Evidence(kind=wrapper_kind, data={"stage": stage, **item.data, "_kind": item.kind})
+        Evidence(
+            kind=wrapper_kind,
+            data={
+                "stage": stage,
+                "inner_kind": item.kind,
+                "inner_data": item.data,
+            },
+        )
         for item in items
     ]
 ```
