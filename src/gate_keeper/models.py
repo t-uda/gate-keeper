@@ -16,6 +16,7 @@ class Backend(str, enum.Enum):
     FILESYSTEM = "filesystem"
     GITHUB = "github"
     LLM_RUBRIC = "llm-rubric"
+    EXTERNAL = "external"
 
 
 class Status(str, enum.Enum):
@@ -53,6 +54,7 @@ class RuleKind(str, enum.Enum):
     GITHUB_THREADS_RESOLVED = "github_threads_resolved"
     GITHUB_NON_AUTHOR_APPROVAL = "github_non_author_approval"
     SEMANTIC_RUBRIC = "semantic_rubric"
+    EXTERNAL_CHECK = "external_check"
 
 
 def _require_keys(

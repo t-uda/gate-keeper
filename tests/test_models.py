@@ -23,7 +23,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "ir"
 
 
 def test_backend_members():
-    assert {m.value for m in Backend} == {"filesystem", "github", "llm-rubric"}
+    assert {m.value for m in Backend} == {"filesystem", "github", "llm-rubric", "external"}
 
 
 def test_status_members():
@@ -60,6 +60,7 @@ def test_rule_kind_members():
         "github_threads_resolved",
         "github_non_author_approval",
         "semantic_rubric",
+        "external_check",
     }
 
 
