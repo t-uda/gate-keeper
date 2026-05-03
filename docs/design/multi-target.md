@@ -119,7 +119,10 @@ via evidence records. No heuristic file ranking is applied without a
 
 **Recommendation: default cap of 32 000 tokens (≈ 128 KB of UTF-8 text) per
 rule evaluation; override via `params.token_budget` (integer, tokens); global
-override via env var `GATE_KEEPER_TOKEN_BUDGET`.**
+override via `GATE_KEEPER_TOKEN_BUDGET` in the per-project dotenv file (applies
+to the `llm-rubric` backend only — same file read by `_load_env_file()` in
+`llm_rubric.py`; `os.environ` is intentionally not consulted, per
+hermes-engineering#149 / `docs/auth-matrix.md`).**
 
 Rationale for 32 K:
 
@@ -135,18 +138,28 @@ Override precedence (highest to lowest):
 
 1. `params.token_budget` on the rule (per-rule, set by rule author or
    classifier).
-2. `GATE_KEEPER_TOKEN_BUDGET` environment variable in the dotenv file (per
-   project).
+2. `GATE_KEEPER_TOKEN_BUDGET` in the per-project dotenv file (`llm-rubric`
+   backend only — read via `_load_env_file()`, not `os.environ`).
 3. Compiled-in default (32 000).
 
 Token counting: use a character-based approximation (1 token ≈ 4 chars) unless
-the active provider SDK exposes a `count_tokens` API. The approximation errs
-toward underestimation, which is safe-conservative.
+the active provider SDK exposes a `count_tokens` API. The raw approximation
+can underestimate real token counts (dense code, Unicode). To compensate,
+apply a 0.8× safety factor: treat `len(text) / (4 × 0.8)` = `len(text) / 3.2`
+as the estimated token count. This errs toward overestimation, so truncation
+triggers before the real provider limit is reached.
 
 When the resolved file set exceeds the budget, the backend must:
 - truncate to the budget (not error);
-- append a `truncation_warning` evidence record listing omitted files;
-- set `Diagnostic.confidence = "low"` on the resulting diagnostic.
+- append a `truncation_warning` evidence record listing omitted files and
+  `tokens_estimated`; this record is the sole signal that truncation occurred.
+
+Note: `Diagnostic` has no `confidence` field — confidence lives on `Rule`
+(see `src/gate_keeper/models.py`). Adding `Diagnostic.confidence` would be a
+schema change outside the scope of this design. The `truncation_warning`
+evidence record and/or a `status` of `UNAVAILABLE` (when no files survive
+truncation) are the correct mechanisms for communicating degraded evaluation
+quality.
 
 ---
 
@@ -278,20 +291,25 @@ extension).
 
 ### `filesystem.py`
 
-`check(rule, target)` becomes `check(rule, targets: TargetSpec) -> list[Diagnostic]`
-(or emits a single aggregated `Diagnostic` — to be decided in sub-issue 74b).
+`check(rule, target)` becomes `check(rule, targets: TargetSpec) -> Diagnostic`.
+The "exactly one `Diagnostic` per `Rule`" contract (see `src/gate_keeper/validator.py`
+and `docs/rule-ir.md`) is preserved: per-file details are embedded as
+`Evidence` items inside the single returned `Diagnostic`, not emitted as
+separate diagnostics.
 Internal changes required:
 
 - `_dispatch` receives a `TargetSpec`; for `is_multi=False` it falls through to
   the existing per-file logic unchanged.
 - For `is_multi=True`, `_dispatch` iterates over `targets.paths`, calls the
-  existing per-file helpers, and aggregates: PASS only when all files pass; FAIL
-  with per-file evidence when any file fails; UNAVAILABLE if the file set is
-  empty (fail-closed — do not paper over with PASS).
+  existing per-file helpers, and aggregates results into one `Diagnostic`:
+  PASS only when all files pass; FAIL with one `file_result` evidence item per
+  failing file; UNAVAILABLE if the file set is empty (fail-closed — do not
+  paper over with PASS). Per-file pass/fail details are carried in
+  `Evidence(kind="file_result", data={"path": ..., "status": ..., ...})` items.
 - Glob expansion: a new `_expand_globs(base: Path, patterns: list[str]) -> list[Path]`
-  utility, capped at a file-count limit (default 200, overridable via env var
-  `GATE_KEEPER_TARGET_FILE_LIMIT`). Exceeding the cap is an error, not a silent
-  truncation.
+  utility, capped at a file-count limit (default 200, overridable via
+  `GATE_KEEPER_TARGET_FILE_LIMIT` in the dotenv file). Exceeding the cap is an
+  error, not a silent truncation.
 - No new `Backend` enum value; no new `RuleKind` value.
 
 ### `llm_rubric.py`
@@ -303,8 +321,11 @@ Internal changes required:
 - `_build_prompt` gains a content assembly step: iterate `targets.paths`, read
   each file, prepend `--- <path> ---` headers, concatenate, apply `token_budget`
   cap with deterministic truncation (lexicographic, from the end of the list).
-- `truncation_warning` evidence item appended when content is truncated.
-- `Confidence` downgraded to `low` on truncation.
+- `truncation_warning` evidence item appended when content is truncated
+  (lists omitted files and `tokens_estimated`). This is the authoritative
+  signal for degraded evaluation quality; `Diagnostic` carries no `confidence`
+  field (that field lives on `Rule` — adding it to `Diagnostic` would be a
+  schema change out of scope here).
 - System prompt updated: "You are a reviewer applying a single rule to one or
   more artifacts provided as file contents below." The judgment schema
   `{"judgment": ..., "explanation": ...}` does not change.
