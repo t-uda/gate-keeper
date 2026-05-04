@@ -432,3 +432,164 @@ def test_json_includes_llm_judgment_evidence():
     assert ev_out["data"]["judgment"] == "fail"
     assert ev_out["data"]["primary_reason"] == "Missing usage section."
     assert isinstance(ev_out["data"]["supporting_evidence_quotes"], list)
+
+
+# ---------------------------------------------------------------------------
+# Failure-mode evidence rendering (issue #71)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _compact_evidence — human-readable failure kinds in render_text
+# ---------------------------------------------------------------------------
+
+
+def test_backend_capability_renders_human_readable():
+    """unsupported status: backend_capability evidence must read as a human sentence."""
+    ev = Evidence(
+        kind="backend_capability",
+        data={"backend": "filesystem", "kind": "semantic_rubric"},
+    )
+    diags = [_diag(status=Status.UNSUPPORTED, evidence=[ev])]
+    text = render_text(diags)
+    assert "filesystem backend does not support rule kind" in text
+    assert "semantic_rubric" in text
+    # Must NOT render raw key=value pairs
+    assert "backend=filesystem" not in text
+
+
+def test_provider_unconfigured_renders_human_readable():
+    """unavailable via provider_unconfigured: renders as human sentence."""
+    ev = Evidence(
+        kind="provider_unconfigured",
+        data={"provider": "none", "rule": "r1"},
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    text = render_text(diags)
+    assert "LLM provider not configured" in text
+
+
+def test_provider_error_renders_human_readable():
+    """unavailable via provider_error: renders provider name and failure mode."""
+    ev = Evidence(
+        kind="provider_error",
+        data={
+            "provider": "anthropic",
+            "failure_mode": "rate_limit",
+            "detail": "429 Too Many Requests",
+        },
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    text = render_text(diags)
+    assert "anthropic" in text
+    assert "rate_limit" in text
+
+
+def test_adapter_unknown_renders_human_readable():
+    """unavailable via adapter_unknown: renders adapter name."""
+    ev = Evidence(
+        kind="adapter_unknown",
+        data={"tool": "textlint", "registered_adapters": ["eslint", "shellcheck"]},
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.EXTERNAL)]
+    text = render_text(diags)
+    assert "textlint" in text
+    assert "not registered" in text
+    assert "eslint" in text
+
+
+def test_adapter_unknown_no_registered_renders_without_error():
+    """adapter_unknown with no registered adapters must not crash."""
+    ev = Evidence(kind="adapter_unknown", data={"tool": "missing-tool", "registered_adapters": []})
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.EXTERNAL)]
+    text = render_text(diags)
+    assert "missing-tool" in text
+    assert "not registered" in text
+
+
+def test_params_error_renders_human_readable():
+    """error status via params_error: renders the missing field."""
+    ev = Evidence(kind="params_error", data={"missing": "pattern"})
+    diags = [_diag(status=Status.ERROR, evidence=[ev])]
+    text = render_text(diags)
+    assert "missing required field" in text
+    assert "pattern" in text
+
+
+# ---------------------------------------------------------------------------
+# render_json — failure_mode field (backwards-compat addition)
+# ---------------------------------------------------------------------------
+
+
+def test_json_pass_has_failure_mode_null():
+    """Pass diagnostics must have failure_mode: null."""
+    diags = [_diag(status=Status.PASS)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] is None
+
+
+def test_json_fail_has_failure_mode():
+    """Fail diagnostics must have a non-null failure_mode."""
+    diags = [_diag(status=Status.FAIL)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] is not None
+
+
+def test_json_unavailable_provider_unconfigured_failure_mode():
+    """Unavailable via provider_unconfigured sets failure_mode to 'provider_unconfigured'."""
+    ev = Evidence(kind="provider_unconfigured", data={"provider": "none"})
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "provider_unconfigured"
+
+
+def test_json_unavailable_adapter_unknown_failure_mode():
+    """Unavailable via adapter_unknown sets failure_mode to 'adapter_unknown'."""
+    ev = Evidence(kind="adapter_unknown", data={"tool": "textlint", "registered_adapters": []})
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.EXTERNAL)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "adapter_unknown"
+
+
+def test_json_unsupported_backend_capability_failure_mode():
+    """Unsupported status with backend_capability evidence sets failure_mode to
+    'unsupported_rule_kind'."""
+    ev = Evidence(
+        kind="backend_capability",
+        data={"backend": "filesystem", "kind": "semantic_rubric"},
+    )
+    diags = [_diag(status=Status.UNSUPPORTED, evidence=[ev])]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "unsupported_rule_kind"
+
+
+def test_json_failure_mode_does_not_alter_existing_fields():
+    """Adding failure_mode must not change any existing JSON fields (backwards-compat)."""
+    ev = _ev("text_match", path="AGENTS.md", match_count=0)
+    diags = [_diag(status=Status.FAIL, evidence=[ev])]
+    parsed = json.loads(render_json(diags))
+    diag = parsed["diagnostics"][0]
+    # Pre-existing fields must still be present
+    assert "rule_id" in diag
+    assert "status" in diag
+    assert "backend" in diag
+    assert "severity" in diag
+    assert "message" in diag
+    assert "evidence" in diag
+    # New field added
+    assert "failure_mode" in diag
+
+
+def test_json_provider_error_failure_mode_from_evidence():
+    """provider_error evidence carries its own failure_mode tag; render_json should use it."""
+    ev = Evidence(
+        kind="provider_error",
+        data={
+            "provider": "openai",
+            "failure_mode": "invalid_json",
+            "detail": "No JSON found",
+        },
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "invalid_json"

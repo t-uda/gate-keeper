@@ -13,6 +13,18 @@ EXIT_USAGE = 2
 
 _NON_PASS = frozenset({Status.FAIL, Status.UNAVAILABLE, Status.UNSUPPORTED, Status.ERROR})
 
+# Evidence kinds whose data is expanded into a human-readable phrase rather than
+# raw key=value pairs in the compact text renderer.
+_HUMAN_READABLE_KINDS = frozenset(
+    {
+        "backend_capability",
+        "provider_unconfigured",
+        "provider_error",
+        "adapter_unknown",
+        "params_error",
+    }
+)
+
 
 def compute_exit_code(diagnostics: Sequence[Diagnostic]) -> int:
     """Return EXIT_OK if all diagnostics pass, EXIT_FAIL if any do not."""
@@ -31,6 +43,35 @@ def _safe_value(v: object) -> str:
     return str(v).replace("\r", "\\r").replace("\n", "\\n")
 
 
+def _human_readable_evidence(kind: str, data: dict[str, Any]) -> str:
+    """Return a concise human-readable string for well-known failure-mode evidence kinds.
+
+    Falls back to the raw key=value form for unrecognised kinds.
+    """
+    if kind == "backend_capability":
+        backend = data.get("backend", "?")
+        rule_kind = data.get("kind", "?")
+        return f"{backend} backend does not support rule kind '{rule_kind}'"
+    if kind == "provider_unconfigured":
+        return "LLM provider not configured (see docs/llm-rubric.md)"
+    if kind == "provider_error":
+        failure_mode = data.get("failure_mode", "unknown")
+        provider = data.get("provider", "?")
+        detail = _safe_value(data.get("detail", ""))
+        return f"LLM provider error ({provider}): {failure_mode} — {detail}"
+    if kind == "adapter_unknown":
+        tool = _safe_value(data.get("tool", "?"))
+        registered = data.get("registered_adapters", [])
+        if registered:
+            return f"adapter '{tool}' not registered (known: {', '.join(str(a) for a in registered)})"
+        return f"adapter '{tool}' not registered"
+    if kind == "params_error":
+        missing = _safe_value(data.get("missing", "?"))
+        return f"rule params missing required field '{missing}'"
+    # Generic fallback: key=value pairs
+    return ", ".join(f"{k}={_safe_value(v)}" for k, v in data.items())
+
+
 def _compact_evidence(diagnostic: Diagnostic) -> str:
     parts = []
     for e in diagnostic.evidence:
@@ -40,12 +81,41 @@ def _compact_evidence(diagnostic: Diagnostic) -> str:
         # that might coincidentally use the same kind name.
         if e.kind == "llm_judgment" and diagnostic.backend == Backend.LLM_RUBRIC:
             continue
-        if e.data:
+        if e.kind in _HUMAN_READABLE_KINDS:
+            parts.append(_human_readable_evidence(e.kind, e.data))
+        elif e.data:
             pairs = ", ".join(f"{k}={_safe_value(v)}" for k, v in e.data.items())
             parts.append(f"{e.kind}({pairs})")
         else:
             parts.append(e.kind)
     return "; ".join(parts)
+
+
+def _derive_failure_mode(diagnostic: Diagnostic) -> str | None:
+    """Derive a short failure_mode tag from a diagnostic's evidence, or None for pass.
+
+    Used by ``render_json`` to add a ``failure_mode`` field (#71).
+    """
+    if diagnostic.status is Status.PASS:
+        return None
+    for e in diagnostic.evidence:
+        if e.kind == "backend_capability":
+            return "unsupported_rule_kind"
+        if e.kind == "provider_unconfigured":
+            return "provider_unconfigured"
+        if e.kind == "provider_error":
+            return str(e.data.get("failure_mode", "provider_error"))
+        if e.kind == "adapter_unknown":
+            return "adapter_unknown"
+        if e.kind == "params_error":
+            return "params_error"
+        if e.kind == "llm_judgment":
+            judgment = e.data.get("judgment", "")
+            return f"llm_{judgment}" if judgment else "llm_fail"
+        if e.kind in ("exception", "io_error"):
+            return e.kind
+    # Fall back to status value if no specific evidence kind matched
+    return diagnostic.status.value
 
 
 def _render_llm_judgment_verbose(data: dict[str, Any]) -> list[str]:
@@ -74,6 +144,10 @@ def render_text(diagnostics: Sequence[Diagnostic], *, verbose: bool = False) -> 
     """Render diagnostics as compiler-style text lines.
 
     Each line: path:line: severity: [backend/status] rule_id: message [evidence]
+
+    Known failure-mode evidence kinds (backend_capability, provider_unconfigured,
+    provider_error, adapter_unknown, params_error) are rendered as concise
+    human-readable phrases rather than raw key=value pairs.
 
     When *verbose* is True and a diagnostic carries ``llm_judgment`` evidence,
     the structured rationale is expanded as indented lines below the main line.
@@ -122,6 +196,12 @@ def render_json(diagnostics: Sequence[Diagnostic]) -> str:
     """Render diagnostics as deterministic JSON for CI consumers.
 
     The status field is preserved exactly — unavailable is distinct from fail.
+    A ``failure_mode`` field is added to each diagnostic: ``null`` for pass,
+    a short descriptive tag for fail/unavailable/unsupported/error (#71).
+    Existing fields are unchanged (backwards-compatible addition).
     """
     report = DiagnosticReport(diagnostics=list(diagnostics))
-    return json.dumps(report.to_dict(), sort_keys=True, indent=2)
+    data = report.to_dict()
+    for diag_dict, diag in zip(data["diagnostics"], diagnostics):
+        diag_dict["failure_mode"] = _derive_failure_mode(diag)
+    return json.dumps(data, sort_keys=True, indent=2)
