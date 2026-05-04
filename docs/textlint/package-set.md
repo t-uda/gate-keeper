@@ -115,7 +115,8 @@ deferring all Japanese-language packages.
 ## 6. What this decision does NOT settle
 
 - **Actual config file** (`.textlintrc`, rule options, ignore paths) — #82.
-- **Severity policy** (which rules are `error` vs `warning` vs `info`) — #85.
+- **Severity policy** (which rules are `error` vs `warning` vs `info`) — #85;
+  see [`severity-policy.md`](severity-policy.md).
 - **`prh.yml` content** (preferred terms, prohibited patterns, allowlists) — #84.
 - **CI workflow** (GitHub Actions, changed-file checks, annotation formatter) — #87.
 - **Per-doc-type config** (whether engineering-paper or SI-unit rules apply to
