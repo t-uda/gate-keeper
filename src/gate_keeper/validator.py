@@ -84,6 +84,7 @@ def validate(
     ruleset: RuleSet,
     target: str | Path,
     backend: str = "auto",
+    reproducibility: int = 1,
 ) -> DiagnosticReport:
     """Validate *ruleset* against *target* using *backend*.
 
@@ -96,6 +97,11 @@ def validate(
     backend:
         ``"auto"`` dispatches each rule by its ``backend_hint``; any other
         registered name sends all rules to that single backend.
+    reproducibility:
+        Number of times to evaluate each LLM-rubric rule (#68). The default ``1``
+        preserves the original behaviour. Values ``> 1`` apply only to rules
+        dispatched to the ``llm-rubric`` backend; non-LLM backends ignore this
+        parameter. Must be ``>= 1``.
 
     Returns
     -------
@@ -104,6 +110,8 @@ def validate(
     """
     if backend != "auto" and not _registry.is_registered(backend):
         raise ValueError(f"unknown backend {backend!r}; registered names: {_registry.BACKEND_NAMES}")
+    if reproducibility < 1:
+        raise ValueError(f"reproducibility must be >= 1, got {reproducibility}")
 
     diagnostics: list[Diagnostic] = []
     for rule in ruleset.rules:
@@ -134,7 +142,14 @@ def validate(
             )
         else:
             try:
-                diag = check_fn(rule, target)
+                # #68: only the llm-rubric backend has a meaningful reproducibility
+                # path; for other backends an N>1 setting is silently ignored.
+                if reproducibility > 1 and resolved_name == "llm-rubric":
+                    from gate_keeper.backends import llm_rubric as _llm_mod
+
+                    diag = _llm_mod.run_n(rule, target, reproducibility)
+                else:
+                    diag = check_fn(rule, target)
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)

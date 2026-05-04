@@ -475,3 +475,79 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
         evidence=[evidence],
         remediation=parsed.suggested_action,
     )
+
+
+# ---------------------------------------------------------------------------
+# Reproducibility (#68)
+# ---------------------------------------------------------------------------
+
+
+def run_n(rule: Rule, target: str | Path, n: int) -> Diagnostic:
+    """Evaluate *rule* against *target* ``n`` times and aggregate the result.
+
+    Reproducibility metric (#68): runs ``check`` ``n`` times, then aggregates the
+    structured ``pass`` / ``fail`` outcomes via simple majority vote. Ties break
+    toward ``fail`` (fail-closed). The returned diagnostic is the first run that
+    matches the majority judgment, with an additional
+    ``Evidence(kind="reproducibility_score", ...)`` appended carrying:
+
+    - ``score``: agreement rate of the majority judgment, in ``[0.0, 1.0]``;
+    - ``n``: the requested number of runs;
+    - ``pass_count``: how many runs returned ``pass``;
+    - ``majority_judgment``: ``"pass"`` or ``"fail"``.
+
+    Behaviour rules
+    ---------------
+    - ``n == 1`` is equivalent to ``check`` (no extra evidence appended).
+    - ``n < 1`` raises ``ValueError`` (caller must validate).
+    - If *any* run returns a non-pass/fail diagnostic (``UNAVAILABLE`` /
+      ``ERROR``), aggregation is abandoned and that diagnostic is returned
+      unchanged - fail-closed for unconfigured / error states.
+    """
+    if n < 1:
+        raise ValueError(f"reproducibility n must be >= 1, got {n}")
+
+    if n == 1:
+        return check(rule, target)
+
+    diagnostics: list[Diagnostic] = []
+    for _ in range(n):
+        diag = check(rule, target)
+        # Fail-closed on non-deterministic outcomes: if any run is unavailable
+        # or errored, don't synthesise a misleading reproducibility score.
+        if diag.status not in (Status.PASS, Status.FAIL):
+            return diag
+        diagnostics.append(diag)
+
+    pass_count = sum(1 for d in diagnostics if d.status is Status.PASS)
+    fail_count = n - pass_count
+    # Tie-break toward fail (fail-closed).
+    majority_is_pass = pass_count > fail_count
+    majority_judgment = "pass" if majority_is_pass else "fail"
+    majority_count = pass_count if majority_is_pass else fail_count
+    score = majority_count / n
+
+    # Pick the first diagnostic whose status matches the majority judgment so the
+    # rendered message and llm_judgment evidence are consistent with the score.
+    target_status = Status.PASS if majority_is_pass else Status.FAIL
+    representative = next(d for d in diagnostics if d.status is target_status)
+
+    repro_evidence = Evidence(
+        kind="reproducibility_score",
+        data={
+            "score": score,
+            "n": n,
+            "pass_count": pass_count,
+            "majority_judgment": majority_judgment,
+        },
+    )
+    return Diagnostic(
+        rule_id=representative.rule_id,
+        source=representative.source,
+        backend=representative.backend,
+        status=representative.status,
+        severity=representative.severity,
+        message=representative.message,
+        evidence=[*representative.evidence, repro_evidence],
+        remediation=representative.remediation,
+    )

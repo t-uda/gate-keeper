@@ -345,3 +345,142 @@ class TestDiagnosticFields:
         captured = capsys.readouterr()
         # text format: [backend/status] in every line
         assert "[filesystem/" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# --reproducibility flag (#68)
+# ---------------------------------------------------------------------------
+
+
+class TestReproducibilityFlag:
+    """CLI plumbing for ``--reproducibility N`` (#68)."""
+
+    def test_default_reproducibility_is_one(self, capsys):
+        """Without --reproducibility the default is 1 (existing behaviour)."""
+        rc = main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--format",
+                "text",
+            ]
+        )
+        assert rc == EXIT_OK
+
+    def test_reproducibility_zero_rejected(self, capsys):
+        """N < 1 is rejected as a usage error."""
+        rc = main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--reproducibility",
+                "0",
+            ]
+        )
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "--reproducibility" in captured.err
+
+    def test_reproducibility_negative_rejected(self, capsys):
+        rc = main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--reproducibility",
+                "-3",
+            ]
+        )
+        assert rc == EXIT_USAGE
+
+    def test_non_llm_backend_ignores_reproducibility(self, capsys):
+        """File-system backend ignores --reproducibility (no-op, no extra evidence)."""
+        rc = main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--reproducibility",
+                "5",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        report = json.loads(captured.out)
+        # No reproducibility_score evidence on file-system rules.
+        for diag in report["diagnostics"]:
+            for ev in diag["evidence"]:
+                assert ev["kind"] != "reproducibility_score"
+
+    def test_llm_backend_reproducibility_records_score(self, monkeypatch, tmp_path, capsys):
+        """LLM-rubric backend with N>1 records reproducibility_score evidence."""
+        from gate_keeper.backends import llm_rubric as llm_backend
+
+        # Configure provider via patched env, mock provider call.
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+        }
+        monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **k: env)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: json.dumps(
+                {
+                    "judgment": "pass",
+                    "primary_reason": "looks good",
+                    "supporting_evidence_quotes": [],
+                    "suggested_action": None,
+                }
+            ),
+        )
+
+        # Build a minimal semantic rule document.
+        rules_doc = tmp_path / "semantic-rules.md"
+        rules_doc.write_text(
+            "# Rules\n\n## R1\n\nThe documentation should be clear and comprehensive.\n",
+            encoding="utf-8",
+        )
+
+        rc = main(
+            [
+                "validate",
+                str(rules_doc),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "auto",
+                "--reproducibility",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+        captured = capsys.readouterr()
+        report = json.loads(captured.out)
+        # At least one diagnostic must carry the reproducibility_score evidence.
+        repro_count = 0
+        for diag in report["diagnostics"]:
+            for ev in diag["evidence"]:
+                if ev["kind"] == "reproducibility_score":
+                    repro_count += 1
+                    assert ev["data"]["n"] == 3
+                    assert 0.0 <= ev["data"]["score"] <= 1.0
+        assert repro_count >= 1, "expected at least one reproducibility_score evidence in JSON output"
+        assert rc == EXIT_OK
