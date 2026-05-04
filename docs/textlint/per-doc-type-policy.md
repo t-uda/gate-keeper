@@ -29,6 +29,7 @@ Surveyed `docs/`, `README.md`, and `tests/fixtures/semantic/targets/` as of main
 | User-facing docs | `README.md`, `docs/example-rules.md` | Quickstart, rule examples |
 | Test fixture targets | `tests/fixtures/semantic/targets/*.md` | Synthetic PR descriptions, changelogs, quickstart fragments |
 | Paper-style writing | **None found** | — |
+| Japanese prose | **None found** | — (see [ja-preset-evaluation.md](ja-preset-evaluation.md) for preset recommendations when Japanese is added) |
 
 Findings:
 - All Markdown is project-internal: contributor guides, architecture docs, user
