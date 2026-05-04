@@ -2,8 +2,11 @@
   "name": "gate-keeper",
   "private": true,
   "description": "textlint dev tooling for gate-keeper documentation",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "textlint": "textlint 'docs/**/*.md' 'README.md'"
+    "textlint": "textlint \"docs/**/*.md\" \"README.md\""
   },
   "devDependencies": {
     "textlint": "15.6.0",
