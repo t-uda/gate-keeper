@@ -18,6 +18,7 @@
 ~~~sh
 uv sync
 uv run gate-keeper --help
+uv run gate-keeper validate RULES --target TARGET [--verbose]
 uv run pytest
 uvx ruff check .
 uvx pyright

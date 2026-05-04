@@ -204,8 +204,9 @@ Current `validate` signature:
 gate-keeper validate RULES --target TARGET [--backend auto] [--format text|json] [--verbose]
 ```
 
-`--verbose` expands structured LLM-rubric rationale (judgment, reason, evidence quotes)
-as indented lines beneath each diagnostic in text output; no effect on JSON format.
+`--verbose` expands structured LLM-rubric rationale (judgment, reason, evidence quotes,
+suggested action, and model name) as indented lines beneath each diagnostic in text
+output; no effect on JSON format.
 
 `--target` today accepts a single path or a PR identifier (e.g., `1234`).
 

@@ -85,7 +85,7 @@ def render_text(diagnostics: Sequence[Diagnostic], *, verbose: bool = False) -> 
             f"{d.severity.value}: "
             f"[{d.backend.value}/{d.status.value}] "
             f"{d.rule_id}: "
-            f"{d.message}"
+            f"{_safe_value(d.message)}"
             f"{evidence_part}"
         )
         if verbose:

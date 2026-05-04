@@ -389,7 +389,11 @@ def test_verbose_llm_judgment_not_in_compact_bracket():
 
 
 def test_verbose_llm_judgment_newlines_escaped():
-    """Newlines in quotes/action must be escaped, not rendered as raw line breaks."""
+    """Newlines in quotes/action/message must be escaped, not rendered as raw line breaks.
+
+    This exercises the production code path where llm_rubric copies primary_reason
+    into d.message, so the main diagnostic line also needs escaping.
+    """
     ev = Evidence(
         kind="llm_judgment",
         data={
@@ -401,7 +405,15 @@ def test_verbose_llm_judgment_newlines_escaped():
             "prompt_version": "v1",
         },
     )
-    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    # Simulate message being set from primary_reason (as llm_rubric.check() does)
+    diags = [
+        _diag(
+            message="Bad\nformat",
+            evidence=[ev],
+            backend=Backend.LLM_RUBRIC,
+            status=Status.FAIL,
+        )
+    ]
     text = render_text(diags, verbose=True)
     # escaped newlines must appear as literal \n in the output
     assert "\\n" in text
