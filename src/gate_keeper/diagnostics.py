@@ -51,15 +51,17 @@ def _render_llm_judgment_verbose(data: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     lines.append("  [llm-rubric]")
     judgment = data.get("judgment", "")
+    if judgment:
+        lines.append(f"    judgment  : {judgment}")
     primary_reason = data.get("primary_reason", "")
     if primary_reason:
-        lines.append(f"    judgment  : {primary_reason} ({judgment})")
+        lines.append(f"    reason    : {_safe_value(primary_reason)}")
     quotes: list[Any] = data.get("supporting_evidence_quotes") or []
     for quote in quotes:
-        lines.append(f'    evidence  : "{quote}"')
+        lines.append(f'    evidence  : "{_safe_value(quote)}"')
     suggested_action = data.get("suggested_action")
     if suggested_action:
-        lines.append(f"    action    : {suggested_action}")
+        lines.append(f"    action    : {_safe_value(suggested_action)}")
     model = data.get("model")
     if model:
         lines.append(f"    model     : {model}")

@@ -312,7 +312,9 @@ def test_verbose_rationale_expansion_shows_judgment():
     diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
     text = render_text(diags, verbose=True)
     assert "Missing usage section." in text
-    assert "fail" in text
+    # Explicitly assert the verbose block has a standalone `judgment` field line,
+    # not just the header `[llm-rubric/fail]` which also contains "fail".
+    assert "    judgment  : fail" in text
 
 
 def test_verbose_rationale_expansion_shows_evidence_quotes():
@@ -320,6 +322,14 @@ def test_verbose_rationale_expansion_shows_evidence_quotes():
     diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
     text = render_text(diags, verbose=True)
     assert "## Usage" in text
+
+
+def test_verbose_rationale_expansion_shows_reason():
+    """primary_reason must appear under its own `reason` field (not merged into judgment)."""
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    text = render_text(diags, verbose=True)
+    assert "    reason    : Missing usage section." in text
 
 
 def test_verbose_rationale_expansion_shows_suggested_action():
@@ -376,6 +386,30 @@ def test_verbose_llm_judgment_not_in_compact_bracket():
     first_line = render_text(diags, verbose=True).splitlines()[0]
     # The compact bracket should be absent or at least not contain llm_judgment data
     assert "llm_judgment" not in first_line
+
+
+
+
+def test_verbose_llm_judgment_newlines_escaped():
+    """Newlines in quotes/action must be escaped, not rendered as raw line breaks."""
+    ev = Evidence(
+        kind="llm_judgment",
+        data={
+            "judgment": "fail",
+            "primary_reason": "Bad\nformat",
+            "supporting_evidence_quotes": ["line1\nline2"],
+            "suggested_action": "Fix\nit",
+            "model": "claude-haiku-4-5",
+            "prompt_version": "v1",
+        },
+    )
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    text = render_text(diags, verbose=True)
+    # escaped newlines must appear as literal \n in the output
+    assert "\\n" in text
+    # no raw newline bleed: all indented lines start with spaces
+    for line in text.splitlines()[1:]:
+        assert line.startswith("  "), f"unexpected line without indent: {line!r}"
 
 
 def test_json_includes_llm_judgment_evidence():

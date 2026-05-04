@@ -75,6 +75,7 @@ an input format is out of scope.
 gate-keeper compile DOCUMENT --format json
 gate-keeper validate DOCUMENT --target TARGET --backend auto --format text
 gate-keeper validate DOCUMENT --target TARGET --backend auto --format json
+gate-keeper validate DOCUMENT --target TARGET --backend auto --format text --verbose
 gate-keeper explain DOCUMENT --format text
 ```
 
