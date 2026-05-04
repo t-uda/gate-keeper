@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="text",
         help="output format (default: text)",
     )
+    validate_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=False,
+        help="expand structured rationale (llm-rubric) in text output",
+    )
 
     return parser
 
@@ -161,7 +168,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if args.format == "json":
         print(render_json(report.diagnostics))
     else:
-        rendered = render_text(report.diagnostics)
+        rendered = render_text(report.diagnostics, verbose=args.verbose)
         if rendered:
             print(rendered)
 

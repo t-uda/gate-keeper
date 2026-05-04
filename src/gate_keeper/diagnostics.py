@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Sequence
+from typing import Any, Sequence
 
 from gate_keeper.models import Diagnostic, DiagnosticReport, Rule, Status
 
@@ -34,6 +34,10 @@ def _safe_value(v: object) -> str:
 def _compact_evidence(diagnostic: Diagnostic) -> str:
     parts = []
     for e in diagnostic.evidence:
+        # llm_judgment evidence is handled separately in verbose mode; skip here
+        # so it doesn't double-render on the compact line.
+        if e.kind == "llm_judgment":
+            continue
         if e.data:
             pairs = ", ".join(f"{k}={_safe_value(v)}" for k, v in e.data.items())
             parts.append(f"{e.kind}({pairs})")
@@ -42,10 +46,33 @@ def _compact_evidence(diagnostic: Diagnostic) -> str:
     return "; ".join(parts)
 
 
-def render_text(diagnostics: Sequence[Diagnostic]) -> str:
+def _render_llm_judgment_verbose(data: dict[str, Any]) -> list[str]:
+    """Return indented lines expanding llm_judgment evidence for --verbose."""
+    lines: list[str] = []
+    lines.append("  [llm-rubric]")
+    judgment = data.get("judgment", "")
+    primary_reason = data.get("primary_reason", "")
+    if primary_reason:
+        lines.append(f"    judgment  : {primary_reason} ({judgment})")
+    quotes: list[Any] = data.get("supporting_evidence_quotes") or []
+    for quote in quotes:
+        lines.append(f"    evidence  : \"{quote}\"")
+    suggested_action = data.get("suggested_action")
+    if suggested_action:
+        lines.append(f"    action    : {suggested_action}")
+    model = data.get("model")
+    if model:
+        lines.append(f"    model     : {model}")
+    return lines
+
+
+def render_text(diagnostics: Sequence[Diagnostic], *, verbose: bool = False) -> str:
     """Render diagnostics as compiler-style text lines.
 
     Each line: path:line: severity: [backend/status] rule_id: message [evidence]
+
+    When *verbose* is True and a diagnostic carries ``llm_judgment`` evidence,
+    the structured rationale is expanded as indented lines below the main line.
     """
     lines = []
     for d in diagnostics:
@@ -59,6 +86,10 @@ def render_text(diagnostics: Sequence[Diagnostic]) -> str:
             f"{d.message}"
             f"{evidence_part}"
         )
+        if verbose:
+            for e in d.evidence:
+                if e.kind == "llm_judgment":
+                    lines.extend(_render_llm_judgment_verbose(e.data))
     return "\n".join(lines)
 
 
