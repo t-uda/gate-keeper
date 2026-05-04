@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
-from gate_keeper.models import Diagnostic, DiagnosticReport, Rule, Status
+from gate_keeper.models import Backend, Diagnostic, DiagnosticReport, Rule, Status
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -34,9 +34,11 @@ def _safe_value(v: object) -> str:
 def _compact_evidence(diagnostic: Diagnostic) -> str:
     parts = []
     for e in diagnostic.evidence:
-        # llm_judgment evidence is handled separately in verbose mode; skip here
-        # so it doesn't double-render on the compact line.
-        if e.kind == "llm_judgment":
+        # llm_judgment evidence from LLM_RUBRIC is rendered in the verbose block;
+        # skip it here so it doesn't double-render on the compact line.
+        # Scope by backend to avoid silently dropping evidence from other backends
+        # that might coincidentally use the same kind name.
+        if e.kind == "llm_judgment" and diagnostic.backend == Backend.LLM_RUBRIC:
             continue
         if e.data:
             pairs = ", ".join(f"{k}={_safe_value(v)}" for k, v in e.data.items())
@@ -90,7 +92,7 @@ def render_text(diagnostics: Sequence[Diagnostic], *, verbose: bool = False) -> 
         )
         if verbose:
             for e in d.evidence:
-                if e.kind == "llm_judgment":
+                if e.kind == "llm_judgment" and d.backend == Backend.LLM_RUBRIC:
                     lines.extend(_render_llm_judgment_verbose(e.data))
     return "\n".join(lines)
 
