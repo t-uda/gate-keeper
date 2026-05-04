@@ -14,3 +14,6 @@ wheels/
 .claude
 .github/skills
 
+
+# Node
+node_modules/

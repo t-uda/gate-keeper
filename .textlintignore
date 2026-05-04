@@ -1,0 +1,8 @@
+# Lock files
+uv.lock
+
+# Node dependencies
+node_modules/
+
+# Test fixtures — intentionally synthetic/minimal prose that may violate style rules
+tests/fixtures/
