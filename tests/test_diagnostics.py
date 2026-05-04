@@ -388,8 +388,6 @@ def test_verbose_llm_judgment_not_in_compact_bracket():
     assert "llm_judgment" not in first_line
 
 
-
-
 def test_verbose_llm_judgment_newlines_escaped():
     """Newlines in quotes/action must be escaped, not rendered as raw line breaks."""
     ev = Evidence(
