@@ -1,0 +1,13 @@
+{
+  "name": "gate-keeper",
+  "private": true,
+  "description": "textlint dev tooling for gate-keeper documentation",
+  "scripts": {
+    "textlint": "textlint 'docs/**/*.md' 'README.md'"
+  },
+  "devDependencies": {
+    "textlint": "15.6.0",
+    "textlint-rule-prh": "6.1.0",
+    "textlint-rule-terminology": "5.2.16"
+  }
+}
