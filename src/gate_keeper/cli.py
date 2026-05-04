@@ -69,6 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="expand structured rationale (llm-rubric) in text output",
     )
+    validate_parser.add_argument(
+        "--reproducibility",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "evaluate each LLM-rubric rule N times and record an agreement-rate "
+            "(reproducibility_score) evidence entry (default: 1; non-LLM backends "
+            "ignore this flag)"
+        ),
+    )
 
     return parser
 
@@ -161,8 +172,16 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     ruleset = parser.parse(str(doc_path), content)
     ruleset = classifier.classify(ruleset)
 
+    # Validate reproducibility argument.
+    if args.reproducibility < 1:
+        print(
+            f"error: --reproducibility must be >= 1, got {args.reproducibility}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
     # Run validation.
-    report = validator.validate(ruleset, args.target, backend=backend)
+    report = validator.validate(ruleset, args.target, backend=backend, reproducibility=args.reproducibility)
 
     # Render output.
     if args.format == "json":

@@ -612,3 +612,149 @@ class TestPathConstants:
     def test_dotenv_path_matches_spec(self):
         """Issue #51 hard-codes the host-side dotenv path; do not regress it."""
         assert llm_backend.DOTENV_PATH == Path("/home/vscode/.config/hermes-projects/gate-keeper.env")
+
+
+# ---------------------------------------------------------------------------
+# Reproducibility metric (#68): run_n
+# ---------------------------------------------------------------------------
+
+
+class TestRunN:
+    """Tests for ``llm_rubric.run_n`` — reproducibility aggregation (#68)."""
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+    }
+
+    def test_n_must_be_at_least_one(self, tmp_path):
+        with pytest.raises(ValueError):
+            llm_backend.run_n(_semantic_rule(), tmp_path, 0)
+
+    def test_n_one_is_equivalent_to_check(self, monkeypatch, tmp_path):
+        """n=1 returns the same diagnostic as ``check`` (no extra evidence)."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda key, system, user, model: _VALID_PASS_JSON,
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 1)
+        # Only the llm_judgment evidence — no reproducibility_score appended.
+        assert len(diag.evidence) == 1
+        assert diag.evidence[0].kind == "llm_judgment"
+        assert diag.status is Status.PASS
+
+    def test_unanimous_pass_score_is_one(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _VALID_PASS_JSON,
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        assert diag.status is Status.PASS
+        # last evidence is the reproducibility entry
+        repro = diag.evidence[-1]
+        assert repro.kind == "reproducibility_score"
+        assert repro.data["score"] == 1.0
+        assert repro.data["n"] == 3
+        assert repro.data["pass_count"] == 3
+        assert repro.data["majority_judgment"] == "pass"
+
+    def test_unanimous_fail_score_is_one(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _VALID_FAIL_JSON,
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        assert diag.status is Status.FAIL
+        repro = diag.evidence[-1]
+        assert repro.kind == "reproducibility_score"
+        assert repro.data["score"] == 1.0
+        assert repro.data["pass_count"] == 0
+        assert repro.data["majority_judgment"] == "fail"
+
+    def test_mixed_majority_pass(self, monkeypatch, tmp_path):
+        """2 pass + 1 fail in 3 runs -> pass with score 2/3."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = iter([_VALID_PASS_JSON, _VALID_FAIL_JSON, _VALID_PASS_JSON])
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: next(responses),
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        assert diag.status is Status.PASS
+        repro = diag.evidence[-1]
+        assert repro.kind == "reproducibility_score"
+        assert repro.data["pass_count"] == 2
+        assert abs(repro.data["score"] - 2 / 3) < 1e-9
+        assert repro.data["majority_judgment"] == "pass"
+
+    def test_mixed_majority_fail(self, monkeypatch, tmp_path):
+        """1 pass + 2 fail in 3 runs -> fail with score 2/3."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = iter([_VALID_FAIL_JSON, _VALID_PASS_JSON, _VALID_FAIL_JSON])
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: next(responses),
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        assert diag.status is Status.FAIL
+        repro = diag.evidence[-1]
+        assert repro.kind == "reproducibility_score"
+        assert repro.data["pass_count"] == 1
+        assert abs(repro.data["score"] - 2 / 3) < 1e-9
+        assert repro.data["majority_judgment"] == "fail"
+
+    def test_tie_breaks_toward_fail(self, monkeypatch, tmp_path):
+        """Even N with 50/50 split -> fail-closed."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = iter([_VALID_PASS_JSON, _VALID_FAIL_JSON])
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: next(responses),
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 2)
+        assert diag.status is Status.FAIL
+        repro = diag.evidence[-1]
+        assert repro.data["pass_count"] == 1
+        assert repro.data["score"] == 0.5
+        assert repro.data["majority_judgment"] == "fail"
+
+    def test_unconfigured_returns_unavailable_without_aggregation(self, tmp_path):
+        """When provider is unconfigured, run_n short-circuits to UNAVAILABLE."""
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 5)
+        assert diag.status is Status.UNAVAILABLE
+        # No reproducibility_score evidence (aggregation aborted).
+        assert all(e.kind != "reproducibility_score" for e in diag.evidence)
+
+    def test_provider_error_short_circuits(self, monkeypatch, tmp_path):
+        """If any single run errors, return that diagnostic without aggregating."""
+        _patch_env(monkeypatch, self._ENV)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("transient 503")
+
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _boom)
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_error"
+        assert all(e.kind != "reproducibility_score" for e in diag.evidence)
+
+    def test_calls_provider_n_times(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        call_count = {"n": 0}
+
+        def _counter(*_a, **_k):
+            call_count["n"] += 1
+            return _VALID_PASS_JSON
+
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _counter)
+        llm_backend.run_n(_semantic_rule(), tmp_path, 5)
+        assert call_count["n"] == 5
