@@ -56,7 +56,7 @@ def _render_llm_judgment_verbose(data: dict[str, Any]) -> list[str]:
         lines.append(f"    judgment  : {primary_reason} ({judgment})")
     quotes: list[Any] = data.get("supporting_evidence_quotes") or []
     for quote in quotes:
-        lines.append(f"    evidence  : \"{quote}\"")
+        lines.append(f'    evidence  : "{quote}"')
     suggested_action = data.get("suggested_action")
     if suggested_action:
         lines.append(f"    action    : {suggested_action}")
