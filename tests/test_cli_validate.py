@@ -345,3 +345,187 @@ class TestDiagnosticFields:
         captured = capsys.readouterr()
         # text format: [backend/status] in every line
         assert "[filesystem/" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# --verbose flag (issue #70)
+# ---------------------------------------------------------------------------
+
+
+class TestVerboseFlag:
+    """CLI-level tests for gate-keeper validate --verbose."""
+
+    def test_verbose_flag_wires_through_to_output(self, capsys, monkeypatch):
+        """validate --verbose must produce expanded llm-rubric block in stdout.
+
+        Mocks validator.validate to inject a diagnostic with llm_judgment
+        evidence so the test is deterministic and network-free.
+        """
+        from unittest.mock import MagicMock
+
+        from gate_keeper.models import (
+            Backend,
+            Diagnostic,
+            DiagnosticReport,
+            Evidence,
+            Severity,
+            SourceLocation,
+            Status,
+        )
+
+        llm_ev = Evidence(
+            kind="llm_judgment",
+            data={
+                "judgment": "fail",
+                "primary_reason": "Missing usage section.",
+                "supporting_evidence_quotes": ["no ## Usage heading found"],
+                "suggested_action": "Add a ## Usage section.",
+                "model": "claude-haiku-4-5",
+                "prompt_version": "v1",
+            },
+        )
+        fake_diag = Diagnostic(
+            rule_id="doc-has-usage",
+            source=SourceLocation(path="rules.md", line=1),
+            backend=Backend.LLM_RUBRIC,
+            status=Status.FAIL,
+            severity=Severity.ERROR,
+            message="rule failed",
+            evidence=[llm_ev],
+        )
+        fake_report = DiagnosticReport(diagnostics=[fake_diag])
+
+        monkeypatch.setattr(
+            "gate_keeper.validator.validate",
+            MagicMock(return_value=fake_report),
+        )
+
+        main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--verbose",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        # --verbose must expand the llm-rubric block (multiple lines)
+        lines = captured.out.strip().splitlines()
+        assert len(lines) > 1, "verbose output must span multiple lines"
+        # The expanded block must contain a dedicated judgment field line
+        assert any("judgment  : fail" in ln for ln in lines[1:]), (
+            "verbose block must include a `judgment` field"
+        )
+        # The primary_reason must appear under its own field
+        assert any("Missing usage section." in ln for ln in lines[1:]), (
+            "verbose block must include the primary_reason"
+        )
+
+    def test_verbose_flag_absent_gives_single_line(self, capsys, monkeypatch):
+        """Without --verbose, each diagnostic is a single line even with llm_judgment evidence."""
+        from unittest.mock import MagicMock
+
+        from gate_keeper.models import (
+            Backend,
+            Diagnostic,
+            DiagnosticReport,
+            Evidence,
+            Severity,
+            SourceLocation,
+            Status,
+        )
+
+        llm_ev = Evidence(
+            kind="llm_judgment",
+            data={
+                "judgment": "fail",
+                "primary_reason": "Missing section.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+                "model": "claude-haiku-4-5",
+                "prompt_version": "v1",
+            },
+        )
+        fake_diag = Diagnostic(
+            rule_id="doc-check",
+            source=SourceLocation(path="rules.md", line=1),
+            backend=Backend.LLM_RUBRIC,
+            status=Status.FAIL,
+            severity=Severity.ERROR,
+            message="rule failed",
+            evidence=[llm_ev],
+        )
+        fake_report = DiagnosticReport(diagnostics=[fake_diag])
+
+        monkeypatch.setattr(
+            "gate_keeper.validator.validate",
+            MagicMock(return_value=fake_report),
+        )
+
+        main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+            ]
+        )
+        captured = capsys.readouterr()
+        lines = captured.out.strip().splitlines()
+        assert len(lines) == 1, "non-verbose output must be one line per diagnostic"
+
+    def test_short_verbose_alias_v_wires_through(self, capsys, monkeypatch):
+        """-v is an alias for --verbose and must produce the same expanded output."""
+        from unittest.mock import MagicMock
+
+        from gate_keeper.models import (
+            Backend,
+            Diagnostic,
+            DiagnosticReport,
+            Evidence,
+            Severity,
+            SourceLocation,
+            Status,
+        )
+
+        llm_ev = Evidence(
+            kind="llm_judgment",
+            data={
+                "judgment": "fail",
+                "primary_reason": "Missing section.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+                "model": "claude-haiku-4-5",
+                "prompt_version": "v1",
+            },
+        )
+        fake_diag = Diagnostic(
+            rule_id="doc-check",
+            source=SourceLocation(path="rules.md", line=1),
+            backend=Backend.LLM_RUBRIC,
+            status=Status.FAIL,
+            severity=Severity.ERROR,
+            message="rule failed",
+            evidence=[llm_ev],
+        )
+        fake_report = DiagnosticReport(diagnostics=[fake_diag])
+
+        monkeypatch.setattr(
+            "gate_keeper.validator.validate",
+            MagicMock(return_value=fake_report),
+        )
+
+        main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "-v",
+            ]
+        )
+        captured = capsys.readouterr()
+        lines = captured.out.strip().splitlines()
+        assert len(lines) > 1, "-v must expand llm-rubric output just like --verbose"

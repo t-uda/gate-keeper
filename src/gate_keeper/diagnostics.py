@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Sequence
+from typing import Any, Sequence
 
-from gate_keeper.models import Diagnostic, DiagnosticReport, Rule, Status
+from gate_keeper.models import Backend, Diagnostic, DiagnosticReport, Rule, Status
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -34,6 +34,12 @@ def _safe_value(v: object) -> str:
 def _compact_evidence(diagnostic: Diagnostic) -> str:
     parts = []
     for e in diagnostic.evidence:
+        # llm_judgment evidence from LLM_RUBRIC is rendered in the verbose block;
+        # skip it here so it doesn't double-render on the compact line.
+        # Scope by backend to avoid silently dropping evidence from other backends
+        # that might coincidentally use the same kind name.
+        if e.kind == "llm_judgment" and diagnostic.backend == Backend.LLM_RUBRIC:
+            continue
         if e.data:
             pairs = ", ".join(f"{k}={_safe_value(v)}" for k, v in e.data.items())
             parts.append(f"{e.kind}({pairs})")
@@ -42,10 +48,35 @@ def _compact_evidence(diagnostic: Diagnostic) -> str:
     return "; ".join(parts)
 
 
-def render_text(diagnostics: Sequence[Diagnostic]) -> str:
+def _render_llm_judgment_verbose(data: dict[str, Any]) -> list[str]:
+    """Return indented lines expanding llm_judgment evidence for --verbose."""
+    lines: list[str] = []
+    lines.append("  [llm-rubric]")
+    judgment = data.get("judgment", "")
+    if judgment:
+        lines.append(f"    judgment  : {judgment}")
+    primary_reason = data.get("primary_reason", "")
+    if primary_reason:
+        lines.append(f"    reason    : {_safe_value(primary_reason)}")
+    quotes: list[Any] = data.get("supporting_evidence_quotes") or []
+    for quote in quotes:
+        lines.append(f'    evidence  : "{_safe_value(quote).replace(chr(34), chr(92) + chr(34))}"')
+    suggested_action = data.get("suggested_action")
+    if suggested_action:
+        lines.append(f"    action    : {_safe_value(suggested_action)}")
+    model = data.get("model")
+    if model:
+        lines.append(f"    model     : {model}")
+    return lines
+
+
+def render_text(diagnostics: Sequence[Diagnostic], *, verbose: bool = False) -> str:
     """Render diagnostics as compiler-style text lines.
 
     Each line: path:line: severity: [backend/status] rule_id: message [evidence]
+
+    When *verbose* is True and a diagnostic carries ``llm_judgment`` evidence,
+    the structured rationale is expanded as indented lines below the main line.
     """
     lines = []
     for d in diagnostics:
@@ -56,9 +87,13 @@ def render_text(diagnostics: Sequence[Diagnostic]) -> str:
             f"{d.severity.value}: "
             f"[{d.backend.value}/{d.status.value}] "
             f"{d.rule_id}: "
-            f"{d.message}"
+            f"{_safe_value(d.message)}"
             f"{evidence_part}"
         )
+        if verbose:
+            for e in d.evidence:
+                if e.kind == "llm_judgment" and d.backend == Backend.LLM_RUBRIC:
+                    lines.extend(_render_llm_judgment_verbose(e.data))
     return "\n".join(lines)
 
 

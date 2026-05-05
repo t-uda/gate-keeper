@@ -273,3 +273,162 @@ def test_json_keys_sorted():
     parsed = json.loads(raw)
     diag_keys = list(parsed["diagnostics"][0].keys())
     assert diag_keys == sorted(diag_keys)
+
+
+# ---------------------------------------------------------------------------
+# Text renderer — verbose rationale expansion (issue #70)
+# ---------------------------------------------------------------------------
+
+
+def _llm_judgment_evidence(judgment: str = "fail") -> Evidence:
+    """Build a minimal llm_judgment evidence item."""
+    if judgment == "pass":
+        return Evidence(
+            kind="llm_judgment",
+            data={
+                "judgment": "pass",
+                "primary_reason": "The document is well-structured.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+                "model": "claude-haiku-4-5",
+                "prompt_version": "v1",
+            },
+        )
+    return Evidence(
+        kind="llm_judgment",
+        data={
+            "judgment": "fail",
+            "primary_reason": "Missing usage section.",
+            "supporting_evidence_quotes": ["README.md has no '## Usage' heading"],
+            "suggested_action": "Add a '## Usage' section.",
+            "model": "claude-haiku-4-5",
+            "prompt_version": "v1",
+        },
+    )
+
+
+def test_verbose_rationale_expansion_shows_judgment():
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    text = render_text(diags, verbose=True)
+    assert "Missing usage section." in text
+    # Explicitly assert the verbose block has a standalone `judgment` field line,
+    # not just the header `[llm-rubric/fail]` which also contains "fail".
+    assert "    judgment  : fail" in text
+
+
+def test_verbose_rationale_expansion_shows_evidence_quotes():
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    text = render_text(diags, verbose=True)
+    assert "## Usage" in text
+
+
+def test_verbose_rationale_expansion_shows_reason():
+    """primary_reason must appear under its own `reason` field (not merged into judgment)."""
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    text = render_text(diags, verbose=True)
+    assert "    reason    : Missing usage section." in text
+
+
+def test_verbose_rationale_expansion_shows_suggested_action():
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    text = render_text(diags, verbose=True)
+    assert "Add a '## Usage' section." in text
+
+
+def test_verbose_rationale_expansion_shows_model():
+    ev = _llm_judgment_evidence("pass")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.PASS)]
+    text = render_text(diags, verbose=True)
+    assert "claude-haiku-4-5" in text
+
+
+def test_verbose_rationale_multiline():
+    """--verbose output for llm_judgment must produce more than one line."""
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    lines = render_text(diags, verbose=True).splitlines()
+    assert len(lines) > 1
+
+
+def test_non_verbose_rationale_not_expanded():
+    """Without --verbose, llm_judgment evidence must NOT expand to multiple lines."""
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    lines = render_text(diags, verbose=False).splitlines()
+    assert len(lines) == 1
+
+
+def test_verbose_pass_no_action_line():
+    """Pass judgment has no suggested_action; action line must be absent."""
+    ev = _llm_judgment_evidence("pass")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.PASS)]
+    text = render_text(diags, verbose=True)
+    assert "action" not in text
+
+
+def test_verbose_non_llm_evidence_unchanged():
+    """Non-llm_judgment evidence must still appear compactly even in verbose mode."""
+    ev = _ev("text_match", path="AGENTS.md", match_count=3)
+    diags = [_diag(evidence=[ev])]
+    text = render_text(diags, verbose=True)
+    assert "text_match" in text
+    assert "AGENTS.md" in text
+
+
+def test_verbose_llm_judgment_not_in_compact_bracket():
+    """llm_judgment evidence must not appear in the compact [evidence] bracket."""
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    first_line = render_text(diags, verbose=True).splitlines()[0]
+    # The compact bracket should be absent or at least not contain llm_judgment data
+    assert "llm_judgment" not in first_line
+
+
+def test_verbose_llm_judgment_newlines_escaped():
+    """Newlines in quotes/action/message must be escaped, not rendered as raw line breaks.
+
+    This exercises the production code path where llm_rubric copies primary_reason
+    into d.message, so the main diagnostic line also needs escaping.
+    """
+    ev = Evidence(
+        kind="llm_judgment",
+        data={
+            "judgment": "fail",
+            "primary_reason": "Bad\nformat",
+            "supporting_evidence_quotes": ["line1\nline2"],
+            "suggested_action": "Fix\nit",
+            "model": "claude-haiku-4-5",
+            "prompt_version": "v1",
+        },
+    )
+    # Simulate message being set from primary_reason (as llm_rubric.check() does)
+    diags = [
+        _diag(
+            message="Bad\nformat",
+            evidence=[ev],
+            backend=Backend.LLM_RUBRIC,
+            status=Status.FAIL,
+        )
+    ]
+    text = render_text(diags, verbose=True)
+    # escaped newlines must appear as literal \n in the output
+    assert "\\n" in text
+    # no raw newline bleed: all indented lines start with spaces
+    for line in text.splitlines()[1:]:
+        assert line.startswith("  "), f"unexpected line without indent: {line!r}"
+
+
+def test_json_includes_llm_judgment_evidence():
+    """JSON output must include llm_judgment evidence fields directly."""
+    ev = _llm_judgment_evidence("fail")
+    diags = [_diag(evidence=[ev], backend=Backend.LLM_RUBRIC, status=Status.FAIL)]
+    parsed = json.loads(render_json(diags))
+    ev_out = parsed["diagnostics"][0]["evidence"][0]
+    assert ev_out["kind"] == "llm_judgment"
+    assert ev_out["data"]["judgment"] == "fail"
+    assert ev_out["data"]["primary_reason"] == "Missing usage section."
+    assert isinstance(ev_out["data"]["supporting_evidence_quotes"], list)

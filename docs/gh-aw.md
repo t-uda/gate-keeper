@@ -29,6 +29,8 @@ steps:
         --target "$PR_URL" \
         --backend auto \
         --format text
+      # Add --verbose to expand LLM-rubric rationale in the log output:
+      # uv run gate-keeper validate docs/rules.md --target "$PR_URL" --verbose
     # Non-zero exit code stops the workflow.
 ```
 
