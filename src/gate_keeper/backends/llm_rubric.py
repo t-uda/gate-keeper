@@ -10,6 +10,7 @@ rejected upstream — see hermes-engineering#149 and
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -541,13 +542,7 @@ def run_n(rule: Rule, target: str | Path, n: int) -> Diagnostic:
             "majority_judgment": majority_judgment,
         },
     )
-    return Diagnostic(
-        rule_id=representative.rule_id,
-        source=representative.source,
-        backend=representative.backend,
-        status=representative.status,
-        severity=representative.severity,
-        message=representative.message,
+    return dataclasses.replace(
+        representative,
         evidence=[*representative.evidence, repro_evidence],
-        remediation=representative.remediation,
     )
