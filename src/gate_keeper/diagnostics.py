@@ -61,7 +61,9 @@ def _human_readable_evidence(kind: str, data: dict[str, Any]) -> str:
         return f"LLM provider error ({provider}): {failure_mode} — {detail}"
     if kind == "adapter_unknown":
         tool = _safe_value(data.get("tool", "?"))
-        registered = data.get("registered_adapters", [])
+        # Accept both "registered" (current external backend key) and the older
+        # "registered_adapters" key for backwards compatibility.
+        registered = data.get("registered") or data.get("registered_adapters") or []
         if registered:
             return f"adapter '{tool}' not registered (known: {', '.join(str(a) for a in registered)})"
         return f"adapter '{tool}' not registered"
@@ -200,8 +202,10 @@ def render_json(diagnostics: Sequence[Diagnostic]) -> str:
     a short descriptive tag for fail/unavailable/unsupported/error (#71).
     Existing fields are unchanged (backwards-compatible addition).
     """
-    report = DiagnosticReport(diagnostics=list(diagnostics))
+    # Materialise once so we can iterate twice (DiagnosticReport + zip).
+    diagnostics_list = list(diagnostics)
+    report = DiagnosticReport(diagnostics=diagnostics_list)
     data = report.to_dict()
-    for diag_dict, diag in zip(data["diagnostics"], diagnostics):
+    for diag_dict, diag in zip(data["diagnostics"], diagnostics_list):
         diag_dict["failure_mode"] = _derive_failure_mode(diag)
     return json.dumps(data, sort_keys=True, indent=2)

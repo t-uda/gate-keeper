@@ -486,12 +486,16 @@ def test_provider_error_renders_human_readable():
 
 
 def test_adapter_unknown_renders_human_readable():
-    """unavailable via adapter_unknown: renders adapter name."""
+    """unsupported via adapter_unknown: renders adapter name.
+
+    Uses the production evidence shape from external.check(): key "registered"
+    and Status.UNSUPPORTED (not UNAVAILABLE).
+    """
     ev = Evidence(
         kind="adapter_unknown",
-        data={"tool": "textlint", "registered_adapters": ["eslint", "shellcheck"]},
+        data={"tool": "textlint", "registered": ["eslint", "shellcheck"]},
     )
-    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.EXTERNAL)]
+    diags = [_diag(status=Status.UNSUPPORTED, evidence=[ev], backend=Backend.EXTERNAL)]
     text = render_text(diags)
     assert "textlint" in text
     assert "not registered" in text
@@ -500,8 +504,8 @@ def test_adapter_unknown_renders_human_readable():
 
 def test_adapter_unknown_no_registered_renders_without_error():
     """adapter_unknown with no registered adapters must not crash."""
-    ev = Evidence(kind="adapter_unknown", data={"tool": "missing-tool", "registered_adapters": []})
-    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.EXTERNAL)]
+    ev = Evidence(kind="adapter_unknown", data={"tool": "missing-tool", "registered": []})
+    diags = [_diag(status=Status.UNSUPPORTED, evidence=[ev], backend=Backend.EXTERNAL)]
     text = render_text(diags)
     assert "missing-tool" in text
     assert "not registered" in text
@@ -543,10 +547,13 @@ def test_json_unavailable_provider_unconfigured_failure_mode():
     assert parsed["diagnostics"][0]["failure_mode"] == "provider_unconfigured"
 
 
-def test_json_unavailable_adapter_unknown_failure_mode():
-    """Unavailable via adapter_unknown sets failure_mode to 'adapter_unknown'."""
-    ev = Evidence(kind="adapter_unknown", data={"tool": "textlint", "registered_adapters": []})
-    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.EXTERNAL)]
+def test_json_unsupported_adapter_unknown_failure_mode():
+    """Unsupported via adapter_unknown sets failure_mode to 'adapter_unknown'.
+
+    Uses production evidence shape: key "registered" and Status.UNSUPPORTED.
+    """
+    ev = Evidence(kind="adapter_unknown", data={"tool": "textlint", "registered": []})
+    diags = [_diag(status=Status.UNSUPPORTED, evidence=[ev], backend=Backend.EXTERNAL)]
     parsed = json.loads(render_json(diags))
     assert parsed["diagnostics"][0]["failure_mode"] == "adapter_unknown"
 
