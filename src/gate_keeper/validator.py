@@ -13,9 +13,10 @@ Dispatch policy
 
 Error policy
 ------------
-The validator never raises.  Unexpected exceptions from a backend call are
-caught here and converted into ``Status.ERROR`` diagnostics so the pipeline
-always produces a report.
+``validate`` raises ``ValueError`` for invalid arguments (unknown backend name,
+``reproducibility < 1``).  Unexpected exceptions from backend calls are caught
+and converted into ``Status.ERROR`` diagnostics so the pipeline always produces
+a report for valid inputs.
 
 Rule ordering
 -------------
@@ -24,7 +25,9 @@ Diagnostics are emitted in the same order as ``ruleset.rules``.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
+from typing import Callable
 
 from gate_keeper import backends as _registry
 from gate_keeper.models import (
@@ -80,10 +83,59 @@ def _resolve_backend_name(rule: Rule, backend_name: str) -> str:
     return backend_name
 
 
+def _run_n(
+    check_fn: Callable,
+    rule: Rule,
+    target: str | Path,
+    n: int,
+) -> Diagnostic:
+    """Run *check_fn* ``n`` times and aggregate via majority vote.
+
+    Mirrors ``llm_rubric.run_n`` semantics but calls *check_fn* (the registry
+    entry) instead of the backend module directly so stubs work correctly in
+    tests and future backend overrides.
+
+    Ties break toward fail (fail-closed). Returns early on the first
+    non-pass/fail diagnostic (UNAVAILABLE / ERROR) without synthesising a
+    reproducibility score (fail-closed for unconfigured states).
+    """
+    diags: list[Diagnostic] = []
+    for _ in range(n):
+        d = check_fn(rule, target)
+        if d.status not in (Status.PASS, Status.FAIL):
+            return d
+        diags.append(d)
+
+    pass_count = sum(1 for d in diags if d.status is Status.PASS)
+    fail_count = n - pass_count
+    majority_is_pass = pass_count > fail_count
+    majority_judgment = "pass" if majority_is_pass else "fail"
+    majority_count = pass_count if majority_is_pass else fail_count
+    score = majority_count / n
+
+    target_status = Status.PASS if majority_is_pass else Status.FAIL
+    representative = next(d for d in diags if d.status is target_status)
+
+    repro_evidence = Evidence(
+        kind="reproducibility_score",
+        data={
+            "score": score,
+            "n": n,
+            "pass_count": pass_count,
+            "majority_judgment": majority_judgment,
+        },
+    )
+    return dataclasses.replace(
+        representative,
+        evidence=[*representative.evidence, repro_evidence],
+    )
+
+
 def validate(
     ruleset: RuleSet,
     target: str | Path,
     backend: str = "auto",
+    reproducibility: int = 1,
 ) -> DiagnosticReport:
     """Validate *ruleset* against *target* using *backend*.
 
@@ -96,14 +148,29 @@ def validate(
     backend:
         ``"auto"`` dispatches each rule by its ``backend_hint``; any other
         registered name sends all rules to that single backend.
+    reproducibility:
+        Number of times to evaluate each LLM-rubric rule (#68). The default ``1``
+        preserves the original behaviour. Values ``> 1`` apply only to rules
+        dispatched to the ``llm-rubric`` backend; non-LLM backends ignore this
+        parameter. Must be ``>= 1``.
 
     Returns
     -------
     DiagnosticReport
-        One ``Diagnostic`` per rule, in source order.  Never raises.
+        One ``Diagnostic`` per rule, in source order.
+
+    Raises
+    ------
+    ValueError
+        If *backend* is not ``"auto"`` and is not a registered backend name,
+        or if *reproducibility* is less than 1.  All other exceptions from
+        backend calls are caught and converted to ``Status.ERROR`` diagnostics
+        so the pipeline always produces a report.
     """
     if backend != "auto" and not _registry.is_registered(backend):
         raise ValueError(f"unknown backend {backend!r}; registered names: {_registry.BACKEND_NAMES}")
+    if reproducibility < 1:
+        raise ValueError(f"reproducibility must be >= 1, got {reproducibility}")
 
     diagnostics: list[Diagnostic] = []
     for rule in ruleset.rules:
@@ -134,7 +201,13 @@ def validate(
             )
         else:
             try:
-                diag = check_fn(rule, target)
+                # #68: apply multi-run reproducibility for llm-rubric rules via
+                # the registry check_fn so stubs/overrides work in tests.
+                # Non-LLM backends silently ignore N>1.
+                if reproducibility > 1 and resolved_name == "llm-rubric":
+                    diag = _run_n(check_fn, rule, target, reproducibility)
+                else:
+                    diag = check_fn(rule, target)
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)
