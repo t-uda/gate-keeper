@@ -97,6 +97,16 @@ This decision should be revisited when **any** of the following occurs:
 
 ---
 
+## Developer entry points
+
+Local developer tooling for running textlint directly is documented in the
+project [Readme](../../README.md#optional-textlint-for-documentation-prose):
+Node install, `npm install`, and `npm run textlint`. Once the adapter (#94)
+lands, `gate-keeper validate --backend external` invokes the same textlint
+installation through `npx textlint --format json`.
+
+---
+
 ## What this decision does NOT settle
 
 - **#82** — which specific global rules go into `.textlintrc.json` (package set and

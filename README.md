@@ -46,6 +46,37 @@ uvx pyright
 
 CI runs the same `uv sync` and `uv run pytest` steps on Python 3.10.
 
+## Optional: textlint for documentation prose
+
+`gate-keeper` ships a textlint configuration (`.textlintrc.json`,
+`.textlintignore`) that lints repository Markdown for terminology
+consistency. textlint runs on Node, which `gate-keeper` does not bundle —
+mirrors the `gh aw` stance: install Node yourself, the CLI does not vend it.
+
+Requirements:
+
+- Node 20 or later (declared in `package.json` `engines`);
+- `npm install` once at the repository root to fetch textlint and its
+  rule packages.
+
+Run:
+
+```bash
+npm run textlint                  # lint docs/**/*.md and README.md
+npm run textlint -- README.md     # lint a specific file
+```
+
+The corpus has known terminology findings today; failures from
+`npm run textlint` against the existing corpus are expected and tracked
+separately. New documentation should not introduce additional findings.
+
+Once `gate-keeper`'s textlint adapter (#94) is registered, `gate-keeper
+validate` can invoke the same textlint installation against `external_check`
+rules — the adapter shells out to `npx textlint --format json` and maps each
+finding to a structured Diagnostic. See
+[docs/backend-external.md](docs/backend-external.md) for the adapter
+contract.
+
 ## Optional: LLM rubric backend
 
 `gate-keeper` ships with an `llm-rubric` backend that handles `semantic_rubric`
