@@ -63,7 +63,7 @@ Run:
 
 ```bash
 npm run textlint                  # lint docs/**/*.md and README.md
-npm run textlint -- README.md     # lint a specific file
+npx --no textlint path/to/file.md # lint a specific file (refuses to install)
 ```
 
 The corpus has known terminology findings today; failures from
