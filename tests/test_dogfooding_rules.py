@@ -67,9 +67,18 @@ class TestClassifierRouting:
 
 
 class TestLlmRubricFailClosed:
-    def test_unconfigured_provider_yields_unavailable_for_each_rule(self, monkeypatch, tmp_path):
-        # Ensure the test does not pick up a real dotenv on the developer's machine.
-        monkeypatch.setattr(llm_rubric, "DOTENV_PATH", tmp_path / "absent-dotenv.env")
+    def test_unconfigured_provider_yields_unavailable_for_each_rule(self, monkeypatch):
+        # Force `_is_configured()` to see no provider state regardless of
+        # what dotenv exists on the developer's machine.
+        #
+        # Why monkeypatch `_load_env_file` rather than `DOTENV_PATH`:
+        # `_load_env_file(path: Path = DOTENV_PATH)` captures the module-
+        # level `DOTENV_PATH` as a default-argument value at function
+        # definition time, so re-binding `llm_rubric.DOTENV_PATH` does not
+        # change the path the function actually reads. Replacing the
+        # function itself with a stub that returns an empty mapping is
+        # the reliable way to neutralise the dotenv contribution.
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
         ruleset = _ruleset()
         assert ruleset.rules, "ruleset must be non-empty for this assertion to be meaningful"
         for rule in ruleset.rules:
