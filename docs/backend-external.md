@@ -70,15 +70,39 @@ malformed routing data never collapses to `pass`.
 ## Registry lifecycle
 
 The registry is a process-local dict in `gate_keeper.backends.external`.
-Adapter registration is intended to happen during application setup. The
-foundation ships with **no** adapters registered — the first concrete
-adapter (textlint) lands in a follow-up issue under #80.
+Adapter registration is intended to happen during application setup; the
+backing module is intentionally empty by default. The first concrete
+adapter (textlint, #94) is shipped in `src/gate_keeper/adapters/textlint.py`
+and registered lazily at `gate_keeper.cli.main()` entry — see "Registered
+adapters" below.
 
 For test isolation, the module exposes:
 
 - `clear_adapters()` — drop everything;
 - `snapshot_adapters()` / `restore_adapters(snapshot)` — save/restore around
   a test that mutates the registry.
+
+## Registered adapters
+
+These adapters ship with gate-keeper and self-register at CLI entry
+(`gate_keeper.cli.main`):
+
+- **textlint** — `src/gate_keeper/adapters/textlint.py` (#94)
+  - Params: `tool="textlint"` (required); `config` (optional, path to a
+    `.textlintrc`); `timeout` (optional, seconds; default 60).
+  - Adapter-specific Evidence kinds: `textlint_finding`,
+    `textlint_truncated`, `parse_error`. The adapter also surfaces the
+    full `cli_*` evidence vocabulary from
+    `src/gate_keeper/backends/_cli.py` (`cli_missing`, `cli_failure`,
+    `cli_timeout`, `cli_os_error`) via `failure_diag` when the
+    subprocess itself fails.
+  - Status mapping: clean target → `pass`; one or more findings → `fail`;
+    missing `npx` / unparseable output → `unavailable`; subprocess timeout or
+    OS error → `error` (per the shared CLI-failure builders in
+    `src/gate_keeper/backends/_cli.py`).
+  - Severity-policy alignment: see
+    [`docs/textlint/severity-policy.md §7`](textlint/severity-policy.md) for
+    the resolution of the §6 deferred adapter-implementation decision.
 
 ## Out of scope for the foundation
 

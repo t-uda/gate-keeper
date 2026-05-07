@@ -156,9 +156,41 @@ an update to this document first.
 - **False-positive suppression** — inline disable comments and `.textlintignore`
   are a separate policy (#80-10).
 - **CI workflow** — which files textlint runs against, in which job, is #87.
-- **Adapter implementation** — the Python code for the textlint adapter is #94.
-  In particular: whether `warning`-severity rule violations produce `Status.FAIL`
-  or a lighter status, and how the adapter translates textlint's exit code into
-  individual `Diagnostic` statuses.
+- **Adapter implementation** — resolved in §7 by the textlint adapter
+  shipped in #94.
 - **Per-doc-type severity overrides** — not needed for the current homogeneous
   corpus; revisit if `per-doc-type-policy.md` reopen criteria are triggered (#91).
+
+---
+
+## 7. Adapter-implementation resolution (#94)
+
+The §6 deferred adapter-implementation question is resolved by the textlint
+adapter shipped in #94 (`src/gate_keeper/adapters/textlint.py`) as follows:
+
+- **Status mapping**: zero textlint findings → `Status.PASS`. One or more
+  findings, regardless of message-level severity integer (textlint emits
+  `1=warning`, `2=error` in JSON message output) → `Status.FAIL`. The
+  adapter treats a non-zero `npx textlint` exit code as a successful
+  invocation when stdout contains parseable JSON, because textlint exits
+  non-zero whenever a violation is present. Non-zero exit with empty or
+  unparseable stdout, and any subprocess-level fault (binary missing,
+  timeout, OS error), produce `Status.UNAVAILABLE` (or `Status.ERROR` for
+  timeout / OS error per the shared CLI-failure builders in
+  `src/gate_keeper/backends/_cli.py`).
+- **Diagnostic.severity**: always equals `rule.severity`. The
+  `ExternalAdapter` contract requires adapters to echo rule-level severity
+  rather than re-derive it per-finding. The textlint message-level severity
+  integer is preserved as
+  `Evidence(kind="textlint_finding", data={"severity_int": ...})` for
+  forensic inspection and for any future per-rule severity policy.
+- **Warning vs error message integers**: not differentiated at the `Status`
+  level in this iteration. Both produce `Status.FAIL`. Differentiation is a
+  potential future axis (e.g. promoting only error-severity violations to
+  blocking) but is deliberately out of scope until empirical corpus data
+  supports it.
+- **Autofix integration**: the adapter does not invoke `textlint --fix`; it
+  is read-only. Autofix integration is a separate issue if/when needed
+  (out of scope for #94).
+
+This resolution supersedes the open-decision phrasing in §6.
