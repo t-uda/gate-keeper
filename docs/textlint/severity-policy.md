@@ -189,8 +189,8 @@ adapter shipped in #94 (`src/gate_keeper/adapters/textlint.py`) as follows:
   potential future axis (e.g. promoting only error-severity violations to
   blocking) but is deliberately out of scope until empirical corpus data
   supports it.
-- **Auto-fix integration**: the adapter does not invoke `textlint --fix`; it
-  is read-only. Auto-fix integration is a separate issue if/when needed
+- **Autofix integration**: the adapter does not invoke `textlint --fix`; it
+  is read-only. Autofix integration is a separate issue if/when needed
   (out of scope for #94).
 
 This resolution supersedes the open-decision phrasing in §6.
