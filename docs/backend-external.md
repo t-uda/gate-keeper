@@ -80,6 +80,24 @@ For test isolation, the module exposes:
 - `snapshot_adapters()` / `restore_adapters(snapshot)` — save/restore around
   a test that mutates the registry.
 
+## Registered adapters
+
+These adapters ship with gate-keeper and self-register at CLI entry
+(`gate_keeper.cli.main`):
+
+- **textlint** — `src/gate_keeper/adapters/textlint.py` (#94)
+  - Params: `tool="textlint"` (required); `config` (optional, path to a
+    `.textlintrc`); `timeout` (optional, seconds; default 60).
+  - Evidence kinds emitted: `textlint_finding`, `textlint_truncated`,
+    `parse_error`, `cli_missing`, `cli_failure`.
+  - Status mapping: clean target → `pass`; one or more findings → `fail`;
+    missing `npx` / unparseable output → `unavailable`; subprocess timeout or
+    OS error → `error` (per the shared CLI-failure builders in
+    `src/gate_keeper/backends/_cli.py`).
+  - Severity-policy alignment: see
+    [`docs/textlint/severity-policy.md §7`](textlint/severity-policy.md) for
+    the resolution of the §6 deferred adapter-implementation decision.
+
 ## Out of scope for the foundation
 
 - Concrete adapter implementations (textlint, vale, …).

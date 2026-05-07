@@ -194,7 +194,25 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return compute_exit_code(report.diagnostics)
 
 
+def _register_default_adapters() -> None:
+    """Register adapters that ship with gate-keeper.
+
+    Registration happens lazily at CLI entry rather than at module-import time
+    of ``gate_keeper.adapters`` so test isolation in ``tests/test_external_backend.py``
+    is preserved (those tests snapshot/restore an empty registry per test).
+    """
+    from gate_keeper.adapters.textlint import TextlintAdapter
+    from gate_keeper.backends import external
+
+    try:
+        external.register(TextlintAdapter())
+    except ValueError:
+        # Already registered (e.g. main called twice in the same process).
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _register_default_adapters()
     parser = build_parser()
     args = parser.parse_args(argv)
 
