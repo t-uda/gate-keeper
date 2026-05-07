@@ -114,7 +114,10 @@ class TextlintAdapter:
 
     def check(self, rule: Rule, target: str | Path) -> Diagnostic:
         target_str = str(target)
-        args: list[str] = ["textlint", "--format", "json"]
+        # `--no` makes npx fail rather than silently install textlint when it
+        # is not present; gate-keeper runs are deterministic against the
+        # already-installed toolchain, never the registry.
+        args: list[str] = ["--no", "textlint", "--format", "json"]
         config = rule.params.get("config")
         if isinstance(config, str) and config:
             args.extend(["--config", config])
@@ -135,15 +138,47 @@ class TextlintAdapter:
         # crash with no JSON output).
         stdout = result.stdout or ""
         parsed: list[dict[str, Any]] | None = None
+        malformed = False
         if stdout.strip():
             try:
                 payload = json.loads(stdout)
             except json.JSONDecodeError:
                 payload = None
             if isinstance(payload, list):
-                parsed = [item for item in payload if isinstance(item, dict)]
+                # Reject lists that contain non-dict items rather than
+                # silently filtering — a list of mixed types means textlint
+                # produced a payload we do not understand, which must
+                # surface as a parse_error rather than collapsing to PASS.
+                if all(isinstance(item, dict) for item in payload):
+                    parsed = [item for item in payload]
+                else:
+                    parsed = None
+                    malformed = True
+            else:
+                malformed = True
 
         if parsed is None:
+            # Prefer parse_error when stdout was non-empty but malformed (the
+            # CLI ran successfully enough to emit *something* but the payload
+            # is not the expected list-of-file-reports shape). Only fall
+            # through to failure_diag when stdout is genuinely empty AND the
+            # subprocess itself failed (binary missing, timeout, OS error,
+            # nonzero exit with no JSON).
+            if malformed:
+                return _diag(
+                    rule,
+                    Status.UNAVAILABLE,
+                    "textlint produced JSON that does not match the expected list-of-file-reports shape",
+                    [
+                        Evidence(
+                            kind="parse_error",
+                            data={
+                                "stdout_excerpt": stdout[:300],
+                                "stderr_excerpt": result.stderr[:300],
+                            },
+                        )
+                    ],
+                )
             if not result.ok:
                 # binary_missing → cli_missing_diag (UNAVAILABLE),
                 # timeout       → cli_timeout_diag (ERROR),

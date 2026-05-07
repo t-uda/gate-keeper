@@ -230,6 +230,24 @@ class TestFailureModes:
         assert diag.evidence[0].kind == "parse_error"
         assert "not json" in diag.evidence[0].data["stdout_excerpt"]
 
+    def test_list_with_non_dict_items_yields_parse_error_not_pass(self, patch_run_cli):
+        # Regression: a list payload containing non-dict items must NOT
+        # collapse to PASS via silent filtering. textlint emitting
+        # mixed-type payloads is a malformed-output signal that must
+        # surface as parse_error so reviewers can investigate.
+        patch_run_cli(lambda *a, **kw: _ok_result('[null, "string", 42]'))
+        diag = TextlintAdapter().check(_rule(), "target.md")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "parse_error"
+
+    def test_non_list_top_level_json_yields_parse_error(self, patch_run_cli):
+        # textlint's --format json contract is a list of file reports;
+        # a top-level object or scalar is malformed.
+        patch_run_cli(lambda *a, **kw: _ok_result('{"unexpected": "object"}'))
+        diag = TextlintAdapter().check(_rule(), "target.md")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "parse_error"
+
 
 class TestTruncation:
     def test_truncates_at_limit_and_appends_truncated_evidence(self, patch_run_cli):
@@ -274,6 +292,27 @@ class TestParamsForwarding:
         assert "--config" in args
         assert args[args.index("--config") + 1] == "custom.textlintrc"
         assert captured["executable"] == "npx"
+
+    def test_npx_no_install_flag_is_first_arg(self, monkeypatch):
+        # `npx --no` makes the runner refuse to silently install textlint
+        # from the registry. gate-keeper runs against the already-installed
+        # toolchain only, so this guard is mandatory for determinism.
+        captured: dict[str, object] = {}
+
+        def stub(executable, args, *, timeout=None, **kw):
+            captured["executable"] = executable
+            captured["args"] = list(args)
+            return _ok_result("[]")
+
+        from gate_keeper.adapters import textlint as adapter_module
+
+        monkeypatch.setattr(adapter_module, "run_cli", stub)
+        TextlintAdapter().check(_rule(), "target.md")
+        assert captured["executable"] == "npx"
+        args = captured["args"]
+        assert isinstance(args, list)
+        assert args[0] == "--no"
+        assert args[1] == "textlint"
 
     def test_timeout_param_passed_through(self, monkeypatch):
         captured: dict[str, object] = {}
