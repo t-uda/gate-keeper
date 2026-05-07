@@ -34,8 +34,17 @@ self-gating is filed as an issue with the `area:dogfood` label, ideally from
 the PR that surfaced it. Without an issue the signal is lost; the advisory
 phase is worthless if findings are not captured.
 
+## Initial advisory rule pool
+
+The seed pool of semantic self-gating rules lives in
+[`dogfooding-rules.md`](dogfooding-rules.md). All three rules in that
+document are advisory only at the time of authoring; none meets the
+promotion criteria in this document yet.
+
 ## Out of scope
 
 - External repos consuming `gate-keeper` set their own promotion policy.
 - This document does not list specific rules. Rule-level state lives next to
-  the rule definitions.
+  the rule definitions (see [`dogfooding-rules.md`](dogfooding-rules.md) for
+  the semantic advisory pool, and [`example-rules.md`](example-rules.md)
+  for the deterministic examples).
