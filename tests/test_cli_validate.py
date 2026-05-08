@@ -625,13 +625,16 @@ class TestReproducibilityFlag:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: json.dumps(
-                {
-                    "judgment": "pass",
-                    "primary_reason": "looks good",
-                    "supporting_evidence_quotes": [],
-                    "suggested_action": None,
-                }
+            lambda *_a, **_k: (
+                json.dumps(
+                    {
+                        "judgment": "pass",
+                        "primary_reason": "looks good",
+                        "supporting_evidence_quotes": [],
+                        "suggested_action": None,
+                    }
+                ),
+                {"latency_ms": 11, "tokens_in": 22, "tokens_out": 33},
             ),
         )
 
