@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    subparsers.add_parser(
+        "diagnose",
+        help="report LLM-rubric provider credential state (length-only, never the key)",
+    )
+
     return parser
 
 
@@ -194,6 +199,53 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return compute_exit_code(report.diagnostics)
 
 
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    """Report LLM-rubric provider credential state.
+
+    Prints dotenv path, whether the file exists, the configured provider
+    (``GATE_KEEPER_LLM_PROVIDER``), the API-key character count (length
+    only — never the key value), and the result of ``_is_configured()``.
+
+    The implementation reads only the dotenv file via
+    ``llm_rubric._load_env_file``; ``os.environ`` is intentionally not
+    consulted, matching the backend policy documented in
+    ``src/gate_keeper/backends/llm_rubric.py``.
+    """
+    del args  # diagnose takes no arguments
+
+    from gate_keeper.backends import llm_rubric
+
+    path = llm_rubric.DOTENV_PATH
+    env = llm_rubric._load_env_file(path)
+    provider = env.get("GATE_KEEPER_LLM_PROVIDER")
+
+    print(f"dotenv path:        {path}")
+    print(f"dotenv exists:      {'yes' if path.exists() else 'no'}")
+    print(f"GATE_KEEPER_LLM_PROVIDER: {provider if provider is not None else '<unset>'}")
+
+    # Report API key length only — never the key value.
+    if provider == "anthropic":
+        key_var = "ANTHROPIC_API_KEY"
+    elif provider == "openai":
+        key_var = "OPENAI_API_KEY"
+    else:
+        key_var = None
+
+    if key_var is None:
+        print("api key:            <unsupported provider; no key reported>")
+    else:
+        key_value = env.get(key_var)
+        if key_value:
+            print(f"{key_var}: <{len(key_value)} chars>")
+        else:
+            print(f"{key_var}: <unset>")
+
+    configured = llm_rubric._is_configured()
+    print(f"provider configured: {'yes' if configured else 'no'}")
+
+    return EXIT_OK
+
+
 def _register_default_adapters() -> None:
     """Register adapters that ship with gate-keeper.
 
@@ -228,6 +280,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "validate":
         return _cmd_validate(args)
+
+    if args.command == "diagnose":
+        return _cmd_diagnose(args)
 
     parser.error(f"{args.command!r} is planned but not implemented in the scaffold")
     return 2

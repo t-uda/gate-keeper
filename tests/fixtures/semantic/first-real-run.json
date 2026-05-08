@@ -1,0 +1,100 @@
+{
+  "diagnostics": [
+    {
+      "backend": "llm-rubric",
+      "evidence": [
+        {
+          "data": {
+            "judgment": "fail",
+            "latency_ms": 5562,
+            "model": "gpt-4o-mini",
+            "primary_reason": "The PR description does not name the user-visible change in the first sentence.",
+            "prompt_version": "v1",
+            "suggested_action": "Rephrase the first sentence of the PR description to explicitly mention the user-visible change.",
+            "supporting_evidence_quotes": [
+              "The first sentence does not clearly state the user-visible change."
+            ],
+            "tokens_in": 383,
+            "tokens_out": 77
+          },
+          "kind": "llm_judgment"
+        }
+      ],
+      "failure_mode": "llm_fail",
+      "message": "The PR description does not name the user-visible change in the first sentence.",
+      "remediation": "Rephrase the first sentence of the PR description to explicitly mention the user-visible change.",
+      "rule_id": "rule-dogfooding-rules-L21",
+      "severity": "warning",
+      "source": {
+        "heading": "Dogfooding rules \u2014 semantic advisory pool > Semantic advisory rules",
+        "line": 21,
+        "path": "docs/dogfooding-rules.md"
+      },
+      "status": "fail"
+    },
+    {
+      "backend": "llm-rubric",
+      "evidence": [
+        {
+          "data": {
+            "judgment": "fail",
+            "latency_ms": 2028,
+            "model": "gpt-4o-mini",
+            "primary_reason": "The PR description does not include any information about how the change was tested.",
+            "prompt_version": "v1",
+            "suggested_action": "Modify the PR description to include details about how the change was tested.",
+            "supporting_evidence_quotes": [
+              "PR description: no testing details provided"
+            ],
+            "tokens_in": 380,
+            "tokens_out": 69
+          },
+          "kind": "llm_judgment"
+        }
+      ],
+      "failure_mode": "llm_fail",
+      "message": "The PR description does not include any information about how the change was tested.",
+      "remediation": "Modify the PR description to include details about how the change was tested.",
+      "rule_id": "rule-dogfooding-rules-L22",
+      "severity": "warning",
+      "source": {
+        "heading": "Dogfooding rules \u2014 semantic advisory pool > Semantic advisory rules",
+        "line": 22,
+        "path": "docs/dogfooding-rules.md"
+      },
+      "status": "fail"
+    },
+    {
+      "backend": "llm-rubric",
+      "evidence": [
+        {
+          "data": {
+            "judgment": "fail",
+            "latency_ms": 1756,
+            "model": "gpt-4o-mini",
+            "primary_reason": "The commit message does not explain the reasoning behind the change.",
+            "prompt_version": "v1",
+            "suggested_action": "Revise the commit message to include an explanation of why the change was made.",
+            "supporting_evidence_quotes": [
+              "Commit message only states what was changed without rationale."
+            ],
+            "tokens_in": 386,
+            "tokens_out": 71
+          },
+          "kind": "llm_judgment"
+        }
+      ],
+      "failure_mode": "llm_fail",
+      "message": "The commit message does not explain the reasoning behind the change.",
+      "remediation": "Revise the commit message to include an explanation of why the change was made.",
+      "rule_id": "rule-dogfooding-rules-L23",
+      "severity": "warning",
+      "source": {
+        "heading": "Dogfooding rules \u2014 semantic advisory pool > Semantic advisory rules",
+        "line": 23,
+        "path": "docs/dogfooding-rules.md"
+      },
+      "status": "fail"
+    }
+  ]
+}
