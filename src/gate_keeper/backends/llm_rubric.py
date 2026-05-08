@@ -32,6 +32,46 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 PROMPT_VERSION = "v1"
 
 # ---------------------------------------------------------------------------
+# Per-model pricing table (#133)
+#
+# Snapshot date: 2026-05-08.
+# Source: https://openai.com/api/pricing/ (gpt-4o-mini) and
+#         https://www.anthropic.com/pricing#anthropic-api (claude-haiku-4-5).
+# Units: USD per 1 million tokens.
+# Update this dict when pricing changes; add ``snapshot_date`` to docs/llm-rubric.md.
+# ---------------------------------------------------------------------------
+
+_MODEL_PRICING: dict[str, dict[str, float]] = {
+    # OpenAI — https://openai.com/api/pricing/
+    "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60},
+    # Anthropic — https://www.anthropic.com/pricing#anthropic-api
+    "claude-haiku-4-5": {"input_per_1m": 0.80, "output_per_1m": 4.00},
+}
+
+
+def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float | None:
+    """Return estimated USD cost for *model* given token counts.
+
+    Uses the static ``_MODEL_PRICING`` snapshot (2026-05-08).  Returns ``None``
+    for any model not in the table — fail-closed: unknown cost is not guessed.
+
+    Parameters
+    ----------
+    model:
+        Model identifier as reported by the provider (e.g. ``"gpt-4o-mini"``).
+    tokens_in:
+        Provider-reported prompt / input token count.
+    tokens_out:
+        Provider-reported completion / output token count.
+    """
+    pricing = _MODEL_PRICING.get(model)
+    if pricing is None:
+        return None
+    cost = (tokens_in * pricing["input_per_1m"] + tokens_out * pricing["output_per_1m"]) / 1_000_000
+    return cost
+
+
+# ---------------------------------------------------------------------------
 # Structured LLM judgment schema (#67)
 # ---------------------------------------------------------------------------
 
@@ -484,6 +524,8 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
       milliseconds (#76).
     - ``tokens_in``: provider-reported prompt token count (#76).
     - ``tokens_out``: provider-reported completion token count (#76).
+    - ``cost_estimate_usd``: estimated USD cost based on static per-model
+      pricing snapshot (#133); ``None`` for unknown models.
 
     ``Diagnostic.remediation`` is set to ``suggested_action`` on fail.
     """
@@ -522,6 +564,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     )
 
     status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
+    cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
     evidence = Evidence(
         kind="llm_judgment",
         data={
@@ -534,6 +577,7 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
             "latency_ms": telemetry["latency_ms"],
             "tokens_in": telemetry["tokens_in"],
             "tokens_out": telemetry["tokens_out"],
+            "cost_estimate_usd": cost,
         },
     )
     if status is Status.PASS:
