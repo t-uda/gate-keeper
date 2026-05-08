@@ -306,27 +306,33 @@ incomparable.
    `tests/fixtures/semantic/baseline.json`.  Keep it or tag the commit before
    the bump so you can compare before/after.
 
-2. **Run bench with the new prompt and compare to the previous baseline:**
+2. **Run bench with the new prompt and compare to the committed baseline:**
 
    ```sh
+   # Run the new prompt against the corpus and save results to a temp file.
    uv run gate-keeper bench tests/fixtures/semantic/entries/ \
      --reproducibility 3 --format json \
      > /tmp/new-baseline.json
 
+   # Diff the new run against the committed baseline (not against itself).
    uv run gate-keeper bench tests/fixtures/semantic/entries/ \
      --reproducibility 3 \
-     --baseline /tmp/new-baseline.json
+     --baseline tests/fixtures/semantic/baseline.json
    ```
 
    The `--baseline` flag prints a delta showing accuracy change and any
    regressions (entries whose `status` flipped from PASS to FAIL) or fixes
-   (FAIL → PASS).
+   (FAIL → PASS).  The `--baseline` path must point at the **committed**
+   baseline (`tests/fixtures/semantic/baseline.json`), not the new run
+   output — diffing a run against itself produces a meaningless zero delta.
 
 3. **If accuracy regression is present**, include the full delta output in the
    PR description under a `## Prompt regression analysis` header.
 
 4. **Update `tests/fixtures/semantic/baseline.json`** to the new run output
-   once the PR is approved and the prompt change is accepted.
+   in the same PR as the `PROMPT_VERSION` bump, so that main always contains
+   a baseline that corresponds to the currently checked-in prompt.  Replace
+   the file with the `/tmp/new-baseline.json` from step 2.
 
 ### Baseline metrics (generated 2026-05-08)
 
@@ -338,8 +344,9 @@ uv run gate-keeper bench tests/fixtures/semantic/entries/ \
   > tests/fixtures/semantic/baseline.json
 ```
 
-Measured results at prompt version `v1` (model `gpt-4o-mini`,
-pricing snapshot 2026-05-08: input $0.15/1M tokens, output $0.60/1M tokens):
+Measured results at prompt version `v1` (model `gpt-4o-mini`; for cost per
+token see the pricing snapshot table in the "Per-rule observability fields"
+section above):
 
 | Metric | Value |
 | --- | --- |
