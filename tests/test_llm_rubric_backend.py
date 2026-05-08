@@ -51,6 +51,18 @@ _VALID_FAIL_JSON = json.dumps(
     }
 )
 
+# Default telemetry stub for monkeypatched provider helpers (#76).
+_STUB_TELEMETRY: dict[str, int] = {
+    "latency_ms": 42,
+    "tokens_in": 123,
+    "tokens_out": 45,
+}
+
+
+def _stub_response(text: str, telemetry: dict[str, int] | None = None) -> tuple[str, dict[str, int]]:
+    """Build a ``(text, telemetry)`` tuple matching the real helper signature."""
+    return text, dict(telemetry) if telemetry is not None else dict(_STUB_TELEMETRY)
+
 
 def _semantic_rule(kind: RuleKind = RuleKind.SEMANTIC_RUBRIC) -> Rule:
     return Rule(
@@ -256,7 +268,7 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda key, system, user, model: _VALID_PASS_JSON,
+            lambda key, system, user, model: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.PASS
@@ -276,7 +288,7 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda key, system, user, model: _VALID_FAIL_JSON,
+            lambda key, system, user, model: _stub_response(_VALID_FAIL_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.FAIL
@@ -309,7 +321,7 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: "I refuse to answer in JSON.",
+            lambda *_a, **_k: _stub_response("I refuse to answer in JSON."),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.UNAVAILABLE
@@ -321,13 +333,15 @@ class TestProviderDispatchAnthropic:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: json.dumps(
-                {
-                    "judgment": "maybe",
-                    "primary_reason": "unsure",
-                    "supporting_evidence_quotes": [],
-                    "suggested_action": None,
-                }
+            lambda *_a, **_k: _stub_response(
+                json.dumps(
+                    {
+                        "judgment": "maybe",
+                        "primary_reason": "unsure",
+                        "supporting_evidence_quotes": [],
+                        "suggested_action": None,
+                    }
+                )
             ),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
@@ -340,11 +354,11 @@ class TestProviderDispatchAnthropic:
 
         def _anthropic(*_a, **_k):
             called["anthropic"] = True
-            return _VALID_PASS_JSON
+            return _stub_response(_VALID_PASS_JSON)
 
         def _openai(*_a, **_k):
             called["openai"] = True
-            return ""
+            return _stub_response("")
 
         monkeypatch.setattr(llm_backend, "_call_anthropic", _anthropic)
         monkeypatch.setattr(llm_backend, "_call_openai", _openai)
@@ -368,7 +382,7 @@ class TestProviderDispatchOpenAI:
         monkeypatch.setattr(
             llm_backend,
             "_call_openai",
-            lambda *_a, **_k: _VALID_PASS_JSON,
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.PASS
@@ -381,7 +395,7 @@ class TestProviderDispatchOpenAI:
         monkeypatch.setattr(
             llm_backend,
             "_call_openai",
-            lambda *_a, **_k: _VALID_FAIL_JSON,
+            lambda *_a, **_k: _stub_response(_VALID_FAIL_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.status is Status.FAIL
@@ -399,6 +413,159 @@ class TestProviderDispatchOpenAI:
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].data["provider"] == "openai"
         assert diag.evidence[0].data["failure_mode"] == "TimeoutError"
+
+
+# ---------------------------------------------------------------------------
+# Per-rule observability (#76): latency_ms, tokens_in, tokens_out
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceObservability:
+    """Issue #76 — per-rule observability fields on llm_judgment evidence.
+
+    The structured ``llm_judgment`` evidence dict must carry ``latency_ms``,
+    ``tokens_in``, and ``tokens_out`` from the underlying provider call. These
+    are the data substrate for future drift detection / cost analysis.
+    Provider-error and unconfigured paths intentionally do NOT synthesize
+    telemetry — fields are only meaningful for successful API calls.
+    """
+
+    _ANTHROPIC_ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+    }
+    _OPENAI_ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    def test_evidence_includes_latency_ms_anthropic(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ANTHROPIC_ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 137, "tokens_in": 250, "tokens_out": 60},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "latency_ms" in data
+        assert isinstance(data["latency_ms"], int)
+        assert data["latency_ms"] >= 0
+        assert data["latency_ms"] == 137
+
+    def test_evidence_includes_tokens_in_and_out_anthropic(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ANTHROPIC_ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 50, "tokens_in": 250, "tokens_out": 60},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "tokens_in" in data
+        assert "tokens_out" in data
+        assert isinstance(data["tokens_in"], int)
+        assert isinstance(data["tokens_out"], int)
+        assert data["tokens_in"] >= 0
+        assert data["tokens_out"] >= 0
+        assert data["tokens_in"] == 250
+        assert data["tokens_out"] == 60
+
+    def test_evidence_includes_latency_ms_openai(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._OPENAI_ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 281, "tokens_in": 410, "tokens_out": 88},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "latency_ms" in data
+        assert isinstance(data["latency_ms"], int)
+        assert data["latency_ms"] >= 0
+        assert data["latency_ms"] == 281
+
+    def test_evidence_includes_tokens_in_and_out_openai(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._OPENAI_ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_FAIL_JSON,
+                {"latency_ms": 12, "tokens_in": 410, "tokens_out": 88},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "tokens_in" in data
+        assert "tokens_out" in data
+        assert isinstance(data["tokens_in"], int)
+        assert isinstance(data["tokens_out"], int)
+        assert data["tokens_in"] == 410
+        assert data["tokens_out"] == 88
+
+    def test_provider_error_evidence_omits_telemetry(self, monkeypatch, tmp_path):
+        """Exception paths must NOT synthesize fake telemetry (#76 requirement)."""
+        _patch_env(monkeypatch, self._ANTHROPIC_ENV)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("network is down")
+
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _boom)
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        data = diag.evidence[0].data
+        # Exception path → provider_error evidence carries no telemetry fields.
+        assert "latency_ms" not in data
+        assert "tokens_in" not in data
+        assert "tokens_out" not in data
+
+    def test_unconfigured_evidence_omits_telemetry(self, tmp_path):
+        """Unconfigured path also omits telemetry (no API call happened)."""
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        data = diag.evidence[0].data
+        assert "latency_ms" not in data
+        assert "tokens_in" not in data
+        assert "tokens_out" not in data
+
+    def test_run_n_majority_run_carries_telemetry(self, monkeypatch, tmp_path):
+        """Per-run telemetry is preserved on the representative run; not aggregated."""
+        _patch_env(monkeypatch, self._ANTHROPIC_ENV)
+        # Each run produces distinct telemetry values; we just want to confirm
+        # the chosen run's telemetry is preserved on its evidence dict.
+        telemetries = iter(
+            [
+                {"latency_ms": 100, "tokens_in": 10, "tokens_out": 1},
+                {"latency_ms": 200, "tokens_in": 20, "tokens_out": 2},
+                {"latency_ms": 300, "tokens_in": 30, "tokens_out": 3},
+            ]
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON, next(telemetries)),
+        )
+        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        # llm_judgment evidence (representative run) carries telemetry.
+        judgment_data = diag.evidence[0].data
+        assert isinstance(judgment_data["latency_ms"], int)
+        assert isinstance(judgment_data["tokens_in"], int)
+        assert isinstance(judgment_data["tokens_out"], int)
+        # reproducibility_score evidence (#68) is unchanged — no telemetry there.
+        repro_data = diag.evidence[-1].data
+        assert "latency_ms" not in repro_data
+        assert "tokens_in" not in repro_data
+        assert "tokens_out" not in repro_data
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +764,7 @@ class TestPromptVersion:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: _VALID_PASS_JSON,
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
         assert diag.evidence[0].data["prompt_version"] == "v1"
@@ -637,7 +804,7 @@ class TestRunN:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda key, system, user, model: _VALID_PASS_JSON,
+            lambda key, system, user, model: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.run_n(_semantic_rule(), tmp_path, 1)
         # Only the llm_judgment evidence — no reproducibility_score appended.
@@ -650,7 +817,7 @@ class TestRunN:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: _VALID_PASS_JSON,
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
         assert diag.status is Status.PASS
@@ -667,7 +834,7 @@ class TestRunN:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: _VALID_FAIL_JSON,
+            lambda *_a, **_k: _stub_response(_VALID_FAIL_JSON),
         )
         diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
         assert diag.status is Status.FAIL
@@ -684,7 +851,7 @@ class TestRunN:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: next(responses),
+            lambda *_a, **_k: _stub_response(next(responses)),
         )
         diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
         assert diag.status is Status.PASS
@@ -701,7 +868,7 @@ class TestRunN:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: next(responses),
+            lambda *_a, **_k: _stub_response(next(responses)),
         )
         diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
         assert diag.status is Status.FAIL
@@ -718,7 +885,7 @@ class TestRunN:
         monkeypatch.setattr(
             llm_backend,
             "_call_anthropic",
-            lambda *_a, **_k: next(responses),
+            lambda *_a, **_k: _stub_response(next(responses)),
         )
         diag = llm_backend.run_n(_semantic_rule(), tmp_path, 2)
         assert diag.status is Status.FAIL
@@ -753,7 +920,7 @@ class TestRunN:
 
         def _counter(*_a, **_k):
             call_count["n"] += 1
-            return _VALID_PASS_JSON
+            return _stub_response(_VALID_PASS_JSON)
 
         monkeypatch.setattr(llm_backend, "_call_anthropic", _counter)
         llm_backend.run_n(_semantic_rule(), tmp_path, 5)

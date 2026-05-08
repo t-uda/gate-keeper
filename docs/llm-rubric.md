@@ -124,8 +124,30 @@ When a provider responds successfully, the diagnostic carries:
 
 - `status`: `pass` or `fail`.
 - `message`: the `primary_reason` from the structured judgment.
-- `evidence[0]`: `{ kind: "llm_judgment", data: { model, prompt_version, judgment, primary_reason, supporting_evidence_quotes, suggested_action } }`.
+- `evidence[0]`: `{ kind: "llm_judgment", data: { model, prompt_version, judgment, primary_reason, supporting_evidence_quotes, suggested_action, latency_ms, tokens_in, tokens_out } }`.
 - `remediation`: set to `suggested_action` when `status=fail`; `null` on `pass`.
+
+### Per-rule observability fields
+
+Issue #76 adds three observability fields to every successful `llm_judgment`
+evidence entry, providing the data substrate for drift detection, cost
+analysis, and per-rule SLA work:
+
+| Field | Type | Source | Semantics |
+| --- | --- | --- | --- |
+| `latency_ms` | `int` (milliseconds) | `time.perf_counter()` around the SDK call | Wall-clock duration of the provider call, integer-rounded. |
+| `tokens_in` | `int` | Anthropic `usage.input_tokens` / OpenAI `usage.prompt_tokens` | Provider-reported prompt token count. |
+| `tokens_out` | `int` | Anthropic `usage.output_tokens` / OpenAI `usage.completion_tokens` | Provider-reported completion token count. |
+
+These fields appear **only on successful provider calls**. The
+`provider_unconfigured` and `provider_error` evidence kinds (no API call
+returned, or the call raised) intentionally do not carry telemetry — missing
+evidence is recorded as missing rather than synthesised.
+
+When `--reproducibility N` aggregates `N` runs, the `latency_ms` / `tokens_in`
+/ `tokens_out` on the chosen majority-judgment evidence reflect that single
+representative run, not an aggregate. The separate
+`reproducibility_score` evidence entry (#68) carries no telemetry.
 
 ## Failure modes
 
