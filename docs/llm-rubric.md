@@ -84,6 +84,53 @@ If `GATE_KEEPER_LLM_PROVIDER` is missing, set to a value other than
 `anthropic` or `openai`, or the corresponding API key is absent, behavior
 falls back to the unconfigured `unavailable` diagnostic above.
 
+### CI exception: GitHub Actions secret projection
+
+The host-side dotenv route is the only credential path the backend reads
+from. CI environments do not have a developer-managed home directory, so
+GitHub Actions workflows project the repository secret into the same
+absolute dotenv path before invoking `gate-keeper`.
+
+The advisory dogfooding workflow (`.github/workflows/dogfooding.yml`,
+introduced in #131) demonstrates the pattern:
+
+```yaml
+- name: Provision provider credentials
+  if: steps.secret_guard.outputs.secret_present == 'true'
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  run: |
+    set +x
+    umask 077
+    sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode
+    sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode/.config
+    sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode/.config/hermes-projects
+    printf 'GATE_KEEPER_LLM_PROVIDER=openai\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
+      > /home/vscode/.config/hermes-projects/gate-keeper.env
+    chmod 600 /home/vscode/.config/hermes-projects/gate-keeper.env
+```
+
+Constraints to preserve when adopting this pattern in another workflow:
+
+- **Job-scoped secret guard.** Reference `secrets.OPENAI_API_KEY` from a
+  preceding step that writes a boolean output, then gate downstream steps
+  with `if: steps.<id>.outputs.secret_present == 'true'`. This keeps the
+  workflow silent on forks and pre-secret states (no red X on PRs from
+  contributors who do not own the secret).
+- **No `set -x` and no `echo $VAR`.** Both leak secret material into the
+  run log. Use `printf` with redirection only. Disable trace mode
+  defensively (`set +x`) inside the credential step.
+- **Mode 700 on the directory, mode 600 on the file.** `umask 077` plus
+  `chmod 600` on the dotenv satisfy both, even when run as the runner
+  user.
+- **No artifact upload of `$HOME` or `/home/vscode`.** Treat the dotenv
+  path as untrusted output; never include it in `actions/upload-artifact`
+  patterns.
+- **Scrub on completion.** Add an `if: always()` cleanup step that
+  removes the projected dotenv. The runner is ephemeral, but the
+  scrubbing step documents intent and survives reuse if anyone refactors
+  the workflow to share runners.
+
 ## Rubric input/output shape
 
 `_build_rubric_input()` in `src/gate_keeper/backends/llm_rubric.py` defines the
