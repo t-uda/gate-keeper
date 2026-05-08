@@ -1,5 +1,7 @@
 # Design: Hybrid Rule Kind — Deterministic Precheck + Semantic Judgment
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking: #73 (design phase). Implementation tracked under umbrella #63.
 
 ---

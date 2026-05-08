@@ -1,5 +1,7 @@
 # textlint per-doc-type config policy
 
+> Status: internal process artifact — not user-facing reference.
+
 **Issue:** #91 | **Parent umbrella:** #80
 
 ## Question

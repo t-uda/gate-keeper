@@ -1,5 +1,7 @@
 # textlint false-positive handling and exception policy (#90)
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking umbrella: #80. This document defines how contributors handle textlint
 false positives and propose project-level exceptions. It is policy-only;
 concrete exception entries belong in their respective files

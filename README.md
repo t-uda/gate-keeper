@@ -13,6 +13,39 @@ runtime. The intended shape is:
 4. fall back to an LLM rubric backend for semantic checks;
 5. emit compiler-style pass/fail output with enough evidence to stop safely.
 
+## Documentation
+
+### For users
+
+- [docs/llm-rubric.md](docs/llm-rubric.md) — LLM rubric backend: configuration, evidence shape, and credential setup
+- [docs/gh-aw.md](docs/gh-aw.md) — GitHub Agentic Workflows (`gh aw`) integration guide
+- [docs/example-rules.md](docs/example-rules.md) — annotated rule examples across all backends
+
+### Reference
+
+- [docs/rule-ir.md](docs/rule-ir.md) — rule intermediate representation schema
+- [docs/backend-external.md](docs/backend-external.md) — external tool adapter contract (`Backend.EXTERNAL`)
+- [docs/semantic-rules.md](docs/semantic-rules.md) — semantic rubric rule authoring guide
+
+### Internal (process artifacts)
+
+These files record design decisions and planning context. They are not
+user-facing reference material.
+
+- [docs/mvp-spec.md](docs/mvp-spec.md) — original MVP task specification
+- [docs/mvp-readiness.md](docs/mvp-readiness.md) — MVP completion checklist
+- [docs/issue-plan.md](docs/issue-plan.md) — 3-day MVP issue structure
+- [docs/dogfooding.md](docs/dogfooding.md) — self-gating policy and advisory rules
+- [docs/dogfooding-rules.md](docs/dogfooding-rules.md) — seed semantic rule pool
+- [docs/design/hybrid-rule.md](docs/design/hybrid-rule.md) — hybrid rule kind design (#73)
+- [docs/design/multi-target.md](docs/design/multi-target.md) — multi-target evaluation design (#74)
+- [docs/textlint/severity-policy.md](docs/textlint/severity-policy.md) — textlint severity mapping decision record (#85)
+- [docs/textlint/per-doc-type-policy.md](docs/textlint/per-doc-type-policy.md) — per-doc-type textlint config policy (#91)
+- [docs/textlint/package-set.md](docs/textlint/package-set.md) — textlint initial package set decision record (#81)
+- [docs/textlint/ja-preset-evaluation.md](docs/textlint/ja-preset-evaluation.md) — Japanese preset evaluation decision record (#83)
+- [docs/textlint/exception-policy.md](docs/textlint/exception-policy.md) — false-positive handling and exception policy (#90)
+- [docs/textlint/prh-process.md](docs/textlint/prh-process.md) — `prh.yml` contribution process (#84)
+
 ## MVP
 
 The 3-day MVP is intentionally narrow:

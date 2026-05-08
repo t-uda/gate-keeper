@@ -1,5 +1,7 @@
 # textlint severity policy — decision record (#85)
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking umbrella: #80. This document defines the mapping from textlint
 severity levels to gate-keeper severity levels, and the fail-closed criteria
 per document type.

@@ -1,5 +1,7 @@
 # Task
 
+> Status: internal process artifact — not user-facing reference.
+
 Build `gate-keeper`, a small rule compiler that turns natural-language rule
 documents into machine-verifiable checks for local files and GitHub pull
 requests.

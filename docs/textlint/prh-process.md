@@ -1,5 +1,7 @@
 # `prh.yml` contribution process — issue #84
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking umbrella: #80. The dictionary itself lives at `prh.yml` in the
 repository root and is wired through `.textlintrc.json` via
 `textlint-rule-prh`. Rule severity, package selection, and the broader
