@@ -277,3 +277,110 @@ to deterministic checks — not a replacement.
 When a rule has both a deterministic and a semantic interpretation, prefer the
 deterministic route.  The classifier does this automatically: it only routes to
 `llm-rubric` after exhausting all GitHub and filesystem patterns.
+
+## Prompt iteration workflow
+
+This section describes the process for changing and evaluating the LLM rubric
+prompt (`RUBRIC_PROMPT_TEMPLATE` in `src/gate_keeper/backends/llm_rubric.py`).
+
+### When to bump PROMPT_VERSION
+
+Bump `PROMPT_VERSION` only when the prompt text changes in a way that materially
+affects model behavior — for example, adding or removing evaluation criteria,
+changing the output schema instructions, or reordering the rubric dimensions.
+
+Do **not** bump for:
+
+- Whitespace-only or punctuation edits that leave semantics unchanged.
+- Comment-only changes in the source file.
+- Reformatting that does not alter the rendered string the model receives.
+
+The version is embedded in every `llm_judgment` evidence entry so that baseline
+comparisons can detect prompt-driven drift. Bumping without a behavioral change
+pollutes the signal; skipping a bump when behavior changes makes baselines
+incomparable.
+
+### Required steps when bumping PROMPT_VERSION
+
+1. **Record the previous baseline.**  The current baseline lives at
+   `tests/fixtures/semantic/baseline.json`.  Keep it or tag the commit before
+   the bump so you can compare before/after.
+
+2. **Run bench with the new prompt and compare to the previous baseline:**
+
+   ```sh
+   uv run gate-keeper bench tests/fixtures/semantic/entries/ \
+     --reproducibility 3 --format json \
+     > /tmp/new-baseline.json
+
+   uv run gate-keeper bench tests/fixtures/semantic/entries/ \
+     --reproducibility 3 \
+     --baseline /tmp/new-baseline.json
+   ```
+
+   The `--baseline` flag prints a delta showing accuracy change and any
+   regressions (entries whose `status` flipped from PASS to FAIL) or fixes
+   (FAIL → PASS).
+
+3. **If accuracy regression is present**, include the full delta output in the
+   PR description under a `## Prompt regression analysis` header.
+
+4. **Update `tests/fixtures/semantic/baseline.json`** to the new run output
+   once the PR is approved and the prompt change is accepted.
+
+### Baseline metrics (generated 2026-05-08)
+
+The `tests/fixtures/semantic/baseline.json` file was generated with:
+
+```sh
+uv run gate-keeper bench tests/fixtures/semantic/entries/ \
+  --reproducibility 3 --format json \
+  > tests/fixtures/semantic/baseline.json
+```
+
+Measured results at prompt version `v1` (model `gpt-4o-mini`,
+pricing snapshot 2026-05-08: input $0.15/1M tokens, output $0.60/1M tokens):
+
+| Metric | Value |
+| --- | --- |
+| Entries | 24 |
+| Correct | 19 |
+| Accuracy | 79.2% |
+| Reproducibility (avg) | 98.6% |
+| Reproducibility N | 3 |
+| Tokens in | 31,080 |
+| Tokens out | 4,731 |
+| Latency (total) | 151,432 ms |
+| Model | `gpt-4o-mini` |
+| Prompt version | `v1` |
+
+### Regression tolerance and justification template
+
+Some regressions are acceptable — for example, when a prompt change improves
+coverage for a harder category at the cost of one easier entry, or when the
+previous baseline had known false positives that the new prompt corrects.
+
+When accepting a regression, include this justification block in the PR
+description:
+
+```
+## Prompt regression justification
+
+Prompt version bumped: v<old> → v<new>
+
+Accuracy delta: -X.X% (<N> entries regressed, <M> entries fixed)
+
+Accepted because:
+- <reason — e.g. "regressed entries were known false positives in v1">
+- <reason — e.g. "net improvement in <category> category outweighs single regression">
+
+Regressed entries:
+- <entry-id>: was PASS (v<old>), now FAIL (v<new>) — <brief rationale>
+
+Fixed entries:
+- <entry-id>: was FAIL (v<old>), now PASS (v<new>) — <brief rationale>
+```
+
+A regression with no justification block is a blocker for merging the prompt
+change.  The justification is the evidence that the change was reviewed, not
+just checked in.
