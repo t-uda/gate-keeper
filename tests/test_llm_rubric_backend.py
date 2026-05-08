@@ -1049,3 +1049,140 @@ class TestRunN:
         monkeypatch.setattr(llm_backend, "_call_anthropic", _counter)
         llm_backend.run_n(_semantic_rule(), tmp_path, 5)
         assert call_count["n"] == 5
+
+
+# ---------------------------------------------------------------------------
+# _estimate_cost (#133)
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateCost:
+    """Unit tests for ``_estimate_cost`` — per-model static pricing table.
+
+    Snapshot date: 2026-05-08.
+    - gpt-4o-mini: $0.15/1M input, $0.60/1M output
+    - claude-haiku-4-5: $0.80/1M input, $4.00/1M output
+    """
+
+    def test_gpt4o_mini_known_tokens(self):
+        """1000 tokens_in + 200 tokens_out at gpt-4o-mini pricing.
+
+        cost = (1000 * $0.15 + 200 * $0.60) / 1,000,000
+             = (150 + 120) / 1,000,000
+             = 270 / 1,000,000
+             = $0.00027
+        """
+        expected = (1000 * 0.15 + 200 * 0.60) / 1_000_000
+        result = llm_backend._estimate_cost("gpt-4o-mini", 1000, 200)
+        assert result is not None
+        assert abs(result - expected) < 1e-12
+        assert abs(result - 0.00027) < 1e-9
+
+    def test_claude_haiku_known_tokens(self):
+        """500 tokens_in + 100 tokens_out at claude-haiku-4-5 pricing."""
+        expected = (500 * 0.80 + 100 * 4.00) / 1_000_000
+        result = llm_backend._estimate_cost("claude-haiku-4-5", 500, 100)
+        assert result is not None
+        assert abs(result - expected) < 1e-12
+
+    def test_unknown_model_returns_none(self):
+        """Unknown model must return None (fail-closed: no cost guessing)."""
+        assert llm_backend._estimate_cost("gpt-5-turbo-ultra", 1000, 200) is None
+
+    def test_unknown_model_empty_string_returns_none(self):
+        assert llm_backend._estimate_cost("", 0, 0) is None
+
+    def test_zero_tokens_returns_zero_cost(self):
+        result = llm_backend._estimate_cost("gpt-4o-mini", 0, 0)
+        assert result == 0.0
+
+    def test_cost_estimate_in_evidence_openai(self, monkeypatch, tmp_path):
+        """check() emits cost_estimate_usd in llm_judgment evidence (OpenAI)."""
+        _patch_env(
+            monkeypatch,
+            {"GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"},
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 100, "tokens_in": 1000, "tokens_out": 200},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "cost_estimate_usd" in data
+        expected = (1000 * 0.15 + 200 * 0.60) / 1_000_000
+        assert abs(data["cost_estimate_usd"] - expected) < 1e-12
+
+    def test_cost_estimate_in_evidence_anthropic(self, monkeypatch, tmp_path):
+        """check() emits cost_estimate_usd in llm_judgment evidence (Anthropic)."""
+        _patch_env(
+            monkeypatch,
+            {"GATE_KEEPER_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-ant-test"},
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 150, "tokens_in": 500, "tokens_out": 100},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "cost_estimate_usd" in data
+        expected = (500 * 0.80 + 100 * 4.00) / 1_000_000
+        assert abs(data["cost_estimate_usd"] - expected) < 1e-12
+
+    def test_cost_estimate_is_none_for_unknown_model_openai(self, monkeypatch, tmp_path):
+        """check() emits cost_estimate_usd: None when the resolved model is unknown.
+
+        Fail-closed evidence contract (#133): when the provider model is not in
+        ``_MODEL_PRICING`` the field must still be present in the evidence dict
+        with value ``None`` — never absent, never a guessed default.
+        """
+        _patch_env(
+            monkeypatch,
+            {"GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"},
+        )
+        # Force the OpenAI dispatch branch to use a model that's not in the
+        # pricing table.
+        monkeypatch.setattr(llm_backend, "OPENAI_DEFAULT_MODEL", "gpt-future-unknown")
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 100, "tokens_in": 1000, "tokens_out": 200},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        # Field must be present but null.
+        assert "cost_estimate_usd" in data
+        assert data["cost_estimate_usd"] is None
+        # Telemetry fields are still present (this is the success path).
+        assert data["tokens_in"] == 1000
+        assert data["tokens_out"] == 200
+
+    def test_cost_estimate_is_none_for_unknown_model_anthropic(self, monkeypatch, tmp_path):
+        """check() emits cost_estimate_usd: None for unknown Anthropic model."""
+        _patch_env(
+            monkeypatch,
+            {"GATE_KEEPER_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-ant-test"},
+        )
+        monkeypatch.setattr(llm_backend, "ANTHROPIC_DEFAULT_MODEL", "claude-future-unknown")
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 150, "tokens_in": 500, "tokens_out": 100},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert "cost_estimate_usd" in data
+        assert data["cost_estimate_usd"] is None
