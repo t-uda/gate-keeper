@@ -159,11 +159,15 @@ gate-keeper validate rules.md --target t-uda/gate-keeper#100
 
 gate-keeper calls the GitHub GraphQL API via `gh` (the GitHub CLI).
 Make sure `gh auth login` has been run before using this target form.
-Rules that require GitHub context (such as draft-state checks) are evaluated;
-filesystem rules that cannot be applied to a PR are marked `unavailable`.
+Rules that require GitHub context (such as draft-state checks) are evaluated.
+Pass `--backend github` to skip filesystem rules entirely when validating a PR;
+without it, filesystem rules see the PR reference string as a local path and
+return `fail` because no such path exists on disk.
 
 ## Next steps
 
+- `gate-keeper --help` and `gate-keeper <subcommand> --help` — full flag
+  reference for all subcommands (compile, explain, validate, diagnose, bench).
 - [docs/diagnostics-guide.md](diagnostics-guide.md) — understand every status
   value, severity level, and evidence field in gate-keeper output.
 - [docs/llm-rubric.md](llm-rubric.md) — enable and configure the LLM rubric
