@@ -139,10 +139,13 @@ analysis, and per-rule SLA work:
 | `tokens_in` | `int` | Anthropic `usage.input_tokens` / OpenAI `usage.prompt_tokens` | Provider-reported prompt token count. |
 | `tokens_out` | `int` | Anthropic `usage.output_tokens` / OpenAI `usage.completion_tokens` | Provider-reported completion token count. |
 
-These fields appear **only on successful provider calls**. The
-`provider_unconfigured` and `provider_error` evidence kinds (no API call
-returned, or the call raised) intentionally do not carry telemetry — missing
-evidence is recorded as missing rather than synthesised.
+These fields appear **only on successful provider calls** that produce a
+parseable, schema-conforming judgment. The `provider_unconfigured` and
+`provider_error` evidence kinds — covering all non-success paths: provider
+unset, the SDK call raised, the response omitted required usage fields, or
+the response failed JSON parse / schema validation — intentionally do not
+carry telemetry. Missing evidence is recorded as missing rather than
+synthesised.
 
 When `--reproducibility N` aggregates `N` runs, the `latency_ms` / `tokens_in`
 / `tokens_out` on the chosen majority-judgment evidence reflect that single

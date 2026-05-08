@@ -201,6 +201,12 @@ def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[s
       (Anthropic ``usage.input_tokens``).
     - ``tokens_out``: provider-reported completion token count
       (Anthropic ``usage.output_tokens``).
+
+    Fail-closed contract (#76 follow-up): if the provider response omits
+    ``usage.input_tokens`` or ``usage.output_tokens`` (or the entire ``usage``
+    object), raise :class:`RuntimeError`. The caller in :func:`check`
+    catches this and dispatches a ``provider_error`` diagnostic; we never
+    synthesise a zero token count.
     """
     from anthropic import Anthropic
 
@@ -219,12 +225,18 @@ def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[s
         if isinstance(text, str):
             parts.append(text)
     usage = getattr(msg, "usage", None)
-    tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
-    tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
+    if usage is None:
+        raise RuntimeError("Anthropic response missing usage block; cannot record token telemetry.")
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    if input_tokens is None:
+        raise RuntimeError("Anthropic response missing usage.input_tokens; cannot record token telemetry.")
+    if output_tokens is None:
+        raise RuntimeError("Anthropic response missing usage.output_tokens; cannot record token telemetry.")
     return "".join(parts), {
         "latency_ms": latency_ms,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
+        "tokens_in": int(input_tokens),
+        "tokens_out": int(output_tokens),
     }
 
 
@@ -238,6 +250,12 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
       (OpenAI ``usage.prompt_tokens``).
     - ``tokens_out``: provider-reported completion token count
       (OpenAI ``usage.completion_tokens``).
+
+    Fail-closed contract (#76 follow-up): if the provider response omits
+    ``usage.prompt_tokens`` or ``usage.completion_tokens`` (or the entire
+    ``usage`` object), raise :class:`RuntimeError`. The caller in
+    :func:`check` catches this and dispatches a ``provider_error``
+    diagnostic; we never synthesise a zero token count.
     """
     from openai import OpenAI
 
@@ -254,12 +272,18 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
     latency_ms = int(round((time.perf_counter() - start) * 1000))
     text = resp.choices[0].message.content or ""
     usage = getattr(resp, "usage", None)
-    tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
-    tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
+    if usage is None:
+        raise RuntimeError("OpenAI response missing usage block; cannot record token telemetry.")
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    if prompt_tokens is None:
+        raise RuntimeError("OpenAI response missing usage.prompt_tokens; cannot record token telemetry.")
+    if completion_tokens is None:
+        raise RuntimeError("OpenAI response missing usage.completion_tokens; cannot record token telemetry.")
     return text, {
         "latency_ms": latency_ms,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
+        "tokens_in": int(prompt_tokens),
+        "tokens_out": int(completion_tokens),
     }
 
 
@@ -487,6 +511,15 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
         return _unavailable_provider_error(
             rule, rubric_input, provider, "unparseable_response", parsed.detail
         )
+
+    # Invariant: when control reaches here the provider helper completed without
+    # raising, so telemetry must contain all three required keys (#76 fail-closed
+    # contract — helpers raise when usage is missing rather than defaulting).
+    # Assert explicitly so a future helper bug surfaces as a programmer error
+    # instead of a silent KeyError below.
+    assert telemetry.keys() >= {"latency_ms", "tokens_in", "tokens_out"}, (
+        f"provider helper returned incomplete telemetry: {sorted(telemetry.keys())}"
+    )
 
     status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
     evidence = Evidence(

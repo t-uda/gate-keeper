@@ -538,6 +538,130 @@ class TestEvidenceObservability:
         assert "tokens_in" not in data
         assert "tokens_out" not in data
 
+    def test_missing_usage_anthropic_maps_to_unavailable(self, monkeypatch, tmp_path):
+        """Anthropic response without usage fields must fail closed (no synthetic 0).
+
+        Regression guard for the Copilot review on PR #119: previously the
+        helper coerced missing ``usage.input_tokens`` / ``usage.output_tokens``
+        to ``0``, producing synthetic telemetry. Per CLAUDE.md the project
+        rule is "Treat missing evidence as fail-closed; do not paper over with
+        defaults". The helper now raises and ``check()`` dispatches a
+        ``provider_error`` diagnostic.
+        """
+        _patch_env(monkeypatch, self._ANTHROPIC_ENV)
+
+        class _UsageMissingInput:
+            output_tokens = 60
+            # input_tokens deliberately absent
+
+        class _Block:
+            text = _VALID_PASS_JSON
+
+        class _Msg:
+            content = [_Block()]
+            usage = _UsageMissingInput()
+
+        class _Client:
+            def __init__(self, *_a, **_k):
+                pass
+
+            class messages:  # noqa: N801 — match SDK shape
+                @staticmethod
+                def create(*_a, **_k):
+                    return _Msg()
+
+        monkeypatch.setattr(llm_backend, "Anthropic", _Client, raising=False)
+        # Patch via the import inside _call_anthropic by monkeypatching the
+        # SDK module's attribute via sys.modules.
+        import sys
+
+        fake_mod = type(sys)("anthropic")
+        fake_mod.Anthropic = _Client  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "anthropic", fake_mod)
+
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_error"
+        assert diag.evidence[0].data["provider"] == "anthropic"
+        # No synthetic telemetry on the provider_error evidence.
+        assert "tokens_in" not in diag.evidence[0].data
+        assert "tokens_out" not in diag.evidence[0].data
+        # Failure mode tag identifies it as a usage/telemetry shortfall.
+        detail = diag.evidence[0].data["detail"]
+        assert "usage" in detail.lower() or "input_tokens" in detail.lower()
+
+    def test_missing_usage_openai_maps_to_unavailable(self, monkeypatch, tmp_path):
+        """OpenAI response without usage fields must fail closed (no synthetic 0)."""
+        _patch_env(monkeypatch, self._OPENAI_ENV)
+
+        class _UsageMissingCompletion:
+            prompt_tokens = 250
+            # completion_tokens deliberately absent
+
+        class _Choice:
+            class message:  # noqa: N801
+                content = _VALID_PASS_JSON
+
+        class _Resp:
+            choices = [_Choice()]
+            usage = _UsageMissingCompletion()
+
+        class _Client:
+            def __init__(self, *_a, **_k):
+                pass
+
+            class chat:  # noqa: N801
+                class completions:  # noqa: N801
+                    @staticmethod
+                    def create(*_a, **_k):
+                        return _Resp()
+
+        import sys
+
+        fake_mod = type(sys)("openai")
+        fake_mod.OpenAI = _Client  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "openai", fake_mod)
+
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_error"
+        assert diag.evidence[0].data["provider"] == "openai"
+        assert "tokens_in" not in diag.evidence[0].data
+        assert "tokens_out" not in diag.evidence[0].data
+        detail = diag.evidence[0].data["detail"]
+        assert "usage" in detail.lower() or "completion_tokens" in detail.lower()
+
+    def test_missing_usage_block_anthropic_maps_to_unavailable(self, monkeypatch, tmp_path):
+        """Anthropic response with no usage object at all must fail closed."""
+        _patch_env(monkeypatch, self._ANTHROPIC_ENV)
+
+        class _Block:
+            text = _VALID_PASS_JSON
+
+        class _Msg:
+            content = [_Block()]
+            usage = None  # entire usage block absent
+
+        class _Client:
+            def __init__(self, *_a, **_k):
+                pass
+
+            class messages:  # noqa: N801
+                @staticmethod
+                def create(*_a, **_k):
+                    return _Msg()
+
+        import sys
+
+        fake_mod = type(sys)("anthropic")
+        fake_mod.Anthropic = _Client  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "anthropic", fake_mod)
+
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_error"
+        assert diag.evidence[0].data["provider"] == "anthropic"
+
     def test_run_n_majority_run_carries_telemetry(self, monkeypatch, tmp_path):
         """Per-run telemetry is preserved on the representative run; not aggregated."""
         _patch_env(monkeypatch, self._ANTHROPIC_ENV)
