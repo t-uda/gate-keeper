@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    subparsers.add_parser(
+        "diagnose",
+        help="report LLM-rubric provider credential state (length-only, never the key)",
+    )
+
     return parser
 
 
@@ -194,6 +199,69 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return compute_exit_code(report.diagnostics)
 
 
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    """Report LLM-rubric provider credential state.
+
+    Prints dotenv path, whether the file exists, the configured provider
+    (``GATE_KEEPER_LLM_PROVIDER``), the API-key character count (length
+    only — never the key value), and a derived ``provider configured``
+    line.
+
+    The implementation reads the dotenv exactly once via
+    ``llm_rubric._load_env_file``; the ``configured`` line is derived
+    from that single snapshot to keep the four output lines internally
+    consistent (a concurrent edit to the dotenv between two reads could
+    otherwise produce a contradictory report). ``os.environ`` is
+    intentionally not consulted, matching the backend policy documented
+    in ``src/gate_keeper/backends/llm_rubric.py``.
+    """
+    del args  # diagnose takes no arguments
+
+    from gate_keeper.backends import llm_rubric
+
+    path = llm_rubric.DOTENV_PATH
+    env = llm_rubric._load_env_file(path)
+    provider = env.get("GATE_KEEPER_LLM_PROVIDER")
+
+    print(f"dotenv path:        {path}")
+    print(f"dotenv exists:      {'yes' if path.exists() else 'no'}")
+    print(f"GATE_KEEPER_LLM_PROVIDER: {provider if provider is not None else '<unset>'}")
+
+    # Distinguish three provider states for the api-key line:
+    #   - unset or blank → report ``<unset>`` (not "unsupported")
+    #   - supported (anthropic / openai) → report the matching key var,
+    #     length-only
+    #   - any other non-empty value → unsupported provider, no key var
+    #     to consult
+    # ``configured`` is derived from the same single snapshot rather
+    # than calling ``_is_configured()`` again, so the four output lines
+    # cannot drift if the dotenv is rewritten mid-call.
+    if not provider:
+        print("api key:            <unset>")
+        configured = False
+    elif provider == "anthropic":
+        key_value = env.get("ANTHROPIC_API_KEY")
+        if key_value:
+            print(f"ANTHROPIC_API_KEY: <{len(key_value)} chars>")
+        else:
+            print("ANTHROPIC_API_KEY: <unset>")
+        configured = bool(key_value)
+    elif provider == "openai":
+        key_value = env.get("OPENAI_API_KEY")
+        if key_value:
+            print(f"OPENAI_API_KEY: <{len(key_value)} chars>")
+        else:
+            print("OPENAI_API_KEY: <unset>")
+        configured = bool(key_value)
+    else:
+        print("api key:            <unsupported provider; no key reported>")
+        configured = False
+
+    print(f"provider configured: {'yes' if configured else 'no'}")
+
+    return EXIT_OK
+
+
 def _register_default_adapters() -> None:
     """Register adapters that ship with gate-keeper.
 
@@ -228,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "validate":
         return _cmd_validate(args)
+
+    if args.command == "diagnose":
+        return _cmd_diagnose(args)
 
     parser.error(f"{args.command!r} is planned but not implemented in the scaffold")
     return 2
