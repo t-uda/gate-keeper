@@ -1,7 +1,7 @@
 # `Backend.EXTERNAL` — adapter pattern for third-party tools
 
 This document is the contract for the `external` backend: a single dispatcher
-that routes rules to per-tool adapters (textlint, vale, eslint, …). Tracking
+that routes rules to per-tool adapters (textlint, vale, ESLint, …). Tracking
 umbrella: #80. New tools integrate as adapters here, not as new
 `Backend` enum values.
 

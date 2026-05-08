@@ -21,7 +21,7 @@ LLM rubric whenever evidence is available.** For textlint this means:
 
 - Its rules are Japanese-specific and the corpus contains no Japanese text
   (see §5 below).
-- It introduces style-guide choices that require significant per-project option
+- It introduces style guide choices that require significant per-project option
   tuning to avoid noisy alerts.
 - It bundles other packages whose individual cost/benefit is unclear.
 - It is domain-specific (e.g. engineering papers, SI units) and the corpus is
@@ -40,11 +40,11 @@ throughout the corpus.
 |---------|------|--------|-----------|------------------------|
 | `textlint-rule-prh` | Dictionary / terminology | **in** | Pure dictionary lookup; rules fire only on exact matches in `prh.yml`. Deterministic, zero false positives when the dictionary is correctly authored. Central to project-specific terminology control. | Very low — user-controlled dictionary. |
 | `textlint-rule-terminology` | English brand/term spelling | **in** | Enforces consistent capitalisation of English technical terms (GitHub, JavaScript, npm, …). Deterministic, rule list is well-curated, minimal tuning needed on English prose. | Low — well-tested rule list; occasional conflicts with deliberate lower-case use (mitigated by `allowTerms` option). |
-| `textlint-rule-preset-ja-spacing` | Japanese spacing conventions | **defer** | Corpus is English-only (see §5). All rules in this preset fire on Japanese-adjacent characters that do not appear in this repo. Zero value; all alerts would be false positives. Reopen: if Japanese prose is added to the corpus. | N/A — inapplicable corpus. |
+| `textlint-rule-preset-ja-spacing` | Japanese spacing conventions | **defer** | Corpus is English-only (see §5). All rules in this preset fire on Japanese-adjacent characters that do not appear in this repository. Zero value; all alerts would be false positives. Reopen: if Japanese prose is added to the corpus. | N/A — inapplicable corpus. |
 | `textlint-rule-preset-japanese` | General Japanese writing | **defer** | Same rationale as ja-spacing. Corpus contains no Japanese text. Reopen: if Japanese prose is added to the corpus. | N/A — inapplicable corpus. |
 | `textlint-rule-preset-ja-technical-writing` | Japanese tech writing | **defer** | Japanese-specific preset; intentionally ships rules that require per-project exception lists. Even if the corpus had Japanese text, this would require tuning before first use. Reopen: after Japanese corpus exists and #83 eval data is available. | High without tuning — acknowledged in #80 body. |
-| `textlint-rule-preset-jtf-style` | JTF Japanese style guide | **defer** | Japanese-specific. #80 body notes "some style-guide items are difficult or impossible to enforce mechanically." Reopen: after Japanese corpus exists and after empirical evaluation under #83. | High — mechanical enforcement of style-guide items known to misfire. |
-| `textlint-rule-preset-ja-engineering-paper` | Engineering paper (JA) | **out** | Japanese-specific and domain-specific (engineering papers). This repo is general-purpose developer documentation. Cross-reference #91: if per-doc-type configs are introduced and any documents are Japanese engineering papers, reconsider there. Reopen criterion: #91 introduces an engineering-paper document type with Japanese prose. | High — both Japanese-specific and paper-specific rules applied globally. |
+| `textlint-rule-preset-jtf-style` | JTF Japanese style guide | **defer** | Japanese-specific. #80 body notes "some style guide items are difficult or impossible to enforce mechanically." Reopen: after Japanese corpus exists and after empirical evaluation under #83. | High — mechanical enforcement of style guide items known to misfire. |
+| `textlint-rule-preset-ja-engineering-paper` | Engineering paper (JA) | **out** | Japanese-specific and domain-specific (engineering papers). This repository is general-purpose developer documentation. Cross-reference #91: if per-doc-type configs are introduced and any documents are Japanese engineering papers, reconsider there. Reopen criterion: #91 introduces an engineering-paper document type with Japanese prose. | High — both Japanese-specific and paper-specific rules applied globally. |
 | `textlint-rule-no-synonyms` | Japanese synonym drift | **out** | Depends on Sudachi Japanese synonym data; fires on Japanese terms only. No Japanese text in this corpus. No reopen path without Japanese prose. Reopen criterion: Japanese prose is added and #91 establishes a Japanese document type. | N/A — inapplicable corpus. |
 | `textlint-rule-use-si-units` | SI unit formatting | **defer** | Potentially useful for technical docs, but the corpus contains no mathematical or physical-unit content today. Cross-reference #91: appropriate in a per-doc-type config for spec or engineering documents rather than globally. Reopen criterion: #91 introduces a document type where SI unit consistency is a stated project requirement. | Medium — SI rules applied globally to developer docs and changelogs will alert on legitimate informal usage. |
 
@@ -82,7 +82,7 @@ empirical evaluation (#83) and per-doc-type config design (#91).
 
 ---
 
-## 5. Repo corpus consideration
+## 5. Repository corpus consideration
 
 **Language**: every authored Markdown file in this repository is English. The
 full sample — `docs/*.md` (9 files), `README.md`, and `tests/fixtures/**/*.md`
@@ -120,7 +120,7 @@ deferring all Japanese-language packages.
 - **`prh.yml` content** (preferred terms, prohibited patterns, allowlists) — #84.
 - **CI workflow** (GitHub Actions, changed-file checks, annotation formatter) — #87.
 - **Per-doc-type config** (whether engineering-paper or SI-unit rules apply to
-  any document type in this repo) — #91.
+  any document type in this repository) — #91.
 - **False-positive policy** (inline suppression, ignore-file conventions) — #90.
 - **Empirical preset evaluation** on the existing corpus (data that will inform
   any future addition of deferred packages) — #83.

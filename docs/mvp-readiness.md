@@ -56,8 +56,8 @@ verifiable without hidden context. Check off items with `uv run` commands and
   SourceLocation).
 - [x] `docs/llm-rubric.md` explains the stub and its fail-closed behavior.
 - [x] `docs/example-rules.md` demonstrates filesystem and GitHub rule types.
-- [x] README documents Python 3.10 requirement and development commands.
-- [x] README links to this checklist.
+- [x] Readme documents Python 3.10 requirement and development commands.
+- [x] Readme links to this checklist.
 
 ## Tests and CI
 

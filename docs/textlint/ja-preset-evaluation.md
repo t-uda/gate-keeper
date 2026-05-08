@@ -41,7 +41,7 @@ Most rules fire exclusively on Unicode characters in the CJK range. An
 English-only document triggers zero rules from this preset. The encoding-safety
 rules (`no-nfd`, `no-zero-width-spaces`, `no-invalid-control-character`) apply
 universally, but identical protection is available through simpler means (editor
-config, git hooks) and these rules have negligible false-positive risk on ASCII
+config, Git hooks) and these rules have negligible false-positive risk on ASCII
 text.
 
 **False-positive tendency on mixed corpus (English + incidental Japanese)**:

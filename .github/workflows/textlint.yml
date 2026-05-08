@@ -1,0 +1,45 @@
+# textlint — documentation prose linting on PRs (Mode A: standalone)
+#
+# Tracking: #87 (umbrella #80). This is the standalone mode that runs textlint
+# directly via `npx`; results surface as inline GitHub annotations from the
+# `github` formatter. Mode B (gate-keeper-mediated, via the textlint adapter
+# from #94) is documented in `docs/textlint/severity-policy.md` and may
+# replace or augment this workflow once it is wired through CI.
+#
+# Exit-code distinction (per docs/textlint/severity-policy.md §6):
+#   - exit 1 from `textlint` => lint failure (findings present); the workflow
+#     fails at the lint step with annotations visible inline on the PR diff.
+#   - exit !=0 at install/setup steps (`actions/setup-node`, `npm ci`) =>
+#     config / infra failure; surfaced as a step error on a different job
+#     step than the lint step, naturally distinct from a lint exit-1.
+# Both fail the workflow; the surfacing is naturally distinct because each
+# failure occurs on a different named step.
+#
+# Scope: full repository (`docs/**/*.md` and `README.md`). Changed-file-only
+# narrowing is tracked in #88 and is out of scope here.
+
+name: textlint
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  textlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run textlint (GitHub annotations)
+        run: npx --no -- textlint --format github "docs/**/*.md" "README.md"
