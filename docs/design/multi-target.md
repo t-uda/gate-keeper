@@ -1,5 +1,7 @@
 # Design: Multi-Target Evaluation (Directory / Multi-File Context)
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking issue: #74. Design phase only — no IR or backend changes in this doc.
 
 ---

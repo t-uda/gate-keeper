@@ -1,5 +1,7 @@
 # Issue Plan
 
+> Status: internal process artifact — not user-facing reference.
+
 This is the intended GitHub issue structure for the 3-day MVP.
 
 Project: https://github.com/users/t-uda/projects/2

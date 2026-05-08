@@ -1,5 +1,7 @@
 # MVP Readiness Checklist
 
+> Status: internal process artifact — not user-facing reference.
+
 This checklist defines the three-day MVP completion line. Every item must be
 verifiable without hidden context. Check off items with `uv run` commands and
 `gh pr view` output.

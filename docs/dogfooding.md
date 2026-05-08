@@ -1,5 +1,7 @@
 # Dogfooding gate-keeper on itself
 
+> Status: internal process artifact — not user-facing reference.
+
 `gate-keeper` is exercised against its own PRs to surface compiler/backend gaps
 early. The rule of thumb in `AGENTS.md` is: **self-gating is advisory by default;
 promote per-rule to required.** This document defines the promotion path.

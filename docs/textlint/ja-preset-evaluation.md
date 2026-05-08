@@ -1,5 +1,7 @@
 # textlint Japanese preset evaluation — decision record (#83)
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking umbrella: #80. This evaluation informs future additions to `.textlintrc`
 when Japanese prose is added to the corpus. Configuration file authoring is #82;
 severity policy is #85.

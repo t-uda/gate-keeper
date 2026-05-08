@@ -1,5 +1,7 @@
 # Dogfooding rules — semantic advisory pool
 
+> Status: internal process artifact — not user-facing reference.
+
 Seed pool of semantic rules that `gate-keeper` evaluates against its own
 pull requests as advisory input. Complements
 [`example-rules.md`](example-rules.md), which holds the deterministic

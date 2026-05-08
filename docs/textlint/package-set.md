@@ -1,5 +1,7 @@
 # textlint initial package set — decision record (#81)
 
+> Status: internal process artifact — not user-facing reference.
+
 Tracking umbrella: #80. Configuration, severity policy, prh dictionary,
 and CI workflow are deferred to #82, #85, #84, and #87 respectively.
 
