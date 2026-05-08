@@ -1,19 +1,200 @@
-# Example `gate-keeper` Rules
+# Example gate-keeper Rules
 
-A minimal rule document mixing filesystem and GitHub checks.
-Used with: `gate-keeper compile docs/example-rules.md --format json`
+Annotated walkthroughs across all four backends.
+Each entry shows: rule text → classifier route → sample target → `validate` output.
 
-## Filesystem Checks
+Use `gate-keeper explain <rules.md>` to see how a rule is routed before running validation.
+
+---
+
+## 1. `README.md` must exist — filesystem `file_exists`
+
+**Rule document:**
+
+```markdown
+## Required Files
 
 - `README.md` must exist in the repository root.
-- `CHANGELOG.md` must be present before release.
-- Source files must not contain the string `DO NOT MERGE`.
-- Source files must follow the `src/**/*.py` path glob pattern.
+```
 
-## GitHub PR Checks
+**Classifier route:** `filesystem / file_exists / high` — "must exist" triggers the explicit existence predicate.
+
+**Sample run — pass / fail:**
+
+```
+$ gate-keeper validate rules.md --target path/to/README.md   # file exists
+rules.md:3: warning: [filesystem/pass] rule-rules-L3: path/to/README.md exists.
+  [file_stat(path=path/to/README.md, exists=True)]
+
+$ gate-keeper validate rules.md --target path/to/README.md   # file absent
+rules.md:3: warning: [filesystem/fail] rule-rules-L3: path/to/README.md does not exist.
+  [file_stat(path=path/to/README.md, exists=False)]
+```
+
+---
+
+## 2. `FIXME.txt` must not exist — filesystem `file_absent`
+
+**Rule document:**
+
+```markdown
+## Temporary Files
+
+- `FIXME.txt` must not exist in the repository.
+```
+
+**Classifier route:** `filesystem / file_absent / high` — "must not exist" triggers the absence predicate.
+
+**Sample run — pass / fail:**
+
+```
+$ gate-keeper validate rules.md --target path/to/FIXME.txt   # file absent
+rules.md:3: warning: [filesystem/pass] rule-rules-L3: path/to/FIXME.txt is absent.
+  [file_stat(path=path/to/FIXME.txt, exists=False)]
+
+$ gate-keeper validate rules.md --target path/to/FIXME.txt   # file present
+rules.md:3: warning: [filesystem/fail] rule-rules-L3: path/to/FIXME.txt exists but must be absent.
+  [file_stat(path=path/to/FIXME.txt, exists=True)]
+```
+
+---
+
+## 3. GitHub PR merge gates — `github_not_draft`, `github_threads_resolved`, `github_tasks_complete`
+
+**Rule document:**
+
+```markdown
+## Merge Conditions
 
 - The PR must not be in draft state before merging.
-- CI checks must pass for the PR to be merged.
 - All review threads must be resolved before merge.
-- Non-author approval is required from at least one reviewer.
-- No blocking labels such as `do-not-merge` or `needs-decision` should be present.
+- PR tasks and checkboxes must all be complete before merging.
+```
+
+**Classifier routes:**
+
+- `github / github_not_draft / high` — "not be in draft state"
+- `github / github_threads_resolved / high` — "review threads … resolved"
+- `github / github_tasks_complete / high` — "PR tasks and checkboxes"
+
+**Sample run (all pass):**
+
+```
+$ gate-keeper validate rules.md --target https://github.com/owner/repo/pull/42
+rules.md:3: warning: [github/pass] rule-L3: PR owner/repo#42 is not a draft.
+  [pr_draft(is_draft=False, ...)]
+rules.md:4: warning: [github/pass] rule-L4: PR owner/repo#42: all 0 review thread(s) are resolved.
+  [review_threads(total=0, unresolved_count=0, ...)]
+rules.md:5: warning: [github/pass] rule-L5: PR owner/repo#42 has all 7 task(s) checked.
+  [pr_tasks(checked=7, unchecked=0, total=7, ...)]
+```
+
+**Sample run (fail — draft PR with unchecked tasks):**
+
+```
+$ gate-keeper validate rules.md --target https://github.com/owner/repo/pull/43
+rules.md:3: warning: [github/fail] rule-L3: PR owner/repo#43 is a draft.
+  [pr_draft(is_draft=True, ...)]
+rules.md:5: warning: [github/fail] rule-L5: PR owner/repo#43 has 2 unchecked task(s) of 5.
+  [pr_tasks(checked=3, unchecked=2, total=5, ...)]
+```
+
+**Note:** `gh` CLI must be authenticated. Without network access the backend returns `unavailable`.
+
+---
+
+## 4. Semantic rubric — `llm-rubric / semantic_rubric`
+
+**Rule document:**
+
+```markdown
+## Advisory Semantic Checks
+
+- The description should summarise the user-visible change.
+```
+
+**Classifier route:** `llm-rubric / semantic_rubric / low` — no deterministic predicate matches;
+falls back to the LLM rubric backend.
+
+**Sample run (pass — clear description):**
+
+```
+$ gate-keeper validate rules.md \
+    --target "Add docs/getting-started.md with install instructions and quickstart examples"
+rules.md:3: warning: [llm-rubric/pass] rule-L3: The description includes install instructions and quickstart examples.
+```
+
+**Sample run (fail — vague description):**
+
+```
+$ gate-keeper validate rules.md --target "Fix typo in docs" --verbose
+rules.md:3: warning: [llm-rubric/fail] rule-L3: The description does not summarize a user-visible change.
+  [llm-rubric]
+    judgment  : fail
+    reason    : The description does not summarize a user-visible change.
+    evidence  : "Fix typo in docs"
+    action    : Provide a detailed explanation of how the change affects user experience.
+    model     : gpt-4o-mini
+```
+
+**Notes:**
+
+- Use `severity: advisory` for semantic rules so they never block CI alone.
+- The `--target` string is passed verbatim to the LLM as the artifact reference.
+  For best results pass a descriptive text excerpt rather than a bare file path.
+- Use `--verbose` to see the full structured rationale (judgment, evidence, action).
+- Run `gate-keeper diagnose` to verify credentials; see `docs/llm-rubric.md`.
+
+---
+
+## 5. textlint prose quality — `external / external_check`
+
+textlint rules use `kind: external_check` with `params.tool: textlint`.
+The textlint adapter is registered automatically at CLI entry.
+
+The classifier does not auto-route natural-language bullets to `external_check`.
+Compile first, then edit the JSON to set `kind`, `backend_hint`, and `params.tool`:
+
+```sh
+gate-keeper compile rules.md --format json > rules.json
+# edit rules.json: kind→external_check, backend_hint→external, params.tool→textlint
+```
+
+**Compiled rule (JSON excerpt):**
+
+```json
+{
+  "rules": [{
+    "id": "prose-textlint",
+    "text": "Repository prose should be free of textlint findings.",
+    "kind": "external_check",
+    "severity": "warning",
+    "backend_hint": "external",
+    "params": { "tool": "textlint" }
+  }]
+}
+```
+
+**Sample run (pass — no findings):**
+
+```
+$ gate-keeper validate rules.json --target docs/clean-file.md
+rules.json:1: warning: [external/pass] prose-textlint: textlint reported no findings against docs/clean-file.md
+```
+
+**Sample run (fail — terminology findings):**
+
+```
+$ gate-keeper validate rules.json --target docs/draft.md
+rules.json:1: warning: [external/fail] prose-textlint: textlint reported 2 finding(s)
+  [textlint_finding(file=docs/draft.md, line=3, column=20,
+      rule_id=terminology, message=Incorrect term: "javascript", use "JavaScript" instead, fixable=True);
+   textlint_finding(file=docs/draft.md, line=3, column=35,
+      rule_id=terminology, message=Incorrect term: "github", use "GitHub" instead, fixable=True)]
+```
+
+**Notes:**
+
+- Requires Node and `npm install` at the repository root to install textlint.
+- Run `npx --no textlint --fix <file>` to apply auto-fixable corrections.
+- See `docs/backend-external.md` for the full adapter contract.
