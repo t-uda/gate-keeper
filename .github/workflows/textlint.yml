@@ -10,8 +10,8 @@
 # Two execution modes (#88):
 #   - Changed-file mode (default on PRs): textlint runs only on the Markdown
 #     files actually modified by the PR, narrowed to the same glob the full
-#     run uses (`docs/**/*.md`, `docs/**/*.markdown`, `README.md`). This is
-#     the typical CI path; it scales linearly with PR size, not corpus size.
+#     run uses (`docs/**/*.md`, `README.md`). This is the typical CI path; it
+#     scales linearly with PR size, not corpus size.
 #   - Full-repo mode (config-change fallback): textlint runs on the full
 #     corpus when any of `.textlintrc.json`, `prh.yml`, `package.json`, or
 #     `package-lock.json` is modified by the PR. Configuration or dictionary
@@ -19,6 +19,16 @@
 #   - Empty-set short-circuit: when no Markdown files match the glob and no
 #     config files are touched, the lint step is skipped with a log line.
 #     This is a graceful success (exit 0).
+#
+# Safety notes (per Copilot review on #122):
+#   - The changed-file glob and the full-corpus invocation cover exactly the
+#     same set (`docs/**/*.md` + `README.md`) so both modes have identical
+#     coverage. The repo currently has no `*.markdown` files; if that ever
+#     changes, both lists must be updated together.
+#   - Changed-file paths are passed to textlint via xargs with newline
+#     separation and `--` option terminator. This preserves paths that
+#     contain whitespace and prevents a hostile/edge filename starting with
+#     `-` from being parsed as a textlint flag.
 #
 # Exit-code distinction (per docs/textlint/severity-policy.md §6):
 #   - exit 1 from `textlint` => lint failure (findings present); the workflow
@@ -58,7 +68,6 @@ jobs:
         with:
           files: |
             docs/**/*.md
-            docs/**/*.markdown
             README.md
           files_yaml: |
             config:
@@ -66,21 +75,26 @@ jobs:
               - prh.yml
               - package.json
               - package-lock.json
+          separator: "\n"
 
       - name: Run textlint (full corpus, config changed)
         if: steps.changed.outputs.config_any_changed == 'true'
         run: |
           echo "Config or dictionary changed; running full-corpus textlint."
-          npx --no -- textlint --format github "docs/**/*.md" "README.md"
+          npx --no -- textlint --format github -- "docs/**/*.md" "README.md"
 
       - name: Run textlint (changed Markdown only)
         if: steps.changed.outputs.config_any_changed != 'true' && steps.changed.outputs.any_changed == 'true'
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.all_changed_files }}
         run: |
-          echo "Changed Markdown files: $CHANGED_FILES"
-          # shellcheck disable=SC2086
-          npx --no -- textlint --format github $CHANGED_FILES
+          echo "Changed Markdown files:"
+          printf '%s\n' "$CHANGED_FILES"
+          # Newline-separated list (separator: "\n" above) piped through xargs
+          # preserves paths with whitespace; `-d '\n'` makes xargs split on
+          # newlines only; `--` after `--format github` terminates option
+          # parsing so a filename starting with `-` is never treated as a flag.
+          printf '%s\n' "$CHANGED_FILES" | xargs -d '\n' -r npx --no -- textlint --format github --
 
       - name: Skip textlint (no Markdown or config changed)
         if: steps.changed.outputs.config_any_changed != 'true' && steps.changed.outputs.any_changed != 'true'
