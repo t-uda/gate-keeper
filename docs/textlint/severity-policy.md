@@ -54,8 +54,8 @@ not a per-finding mapping (the adapter inherits `rule.severity` per the
 
 | textlint severity | gate-keeper `Severity` | Notes |
 |---|---|---|
-| `error` | `Severity.ERROR` | Direct mapping. Textlint `error`-level rules are fail-closed; the adapter produces `Status.FAIL` diagnostics for violations. |
-| `warning` | `Severity.WARNING` | Direct mapping. Textlint `warning`-level rules are advisory in intent; the adapter may produce `Status.FAIL` or a lighter status for violations — see §3. |
+| `error` | `Severity.ERROR` | Direct mapping. textlint `error`-level rules are fail-closed; the adapter produces `Status.FAIL` diagnostics for violations. |
+| `warning` | `Severity.WARNING` | Direct mapping. textlint `warning`-level rules are advisory in intent; the adapter may produce `Status.FAIL` or a lighter status for violations — see §3. |
 | `info` | `Severity.ADVISORY` | Direct mapping. Informational rules; adapter behavior TBD in #94. |
 
 **Rationale for direct mapping**: textlint's three-level schema aligns with

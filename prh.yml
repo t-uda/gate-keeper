@@ -1,0 +1,28 @@
+# gate-keeper project terminology dictionary.
+#
+# Rules are intentionally minimal and project-specific. General developer
+# vocabulary (e.g. GitHub, JSON, YAML, README) is owned by
+# textlint-rule-terminology and must not be duplicated here.
+#
+# When to add an entry: a recurring miscapitalisation of a project-specific
+# identifier or term that the terminology rule does not already cover.
+# When NOT to add: ad-hoc one-off prose preferences, or terms whose canonical
+# form is genuinely context-dependent. See docs/textlint/prh-process.md.
+
+version: 1
+rules:
+  # Project name. The canonical spelling is the lowercase hyphenated identifier
+  # `gate-keeper`. The bare noun "gatekeeper" is intentionally NOT flagged —
+  # it is a legitimate English word and is used in prose to describe the
+  # category (e.g. "deterministic writing gatekeeper").
+  - expected: gate-keeper
+    patterns:
+      - /Gate-Keeper/
+      - /GateKeeper/
+
+  # Tool name. The canonical spelling of the upstream tool is lowercase
+  # `textlint`. Title-case variants are wrong even at sentence start.
+  - expected: textlint
+    patterns:
+      - TextLint
+      - Textlint

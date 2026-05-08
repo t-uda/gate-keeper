@@ -1,4 +1,4 @@
-# Example Gate-Keeper Rules
+# Example `gate-keeper` Rules
 
 A minimal rule document mixing filesystem and GitHub checks.
 Used with: `gate-keeper compile docs/example-rules.md --format json`
