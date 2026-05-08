@@ -1,10 +1,34 @@
 # textlint — documentation prose linting on PRs (Mode A: standalone)
 #
-# Tracking: #87 (umbrella #80). This is the standalone mode that runs textlint
-# directly via `npx`; results surface as inline GitHub annotations from the
-# `github` formatter. Mode B (gate-keeper-mediated, via the textlint adapter
-# from #94) is documented in `docs/textlint/severity-policy.md` and may
-# replace or augment this workflow once it is wired through CI.
+# Tracking: #87 (umbrella #80) introduced the workflow; #88 added changed-file
+# narrowing. This is the standalone mode that runs textlint directly via
+# `npx`; results surface as inline GitHub annotations from the `github`
+# formatter. Mode B (gate-keeper-mediated, via the textlint adapter from #94)
+# is documented in `docs/textlint/severity-policy.md` and may replace or
+# augment this workflow once it is wired through CI.
+#
+# Two execution modes (#88):
+#   - Changed-file mode (default on PRs): textlint runs only on the Markdown
+#     files actually modified by the PR, narrowed to the same glob the full
+#     run uses (`docs/**/*.md`, `README.md`). This is the typical CI path; it
+#     scales linearly with PR size, not corpus size.
+#   - Full-repo mode (config-change fallback): textlint runs on the full
+#     corpus when any of `.textlintrc.json`, `prh.yml`, `package.json`, or
+#     `package-lock.json` is modified by the PR. Configuration or dictionary
+#     changes can affect the whole corpus, so narrowing would hide regressions.
+#   - Empty-set short-circuit: when no Markdown files match the glob and no
+#     config files are touched, the lint step is skipped with a log line.
+#     This is a graceful success (exit 0).
+#
+# Safety notes (per Copilot review on #122):
+#   - The changed-file glob and the full-corpus invocation cover exactly the
+#     same set (`docs/**/*.md` + `README.md`) so both modes have identical
+#     coverage. The repo currently has no `*.markdown` files; if that ever
+#     changes, both lists must be updated together.
+#   - Changed-file paths are passed to textlint via xargs with newline
+#     separation and `--` option terminator. This preserves paths that
+#     contain whitespace and prevents a hostile/edge filename starting with
+#     `-` from being parsed as a textlint flag.
 #
 # Exit-code distinction (per docs/textlint/severity-policy.md §6):
 #   - exit 1 from `textlint` => lint failure (findings present); the workflow
@@ -14,9 +38,6 @@
 #     step than the lint step, naturally distinct from a lint exit-1.
 # Both fail the workflow; the surfacing is naturally distinct because each
 # failure occurs on a different named step.
-#
-# Scope: full repository (`docs/**/*.md` and `README.md`). Changed-file-only
-# narrowing is tracked in #88 and is out of scope here.
 
 name: textlint
 
@@ -41,5 +62,40 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run textlint (GitHub annotations)
-        run: npx --no -- textlint --format github "docs/**/*.md" "README.md"
+      - name: Detect changed files
+        id: changed
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            docs/**/*.md
+            README.md
+          files_yaml: |
+            config:
+              - .textlintrc.json
+              - prh.yml
+              - package.json
+              - package-lock.json
+          separator: "\n"
+
+      - name: Run textlint (full corpus, config changed)
+        if: steps.changed.outputs.config_any_changed == 'true'
+        run: |
+          echo "Config or dictionary changed; running full-corpus textlint."
+          npx --no -- textlint --format github -- "docs/**/*.md" "README.md"
+
+      - name: Run textlint (changed Markdown only)
+        if: steps.changed.outputs.config_any_changed != 'true' && steps.changed.outputs.any_changed == 'true'
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.all_changed_files }}
+        run: |
+          echo "Changed Markdown files:"
+          printf '%s\n' "$CHANGED_FILES"
+          # Newline-separated list (separator: "\n" above) piped through xargs
+          # preserves paths with whitespace; `-d '\n'` makes xargs split on
+          # newlines only; `--` after `--format github` terminates option
+          # parsing so a filename starting with `-` is never treated as a flag.
+          printf '%s\n' "$CHANGED_FILES" | xargs -d '\n' -r npx --no -- textlint --format github --
+
+      - name: Skip textlint (no Markdown or config changed)
+        if: steps.changed.outputs.config_any_changed != 'true' && steps.changed.outputs.any_changed != 'true'
+        run: echo "No Markdown or config changed; skipping textlint."
