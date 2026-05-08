@@ -17,6 +17,7 @@ runtime. The intended shape is:
 
 ### For users
 
+- [docs/getting-started.md](docs/getting-started.md) — install, write your first rule document, and run your first validation
 - [docs/llm-rubric.md](docs/llm-rubric.md) — LLM rubric backend: configuration, evidence shape, and credential setup
 - [docs/gh-aw.md](docs/gh-aw.md) — GitHub Agentic Workflows (`gh aw`) integration guide
 - [docs/example-rules.md](docs/example-rules.md) — annotated rule examples across all backends
