@@ -16,7 +16,14 @@ from gate_keeper.cli import main
 
 
 def test_diagnose_unconfigured_reports_no(monkeypatch, capsys):
-    """An empty dotenv yields ``provider configured: no``."""
+    """An empty dotenv yields ``provider configured: no``.
+
+    When ``GATE_KEEPER_LLM_PROVIDER`` is unset, the api-key line must
+    say ``<unset>`` rather than ``<unsupported provider...>`` —
+    "unsupported" is reserved for *recognised-as-not-supported* values
+    (e.g. ``google``). Asserting the exact api-key line locks the
+    documented UX and prevents accidental key-leak regressions.
+    """
     monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **kw: {})
 
     rc = main(["diagnose"])
@@ -25,9 +32,12 @@ def test_diagnose_unconfigured_reports_no(monkeypatch, capsys):
     captured = capsys.readouterr()
     out = captured.out
     assert "dotenv path:" in out
-    assert "provider configured: no" in out
-    # Provider line is present but unset
     assert "GATE_KEEPER_LLM_PROVIDER: <unset>" in out
+    assert "api key:            <unset>" in out
+    # The "unsupported provider" wording is reserved for recognised-as-
+    # unsupported values; an unset provider must not surface it.
+    assert "unsupported provider" not in out
+    assert "provider configured: no" in out
 
 
 def test_diagnose_configured_openai_reports_yes_and_length(monkeypatch, capsys):

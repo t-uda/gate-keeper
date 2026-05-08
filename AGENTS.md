@@ -19,6 +19,7 @@
 uv sync
 uv run gate-keeper --help
 uv run gate-keeper validate RULES --target TARGET [--verbose]
+uv run gate-keeper diagnose
 uv run pytest
 uvx ruff check .
 uvx pyright
@@ -30,7 +31,7 @@ uvx pyright
 - Prefer deterministic backends over LLM rubric whenever evidence is available.
 - Treat missing evidence as fail-closed; do not paper over with defaults.
 - Keep `gh aw` out of package dependencies; document composition only.
-- Self-gating on this repo is advisory by default; promote per-rule to required, see docs/dogfooding.md.
+- Self-gating on this repository is advisory by default; promote per-rule to required, see docs/dogfooding.md.
 
 ## Architecture
 

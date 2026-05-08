@@ -204,12 +204,16 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
 
     Prints dotenv path, whether the file exists, the configured provider
     (``GATE_KEEPER_LLM_PROVIDER``), the API-key character count (length
-    only — never the key value), and the result of ``_is_configured()``.
+    only — never the key value), and a derived ``provider configured``
+    line.
 
-    The implementation reads only the dotenv file via
-    ``llm_rubric._load_env_file``; ``os.environ`` is intentionally not
-    consulted, matching the backend policy documented in
-    ``src/gate_keeper/backends/llm_rubric.py``.
+    The implementation reads the dotenv exactly once via
+    ``llm_rubric._load_env_file``; the ``configured`` line is derived
+    from that single snapshot to keep the four output lines internally
+    consistent (a concurrent edit to the dotenv between two reads could
+    otherwise produce a contradictory report). ``os.environ`` is
+    intentionally not consulted, matching the backend policy documented
+    in ``src/gate_keeper/backends/llm_rubric.py``.
     """
     del args  # diagnose takes no arguments
 
@@ -223,24 +227,36 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     print(f"dotenv exists:      {'yes' if path.exists() else 'no'}")
     print(f"GATE_KEEPER_LLM_PROVIDER: {provider if provider is not None else '<unset>'}")
 
-    # Report API key length only — never the key value.
-    if provider == "anthropic":
-        key_var = "ANTHROPIC_API_KEY"
-    elif provider == "openai":
-        key_var = "OPENAI_API_KEY"
-    else:
-        key_var = None
-
-    if key_var is None:
-        print("api key:            <unsupported provider; no key reported>")
-    else:
-        key_value = env.get(key_var)
+    # Distinguish three provider states for the api-key line:
+    #   - unset or blank → report ``<unset>`` (not "unsupported")
+    #   - supported (anthropic / openai) → report the matching key var,
+    #     length-only
+    #   - any other non-empty value → unsupported provider, no key var
+    #     to consult
+    # ``configured`` is derived from the same single snapshot rather
+    # than calling ``_is_configured()`` again, so the four output lines
+    # cannot drift if the dotenv is rewritten mid-call.
+    if not provider:
+        print("api key:            <unset>")
+        configured = False
+    elif provider == "anthropic":
+        key_value = env.get("ANTHROPIC_API_KEY")
         if key_value:
-            print(f"{key_var}: <{len(key_value)} chars>")
+            print(f"ANTHROPIC_API_KEY: <{len(key_value)} chars>")
         else:
-            print(f"{key_var}: <unset>")
+            print("ANTHROPIC_API_KEY: <unset>")
+        configured = bool(key_value)
+    elif provider == "openai":
+        key_value = env.get("OPENAI_API_KEY")
+        if key_value:
+            print(f"OPENAI_API_KEY: <{len(key_value)} chars>")
+        else:
+            print("OPENAI_API_KEY: <unset>")
+        configured = bool(key_value)
+    else:
+        print("api key:            <unsupported provider; no key reported>")
+        configured = False
 
-    configured = llm_rubric._is_configured()
     print(f"provider configured: {'yes' if configured else 'no'}")
 
     return EXIT_OK
