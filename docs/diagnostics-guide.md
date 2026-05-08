@@ -35,8 +35,10 @@ The backend could not evaluate the rule because a precondition is not satisfied.
 
 - **CI exit code**: treated as `fail` (exit `1`) to keep the pipeline
   fail-closed. Missing evidence is never silently promoted to a pass.
-- **Typical cause**: the LLM provider is not configured, the `gh` CLI is not
-  authenticated, or a required external tool is absent.
+- **Typical cause**: the LLM provider is not configured (`provider_unconfigured`
+  evidence); the `gh` CLI is not authenticated (`gh_auth_failure` evidence);
+  a required external tool is absent (`cli_missing` evidence); or an LLM
+  provider call failed (`provider_error` evidence).
 - **What to do**: inspect `evidence[0].kind` for the specific sub-reason.
   See the "What to do when…" section below for the most common cases.
 
@@ -57,11 +59,12 @@ The backend or rule kind is not implemented for the current target type.
 The backend encountered an unexpected runtime fault during evaluation.
 
 - **CI exit code**: exits `1` (fail-closed).
-- **Typical cause**: a subprocess timed out, an OS-level I/O error occurred,
-  or the LLM provider returned an unrecoverable response.
-- **What to do**: inspect `evidence[0].kind` — `cli_timeout`, `cli_os_error`,
-  or `provider_error` indicate the fault category. Retry transient faults;
-  file a bug for persistent ones.
+- **Typical cause**: a subprocess timed out (`cli_timeout` evidence) or an
+  OS spawn error occurred (`cli_os_error` evidence). These indicate
+  infrastructure-level faults, not logic failures.
+- **What to do**: inspect `evidence[0].kind` — `cli_timeout` and
+  `cli_os_error` are the primary `error`-status evidence kinds. Retry
+  transient faults; file a bug for persistent ones.
 
 ---
 
@@ -104,7 +107,14 @@ Each `Diagnostic` carries an `evidence` list. Every entry has a `kind` string
 and a `data` object. The shapes below show one realistic JSON fragment per
 backend.
 
-### Filesystem — `text_required` / `markdown_tasks_complete`
+> **Vocabulary note**: the heading labels (e.g. `text_required`,
+> `github_checks_success`) are `RuleKind` values — they identify the rule
+> predicate declared in your rule document. The `kind` field inside each JSON
+> fragment is the *evidence-kind* string emitted by the backend at runtime.
+> These are distinct: one `RuleKind` may produce evidence entries with a
+> different `kind` name.
+
+### Filesystem — rule kinds `text_required` / `markdown_tasks_complete`
 
 ```json
 {
@@ -129,7 +139,7 @@ backend.
 }
 ```
 
-### GitHub — `github_threads_resolved` / `github_checks_success`
+### GitHub — rule kinds `github_threads_resolved` / `github_checks_success`
 
 ```json
 {
@@ -160,7 +170,7 @@ backend.
 }
 ```
 
-### LLM rubric — `llm_judgment`
+### LLM rubric — rule kind `semantic_rubric`, evidence kind `llm_judgment`
 
 ```json
 {
@@ -181,7 +191,7 @@ backend.
 }
 ```
 
-### External / textlint — `textlint_finding`
+### External / textlint — rule kind `external_check`, evidence kind `textlint_finding`
 
 ```json
 {
@@ -198,7 +208,7 @@ backend.
 }
 ```
 
-### Failure-mode — `provider_error` / `parse_error`
+### Failure-mode — evidence kinds `provider_error` / `parse_error`
 
 ```json
 {
@@ -250,19 +260,32 @@ The pull request has more than 100 review threads. The GraphQL query fetches
 the first 100 threads only, and gate-keeper is fail-closed when pagination is
 required — the `evidence[0].kind` will be `gh_pagination_unavailable`.
 
-This is intentional: a PR with more than 100 review threads almost certainly
-has unresolved discussion that must be addressed manually. Resolve threads and
-retry.
+This limit is intentional. Note that resolving threads does not reduce the
+total thread count, so resolution alone will not bring the PR below the 100-thread
+threshold. Options:
 
-### I see `error` on a textlint finding
+- Split the PR into smaller, more focused pieces so that each has fewer review
+  threads.
+- Temporarily exclude the `github_threads_resolved` rule from the rule set for
+  that PR and gate it through a separate manual review step.
+- Accept the `unavailable` (exit `1`) outcome as expected for this PR and
+  merge via an explicit override documented in the PR.
 
-If gate-keeper reports `status: error` for a textlint rule, the textlint
-process itself failed (timeout, binary missing, or OS error) rather than
-reporting findings. This is distinct from `status: fail`, which means textlint
-ran successfully and reported one or more findings.
+### I see `unavailable` or `error` on a textlint rule
 
-- For `cli_timeout` evidence: increase `params.timeout` in the rule, or
-  reduce the target scope.
-- For `cli_missing` evidence: install textlint with `npm install textlint`.
-- For a textlint finding you believe is a false positive, follow the guidance
-  in [docs/textlint/exception-policy.md](textlint/exception-policy.md).
+gate-keeper distinguishes two failure categories for textlint rules:
+
+- **`status: unavailable`** with `cli_missing` evidence means the `npx`
+  binary or the textlint package itself was not found. Install textlint with
+  `npm install textlint` and verify `npx textlint --version` succeeds.
+- **`status: error`** with `cli_timeout` evidence means the textlint process
+  ran but exceeded the configured timeout. Increase `params.timeout` in the
+  rule definition or reduce the target scope.
+- **`status: error`** with `cli_os_error` evidence means an OS-level spawn
+  error occurred. Check available file descriptors and OS permissions.
+
+These are distinct from **`status: fail`**, which means textlint ran
+successfully and reported one or more findings.
+
+For a textlint finding you believe is a false positive, follow the guidance
+in [docs/textlint/exception-policy.md](textlint/exception-policy.md).
