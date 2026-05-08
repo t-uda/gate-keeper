@@ -188,6 +188,47 @@ class TestRunBenchSmoke:
         assert result.per_rule[0].tokens_in == 50 * 3
         assert result.per_rule[0].tokens_out == 12 * 3
 
+    def test_run_bench_primary_reason_matches_majority(self, monkeypatch, tmp_path):
+        """primary_reason must come from a run that matches the majority outcome (P1).
+
+        Sequence: pass (first) → fail → fail.  Majority = fail (2/3).
+        primary_reason must NOT be the pass rationale from the first run.
+        """
+        _patch_env(monkeypatch, _OPENAI_ENV)
+        call_count = 0
+
+        def _stub_pass_then_fail(*_args, **_kwargs) -> tuple[str, dict[str, int]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                body = json.dumps(
+                    {
+                        "judgment": "pass",
+                        "primary_reason": "PASS rationale — should not appear",
+                        "supporting_evidence_quotes": [],
+                        "suggested_action": None,
+                    }
+                )
+                return body, {"latency_ms": 10, "tokens_in": 50, "tokens_out": 12}
+            body = json.dumps(
+                {
+                    "judgment": "fail",
+                    "primary_reason": "FAIL rationale — majority side",
+                    "supporting_evidence_quotes": ["evidence of violation"],
+                    "suggested_action": "Fix it.",
+                }
+            )
+            return body, {"latency_ms": 20, "tokens_in": 60, "tokens_out": 18}
+
+        monkeypatch.setattr(_llm, "_call_openai", _stub_pass_then_fail)
+        entries = self._single_entry_dir(tmp_path)
+        result = _bench.run_bench(entries, reproducibility=3)
+        row = result.per_rule[0]
+        # Majority is fail (2/3 runs).
+        assert row.actual == "fail"
+        assert row.primary_reason == "FAIL rationale — majority side"
+        assert "PASS rationale" not in (row.primary_reason or "")
+
     def test_run_bench_unconfigured_marks_unavailable(self, monkeypatch, tmp_path):
         # No provider env → backend returns UNAVAILABLE.
         _patch_env(monkeypatch, {})
@@ -323,6 +364,62 @@ class TestCliBench:
         captured = capsys.readouterr()
         assert "baseline delta:" in captured.out
         assert "accuracy:" in captured.out
+
+    def test_bench_json_baseline_single_object(self, monkeypatch, tmp_path, capsys):
+        """--format json + --baseline must emit exactly one parseable JSON object (P2)."""
+        _patch_env(monkeypatch, _OPENAI_ENV)
+        monkeypatch.setattr(_llm, "_call_openai", _stub_openai_pass)
+        entries = self._smoke_entries(tmp_path)
+
+        baseline = tmp_path / "baseline.json"
+        baseline.write_text(
+            json.dumps(
+                {
+                    "summary": {
+                        "entries": 1,
+                        "correct": 1,
+                        "accuracy": 1.0,
+                        "reproducibility_avg": 1.0,
+                        "tokens_in": 50,
+                        "tokens_out": 12,
+                        "latency_ms": 10,
+                        "model": "gpt-4o-mini",
+                        "prompt_version": "v1",
+                        "reproducibility_n": 1,
+                        "unavailable": 0,
+                        "errors": 0,
+                    },
+                    "per_rule": [
+                        {
+                            "id": "cli-smoke",
+                            "category": "clarity",
+                            "intended_backend": "llm-rubric",
+                            "expected": "pass",
+                            "actual": "pass",
+                            "status": "PASS",
+                            "reproducibility": 1.0,
+                            "primary_reason": "ok",
+                            "failure_mode": None,
+                            "tokens_in": 50,
+                            "tokens_out": 12,
+                            "latency_ms": 10,
+                            "model": "gpt-4o-mini",
+                            "prompt_version": "v1",
+                        }
+                    ],
+                }
+            )
+        )
+
+        rc = main(["bench", str(entries), "--format", "json", "--baseline", str(baseline)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        # Must parse as a single JSON value — json.loads raises if there are two top-level objects.
+        data = json.loads(captured.out)
+        assert "summary" in data
+        assert "per_rule" in data
+        assert "baseline_delta" in data
+        assert "accuracy_delta" in data["baseline_delta"]
 
     def test_bench_baseline_missing_exit_2(self, monkeypatch, tmp_path, capsys):
         _patch_env(monkeypatch, _OPENAI_ENV)

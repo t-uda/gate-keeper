@@ -340,12 +340,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    if args.format == "json":
-        print(_bench.render_json(result))
-    else:
-        print(_bench.render_text(result))
-
     # Baseline diff (advisory, does not change the exit code).
+    delta = None
     if args.baseline is not None:
         baseline_path = Path(args.baseline)
         try:
@@ -353,12 +349,19 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
             print(f"error: --baseline: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        # Print delta after the main result so JSON consumers can split on the
-        # second top-level object if they wish; for text, the human reads them
-        # in order.
-        if args.format == "json":
-            print(json.dumps(delta.to_dict(), sort_keys=True, indent=2))
-        else:
+
+    if args.format == "json":
+        # Emit a single JSON object so machine consumers (json.loads, jq, etc.)
+        # can parse the output with one call regardless of whether --baseline is
+        # present.  The baseline delta is embedded under "baseline_delta" when
+        # requested; the key is absent otherwise.
+        payload = result.to_dict()
+        if delta is not None:
+            payload["baseline_delta"] = delta.to_dict()
+        print(json.dumps(payload, sort_keys=True, indent=2))
+    else:
+        print(_bench.render_text(result))
+        if delta is not None:
             print(_bench.render_baseline_delta_text(delta))
 
     return EXIT_OK

@@ -322,7 +322,10 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
 
     pass_count = 0
     fail_count = 0
-    primary_reason: str | None = None
+    # Collect per-run (judgment, primary_reason) so we can pick a rationale
+    # that matches the majority judgment after aggregation (P1: avoid reporting
+    # a PASS rationale when the majority outcome is FAIL, or vice-versa).
+    per_run_reasons: list[tuple[str, str | None]] = []
     failure_mode: str | None = None
     tokens_in_total = 0
     tokens_out_total = 0
@@ -335,6 +338,7 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
 
         # Telemetry is recorded on llm_judgment evidence; provider_error /
         # provider_unconfigured carry no telemetry.
+        run_reason: str | None = None
         for ev in diag.evidence:
             if ev.kind == "llm_judgment":
                 tokens_in_total += int(ev.data.get("tokens_in", 0) or 0)
@@ -344,13 +348,15 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
                     model = ev.data.get("model")
                 if prompt_version is None:
                     prompt_version = ev.data.get("prompt_version")
-                if primary_reason is None:
-                    primary_reason = ev.data.get("primary_reason")
+                if run_reason is None:
+                    run_reason = ev.data.get("primary_reason")
 
         if diag.status is Status.PASS:
             pass_count += 1
+            per_run_reasons.append(("pass", run_reason))
         elif diag.status is Status.FAIL:
             fail_count += 1
+            per_run_reasons.append(("fail", run_reason))
         else:
             # UNAVAILABLE / UNSUPPORTED / ERROR — fail-closed, report immediately.
             for ev in diag.evidence:
@@ -369,7 +375,7 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
                 actual=actual,
                 status="FAIL",  # mismatch with expected pass/fail
                 reproducibility=0.0,
-                primary_reason=primary_reason or diag.message,
+                primary_reason=run_reason or diag.message,
                 failure_mode=failure_mode or actual,
                 tokens_in=tokens_in_total,
                 tokens_out=tokens_out_total,
@@ -384,6 +390,14 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
     majority_count = pass_count if majority_is_pass else fail_count
     reproducibility = majority_count / total if total > 0 else 0.0
     correct = actual == entry.expected_judgment
+
+    # Pick the primary_reason from the first run that matches the majority
+    # judgment, so the rationale is internally consistent with the reported
+    # outcome (P1: avoids a PASS rationale when majority outcome is FAIL).
+    primary_reason: str | None = next(
+        (reason for judgment, reason in per_run_reasons if judgment == actual),
+        None,
+    )
 
     return PerRuleResult(
         id=entry.id,
