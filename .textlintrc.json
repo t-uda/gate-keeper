@@ -1,5 +1,6 @@
 {
   "rules": {
-    "terminology": true
+    "terminology": true,
+    "prh": { "rulePaths": ["./prh.yml"] }
   }
 }
