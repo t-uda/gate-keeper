@@ -46,10 +46,10 @@ for the `llm-rubric` backend in its current form.
 
 ---
 
-## 2. Anti-patterns (judgment-level)
+## 2. Antipatterns (judgment-level)
 
-The anti-patterns below cause the LLM to produce unreliable or
-non-reproducible verdicts. Mechanical anti-patterns (style, punctuation, line
+The antipatterns below cause the LLM to produce unreliable or
+non-reproducible verdicts. Mechanical antipatterns (style, punctuation, line
 length) that belong to a textlint-style rule are tracked in #95.
 
 **Unbounded subject (`code`, `the project`, `everything`).**
@@ -178,7 +178,7 @@ which constrains what a rule can safely claim.
 
 **Backend routing (#95 / #66-B):** the question of *which rules should route to
 `llm-rubric`* versus `external+textlint` versus a deterministic backend is out
-of scope here. That routing logic and the mechanical anti-patterns best caught
+of scope here. That routing logic and the mechanical antipatterns best caught
 by textlint are tracked in issue #95 (the `Backend.EXTERNAL` adapter work,
 umbrella #80). The `intended_backend` field in the semantic fixture schema (see
 `tests/fixtures/semantic/README.md`) is the per-entry record of the correct

@@ -19,7 +19,7 @@ documents today — are unevaluable or evaluate incorrectly:
 | "Naming conventions (snake_case for functions, PascalCase for classes) are consistent across all source modules" | Consistency is a cross-file property; a single-file check misses inter-module drift. |
 | "CHANGELOG entries match the API symbols introduced since the last tag" | Requires simultaneous access to `CHANGELOG.md` and one or more source files. |
 | "Every public function in `src/` has a corresponding docstring" | Structural coverage check requires walking a directory tree. |
-| "README `## Usage` section matches the CLI `--help` output captured in `docs/cli-reference.md`" | Rule spans two specific named files; neither is the same as `--target`. |
+| "readme `## Usage` section matches the CLI `--help` output captured in `docs/cli-reference.md`" | Rule spans two specific named files; neither is the same as `--target`. |
 | "No module imports from a private (`_`-prefixed) sibling module" | Requires reading all files in a package to identify all import edges. |
 
 The single-target model also interacts poorly with the LLM rubric backend:
@@ -355,7 +355,7 @@ evaluation logic.
   objects is out of scope. All paths are local filesystem paths after checkout.
 - **Streaming / chunking for very large file sets**: the design caps at
   `token_budget` and truncates deterministically. Streaming the file set in
-  chunks across multiple LLM calls (to handle arbitrary repo sizes) is deferred
+  chunks across multiple LLM calls (to handle arbitrary repository sizes) is deferred
   until real budget pressure is observed. The truncation_warning evidence item
   makes it visible when this matters.
 - **Heuristic file ranking / relevance scoring**: no ML-based or TF-IDF

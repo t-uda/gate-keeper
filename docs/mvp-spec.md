@@ -24,7 +24,7 @@ Use this precedence order for MVP implementation:
 2. `AGENTS.md` repository guidance;
 3. this MVP spec;
 4. the active GitHub issue body;
-5. `docs/issue-plan.md` and README.
+5. `docs/issue-plan.md` and readme.
 
 When artifacts conflict, update the lower-precedence artifact instead of
 inventing behavior during implementation.
@@ -203,14 +203,14 @@ Day 3:
 - Add LLM rubric backend interface and advisory docs.
 - Add `gh aw` composition guide and examples.
 - Add end-to-end examples and smoke tests.
-- Harden README, packaging metadata, and issue acceptance criteria.
+- Harden readme, packaging metadata, and issue acceptance criteria.
 
 # Done Criteria
 
 - `uv run gate-keeper compile docs/example-rules.md --format json` emits rule IR.
 - `uv run gate-keeper validate docs/example-rules.md --target fixtures/pass`
   exits `0`.
-- A failing fixture exits non-zero and reports rule id, source location, backend,
+- A failing fixture exits non-zero and reports rule ID, source location, backend,
   severity, and evidence.
 - GitHub backend command construction is covered by tests.
 - Live GitHub validation fails closed when `gh` auth or required context is

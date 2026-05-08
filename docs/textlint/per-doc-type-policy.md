@@ -17,7 +17,7 @@ corpus exists alongside the dev corpus.
 
 ---
 
-## Repo corpus survey
+## Repository corpus survey
 
 Surveyed `docs/`, `README.md`, and `tests/fixtures/semantic/targets/` as of main
 (`9ae3318`).
@@ -50,12 +50,12 @@ prose. There is no paper-style stratum that would benefit from a separate config
 
 ## Decision
 
-**Use global preset only.** This repo's corpus does not warrant per-doc-type splitting
+**Use global preset only.** This repository's corpus does not warrant per-doc-type splitting
 at this time. All textlint rules should live in a single `.textlintrc.json` (to be
 created in #82) and apply uniformly to every Markdown file.
 
 Rationale:
-1. No paper-style writing exists in the repo; any engineering-paper or SI-unit preset
+1. No paper-style writing exists in the repository; any engineering-paper or SI-unit preset
    would fire exclusively against dev docs, producing only false positives with zero
    true-positive value.
 2. The fixture targets under `tests/fixtures/semantic/targets/` are synthetic prose
@@ -87,12 +87,12 @@ below).
 This decision should be revisited when **any** of the following occurs:
 
 1. A paper-style document (preprint, technical report, SI-unit-heavy spec) lands in
-   the repo — suggested landing zone `docs/paper/` so the boundary is unambiguous.
+   the repository — suggested landing zone `docs/paper/` so the boundary is unambiguous.
 2. A specific engineering-paper or SI-unit rule is evaluated in #83 and its
    false-positive rate on dev docs exceeds 20% of flagged occurrences while its
    true-positive rate on paper-style content is high — quantitative signal that a split
    would carry real value.
-3. The repo corpus grows a new category (e.g. a user manual under `docs/guide/` with
+3. The repository corpus grows a new category (e.g. a user manual under `docs/guide/` with
    formal register) that is meaningfully distinct from current dev/design prose.
 
 ---

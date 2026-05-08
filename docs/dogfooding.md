@@ -6,7 +6,7 @@ promote per-rule to required.** This document defines the promotion path.
 
 ## Why advisory first
 
-Hard-gating an unproven rule on its own repo creates a deadlock: a bug in
+Hard-gating an unproven rule on its own repository creates a deadlock: a bug in
 `gate-keeper` blocks the PR that would fix it. Advisory mode runs the same
 checks but reports as PR comments only, never as a required status.
 
