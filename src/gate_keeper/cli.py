@@ -86,6 +86,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="report LLM-rubric provider credential state (length-only, never the key)",
     )
 
+    bench_parser = subparsers.add_parser(
+        "bench",
+        help="evaluate a fixture-corpus benchmark against the LLM-rubric backend",
+    )
+    bench_parser.add_argument(
+        "entries_dir",
+        help="directory of JSON benchmark entries (e.g. tests/fixtures/semantic/entries/)",
+    )
+    bench_parser.add_argument(
+        "--reproducibility",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "evaluate each entry N times and aggregate via majority vote (default: 1; ties break toward fail)"
+        ),
+    )
+    bench_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    bench_parser.add_argument(
+        "--baseline",
+        default=None,
+        metavar="PATH",
+        help=(
+            "compare the current run against a baseline JSON file "
+            "(produced by `bench --format json`); prints regressions/fixes"
+        ),
+    )
+
     return parser
 
 
@@ -262,6 +295,75 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_bench(args: argparse.Namespace) -> int:
+    """Evaluate a fixture-corpus benchmark against the LLM-rubric backend.
+
+    Loads JSON entries under *entries_dir*, evaluates each one ``--reproducibility``
+    times via the LLM-rubric backend, and prints aggregate accuracy /
+    reproducibility / token metrics plus a per-entry breakdown. Output format is
+    ``text`` (default) or ``json``.
+
+    Exit codes
+    ----------
+    - ``0`` (EXIT_OK) — bench ran end-to-end (entries loaded, evaluator returned
+      a result). The bench surface is observational; a low accuracy is *not* a
+      CLI-level failure (this lets dogfooding pipelines record regressions
+      without turning the run red).
+    - ``2`` (EXIT_USAGE) — bad arguments or unreadable entries directory.
+
+    The ``--baseline`` option (when provided) compares the current run against a
+    stored baseline JSON document. The framework lands here in #130; the
+    canonical baseline file is added by the follow-up issue (#132).
+    """
+    from pathlib import Path
+
+    from gate_keeper import bench as _bench
+
+    entries_dir = Path(args.entries_dir)
+    if not entries_dir.is_dir():
+        print(
+            f"error: {args.entries_dir}: not a directory or does not exist",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    if args.reproducibility < 1:
+        print(
+            f"error: --reproducibility must be >= 1, got {args.reproducibility}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    try:
+        result = _bench.run_bench(entries_dir, reproducibility=args.reproducibility)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.format == "json":
+        print(_bench.render_json(result))
+    else:
+        print(_bench.render_text(result))
+
+    # Baseline diff (advisory, does not change the exit code).
+    if args.baseline is not None:
+        baseline_path = Path(args.baseline)
+        try:
+            delta = _bench.diff_baseline(result, baseline_path)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+            print(f"error: --baseline: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        # Print delta after the main result so JSON consumers can split on the
+        # second top-level object if they wish; for text, the human reads them
+        # in order.
+        if args.format == "json":
+            print(json.dumps(delta.to_dict(), sort_keys=True, indent=2))
+        else:
+            print(_bench.render_baseline_delta_text(delta))
+
+    return EXIT_OK
+
+
 def _register_default_adapters() -> None:
     """Register adapters that ship with gate-keeper.
 
@@ -299,6 +401,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "diagnose":
         return _cmd_diagnose(args)
+
+    if args.command == "bench":
+        return _cmd_bench(args)
 
     parser.error(f"{args.command!r} is planned but not implemented in the scaffold")
     return 2
