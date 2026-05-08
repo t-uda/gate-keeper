@@ -175,18 +175,11 @@ gate-keeper compile rules.md --format json > rules.json
 }
 ```
 
-**Sample run (pass — no findings):**
+**Diagnostic shape (when the textlint adapter is exercised):**
 
 ```
-$ gate-keeper validate rules.json --target docs/clean-file.md
-rules.json:1: warning: [external/pass] prose-textlint: textlint reported no findings against docs/clean-file.md
-```
-
-**Sample run (fail — terminology findings):**
-
-```
-$ gate-keeper validate rules.json --target docs/draft.md
-rules.json:1: warning: [external/fail] prose-textlint: textlint reported 2 finding(s)
+external/pass — prose-textlint: textlint reported no findings against docs/clean-file.md
+external/fail — prose-textlint: textlint reported 2 finding(s)
   [textlint_finding(file=docs/draft.md, line=3, column=20,
       rule_id=terminology, message=Incorrect term: "javascript", use "JavaScript" instead, fixable=True);
    textlint_finding(file=docs/draft.md, line=3, column=35,
@@ -195,6 +188,7 @@ rules.json:1: warning: [external/fail] prose-textlint: textlint reported 2 findi
 
 **Notes:**
 
+- The `gate-keeper validate` CLI re-parses and re-classifies the rule document on every call (`src/gate_keeper/cli.py` `_cmd_validate`), so a hand-edited compiled `rules.json` is not honoured. The JSON is read as text and the custom `kind` / `backend_hint` / `params` overrides are dropped. Use the IR shape above as a reference for the adapter contract; exercise the textlint adapter via the `gate_keeper.validator.validate` Python API or via the test fixtures in `tests/fixtures/external/` until a CLI flag for IR input lands.
 - Requires Node and `npm install` at the repository root to install textlint.
 - Run `npx --no textlint --fix <file>` to apply auto-fixable corrections.
 - See `docs/backend-external.md` for the full adapter contract.
