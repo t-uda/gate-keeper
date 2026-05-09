@@ -104,6 +104,43 @@ These adapters ship with gate-keeper and self-register at CLI entry
     [`docs/textlint/severity-policy.md §7`](textlint/severity-policy.md) for
     the resolution of the §6 deferred adapter-implementation decision.
 
+- **command** — `src/gate_keeper/adapters/command.py` (#149)
+  - Disabled by default for security. Enable per-process with
+    `gate-keeper validate ... --allow-command-adapter`. The adapter
+    executes arbitrary local commands defined by the rule document, so
+    only enable for rule documents you fully trust. See the trust-model
+    callout in [`docs/cli-reference.md`](cli-reference.md) for the full
+    warning.
+  - Params: `tool="command"` (required); `argv` (required, non-empty
+    list of strings — shell strings rejected; `subprocess.run` runs with
+    `shell=False`); `timeout_seconds` (optional, default `30`, hard
+    maximum `300`).
+  - Input contract: the adapter passes a single JSON object to the
+    command on stdin:
+
+    ```json
+    { "rule": { "id": "...", "text": "...", "params": { ... } }, "target": "..." }
+    ```
+
+  - Output contract: the command must print a `Diagnostic` (or a
+    `DiagnosticReport` containing exactly one diagnostic) to stdout and
+    exit `0` for both pass and fail outcomes. The adapter overrides
+    `rule_id`, `source`, `severity`, and `backend` on the returned
+    Diagnostic so a misbehaving command cannot spoof another rule's
+    result.
+  - Adapter-specific Evidence kinds: `command_adapter_disabled` (default
+    state when the flag is not passed), `params_error`,
+    `command_failure` (non-zero exit), `parse_error` (malformed or
+    missing JSON output). Subprocess-level faults (binary missing /
+    timeout / OS error) produce the shared `cli_missing`, `cli_timeout`,
+    and `cli_os_error` evidence kinds via `failure_diag`.
+  - Status mapping: adapter disabled → `unavailable` /
+    `command_adapter_disabled`; non-zero exit → `unavailable` /
+    `command_failure`; missing executable → `unavailable` / `cli_missing`;
+    timeout → `error` / `cli_timeout`; OS error → `error` / `cli_os_error`;
+    malformed stdout → `unavailable` / `parse_error`; otherwise the
+    parsed Diagnostic status from the command (typically `pass` or `fail`).
+
 ## Out of scope for the foundation
 
 - Concrete adapter implementations (textlint, vale, …).
