@@ -59,6 +59,7 @@ def test_rule_kind_members():
         "github_checks_success",
         "github_threads_resolved",
         "github_non_author_approval",
+        "github_changed_files_absent",
         "semantic_rubric",
         "external_check",
     }
