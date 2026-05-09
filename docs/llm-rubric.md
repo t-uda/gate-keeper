@@ -178,14 +178,14 @@ context passed to the model:
 
 ### Structured judgment schema (`LlmJudgment`)
 
-The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v1"`)
+The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v2"`)
 to respond with a JSON object matching the `LlmJudgment` dataclass:
 
 ```json
 {
   "judgment":                    "pass" | "fail",
   "primary_reason":              "<one sentence>",
-  "supporting_evidence_quotes":  ["<verbatim quote>", ...],
+  "supporting_evidence_quotes":  ["<near-verbatim substring of the target>", ...],
   "suggested_action":            "<concrete fix>" | null
 }
 ```
@@ -193,7 +193,15 @@ to respond with a JSON object matching the `LlmJudgment` dataclass:
 Constraints enforced by `_parse_llm_judgment()`:
 - `judgment` must be exactly `"pass"` or `"fail"`.
 - `primary_reason` must be a non-empty string (single sentence).
-- `supporting_evidence_quotes` must contain at least one entry when `judgment` is `"fail"`; may be empty on `"pass"`.
+- `supporting_evidence_quotes` must contain at least one entry for **every
+  verdict — both `"pass"` and `"fail"`** (#168). The prompt additionally
+  instructs the model to draw quotes as near-verbatim substrings of the
+  target text and to favor representative content over opening-line
+  citations on long artifacts. Schema-level grounding (substring
+  verification) is intentionally not enforced by the parser today —
+  prompt-side discipline is the v2 mechanism; a substring check would
+  reject quotes the model lightly normalised (whitespace, capitalisation)
+  and is deferred until the failure mode reappears.
 - `suggested_action` must be a non-empty string on `"fail"` and is coerced to `null` on `"pass"`.
 - Extra fields in the JSON response are silently ignored (forward-compatible).
 
@@ -366,7 +374,7 @@ incomparable.
    a baseline that corresponds to the currently checked-in prompt.  Replace
    the file with the `/tmp/new-baseline.json` from step 2.
 
-### Baseline metrics (generated 2026-05-08)
+### Baseline metrics (generated 2026-05-10)
 
 The `tests/fixtures/semantic/baseline.json` file was generated with:
 
@@ -376,22 +384,30 @@ uv run gate-keeper bench tests/fixtures/semantic/entries/ \
   > tests/fixtures/semantic/baseline.json
 ```
 
-Measured results at prompt version `v1` (model `gpt-4o-mini`; for cost per
+Measured results at prompt version `v2` (model `gpt-4o-mini`; for cost per
 token see the pricing snapshot table in the "Per-rule observability fields"
 section above):
 
 | Metric | Value |
 | --- | --- |
-| Entries | 24 |
-| Correct | 19 |
-| Accuracy | 79.2% |
-| Reproducibility (avg) | 98.6% |
+| Entries | 25 |
+| Correct | 17 |
+| Accuracy | 68.0% |
+| Reproducibility (avg) | 98.7% |
 | Reproducibility N | 3 |
-| Tokens in | 31,080 |
-| Tokens out | 4,731 |
-| Latency (total) | 151,432 ms |
+| Tokens in | 59,313 |
+| Tokens out | 6,715 |
+| Latency (total) | 179,241 ms |
 | Model | `gpt-4o-mini` |
-| Prompt version | `v1` |
+| Prompt version | `v2` |
+
+Reference history (prompt version `v1`, 24 entries): 19 correct / 79.2%
+accuracy / 31,080 tokens in. The v1 → v2 transition added one fixture
+(`justification-06-commit-message-rationale-past-opening`, the L25
+first-line-quote bias case from issue #168) and tightened
+`supporting_evidence_quotes` constraints; see PR #168's "Prompt
+regression analysis" / "Prompt regression justification" sections for
+the full delta and the regression-justification record.
 
 ### Regression tolerance and justification template
 

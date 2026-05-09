@@ -38,7 +38,8 @@ def _stub_openai_pass(*_args, **_kwargs) -> tuple[str, dict[str, int]]:
         {
             "judgment": "pass",
             "primary_reason": "The artefact satisfies the rule.",
-            "supporting_evidence_quotes": [],
+            # #168: pass also requires non-empty supporting quotes.
+            "supporting_evidence_quotes": ["a representative substring"],
             "suggested_action": None,
         }
     )
@@ -205,7 +206,8 @@ class TestRunBenchSmoke:
                     {
                         "judgment": "pass",
                         "primary_reason": "PASS rationale — should not appear",
-                        "supporting_evidence_quotes": [],
+                        # #168: pass also requires non-empty supporting quotes.
+                        "supporting_evidence_quotes": ["a representative substring"],
                         "suggested_action": None,
                     }
                 )

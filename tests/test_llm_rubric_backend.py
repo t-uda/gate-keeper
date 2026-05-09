@@ -37,7 +37,7 @@ _VALID_PASS_JSON = json.dumps(
     {
         "judgment": "pass",
         "primary_reason": "Documentation reads clearly.",
-        "supporting_evidence_quotes": [],
+        "supporting_evidence_quotes": ["The README documents both install and validate commands."],
         "suggested_action": None,
     }
 )
@@ -832,7 +832,8 @@ class TestParseLlmJudgment:
         assert isinstance(result, LlmJudgment)
         assert result.judgment == "pass"
         assert result.primary_reason == "Documentation reads clearly."
-        assert result.supporting_evidence_quotes == []
+        # #168: pass verdicts now also require non-empty supporting quotes.
+        assert len(result.supporting_evidence_quotes) >= 1
         assert result.suggested_action is None
 
     def test_valid_fail_with_quotes_and_action(self):
@@ -886,7 +887,7 @@ class TestParseLlmJudgment:
             {
                 "judgment": "pass",
                 "primary_reason": "Looks good.",
-                "supporting_evidence_quotes": [],
+                "supporting_evidence_quotes": ["a quoted phrase from the artifact"],
                 "suggested_action": None,
                 "unknown_future_field": "should be ignored",
                 "another_extra": 42,
@@ -959,7 +960,7 @@ class TestParseLlmJudgment:
             {
                 "judgment": "pass",
                 "primary_reason": "Looks good.",
-                "supporting_evidence_quotes": [],
+                "supporting_evidence_quotes": ["a quoted phrase from the artifact"],
                 "suggested_action": "Some spurious action from model",
             }
         )
@@ -1005,7 +1006,9 @@ class TestParseResponseDirect:
 class TestPromptVersion:
     def test_prompt_version_constant_exists(self):
         assert hasattr(llm_backend, "PROMPT_VERSION")
-        assert llm_backend.PROMPT_VERSION == "v1"
+        # #168 bumped v1 → v2 to mark the supporting_evidence_quotes
+        # constraint tightening.
+        assert llm_backend.PROMPT_VERSION == "v2"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -1018,7 +1021,7 @@ class TestPromptVersion:
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), tmp_path)
-        assert diag.evidence[0].data["prompt_version"] == "v1"
+        assert diag.evidence[0].data["prompt_version"] == "v2"
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1033,83 @@ class TestPathConstants:
     def test_dotenv_path_matches_spec(self):
         """Issue #51 hard-codes the host-side dotenv path; do not regress it."""
         assert llm_backend.DOTENV_PATH == Path("/home/vscode/.config/hermes-projects/gate-keeper.env")
+
+
+# ---------------------------------------------------------------------------
+# Prompt-template constraint guard (#168)
+# ---------------------------------------------------------------------------
+
+
+class TestPromptTemplateEvidenceConstraints:
+    """#168 — guard that the rendered prompt includes the v2 evidence-quote constraints.
+
+    These assertions are intentionally string-presence checks, not behavioural
+    tests. They protect against silent prompt drift: a future edit that
+    deletes the "near-verbatim substring" or "every verdict — both pass and
+    fail" language will trip these tests independently of any model-side
+    regression. They sit alongside ``TestPromptVersion`` so a prompt change
+    forces a deliberate update of both the version constant and these
+    constraint assertions.
+    """
+
+    def _rendered(self) -> str:
+        rule = _semantic_rule()
+        # _build_prompt only string-formats the target reference into the
+        # rendered prompt; it does not read the file. We point at an
+        # existing fixture so this assertion stays grep-friendly even
+        # though the prompt-text checks below are file-content-independent.
+        _system, user = llm_backend._build_prompt(
+            rule, "tests/fixtures/semantic/targets/changelog_no_rationale.md"
+        )
+        return user
+
+    def test_prompt_requires_quotes_on_every_verdict(self):
+        """The prompt must instruct that quotes are required on both pass and fail."""
+        rendered = self._rendered()
+        # The v2 prompt explicitly names "every verdict" with both
+        # judgment values — the v1 prompt only required quotes on fail.
+        assert "every verdict" in rendered
+        assert '"pass"' in rendered
+        assert '"fail"' in rendered
+
+    def test_prompt_requires_substring_grounding(self):
+        """The prompt must instruct that quotes be drawn from the artifact text."""
+        rendered = self._rendered()
+        # "near-verbatim substring" is the v2 wording that distinguishes
+        # quotes-from-the-artifact from paraphrases of primary_reason.
+        assert "near-verbatim substring" in rendered
+
+    def test_prompt_forbids_paraphrasing_primary_reason(self):
+        """The prompt must explicitly forbid paraphrasing primary_reason as a quote."""
+        rendered = self._rendered()
+        assert "paraphrase" in rendered
+        assert "primary_reason" in rendered
+
+    def test_prompt_warns_against_first_line_only(self):
+        """The prompt must steer the model away from anchoring on opening lines only."""
+        rendered = self._rendered()
+        # Either "opening line" or "do not only cite" — both are v2 cues
+        # against the L25 first-line-quote bias.
+        assert "opening line" in rendered or "do not only cite" in rendered
+
+    def test_prompt_requires_representative_evidence(self):
+        """The prompt must require at least one quote that reflects the strongest evidence."""
+        rendered = self._rendered()
+        assert "representative" in rendered or "strongest evidence" in rendered
+
+    def test_judgment_dataclass_docstring_documents_v2_constraints(self):
+        """The LlmJudgment docstring must mention the non-empty-on-every-verdict rule.
+
+        This catches the case where someone tightens the prompt but forgets to
+        update the dataclass docstring, leaving the IR contract documentation
+        out of sync with the prompt-side constraint.
+        """
+        doc = LlmJudgment.__doc__ or ""
+        # Reference to issue #168 keeps the link from constraint to history.
+        assert "#168" in doc
+        # Both verdicts must be named in the docstring so a reader cannot
+        # infer the v1 "may be empty on pass" rule from the docstring alone.
+        assert '"pass"' in doc and '"fail"' in doc
 
 
 # ---------------------------------------------------------------------------
