@@ -795,7 +795,7 @@ class TestRulesFormatIR:
                 "ir",
                 str(IR_TEXTLINT_RULES),
                 "--target",
-                ".",
+                str(PASS_README),
                 "--backend",
                 "auto",
             ]
