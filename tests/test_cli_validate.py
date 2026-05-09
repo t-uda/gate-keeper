@@ -1116,9 +1116,7 @@ class TestMultiTarget:
         captured = capsys.readouterr()
         assert "exceeds limit" in captured.err
 
-    def test_repeated_targets_dispatched_to_non_filesystem_backend_fails_closed(
-        self, tmp_path, capsys
-    ):
+    def test_repeated_targets_dispatched_to_non_filesystem_backend_fails_closed(self, tmp_path, capsys):
         # Force --backend external. Two targets → multi-target → external
         # dispatcher must reject (UNSUPPORTED), not silently use one path.
         rules = self._write_rules(tmp_path)
