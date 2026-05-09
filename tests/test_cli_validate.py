@@ -12,6 +12,7 @@ from gate_keeper.diagnostics import EXIT_FAIL, EXIT_OK, EXIT_USAGE
 
 REPO_ROOT = Path(__file__).parent.parent
 EXAMPLE_DOC = REPO_ROOT / "docs" / "example-rules.md"
+DOGFOODING_RULES_DOC = REPO_ROOT / "docs" / "dogfooding-rules.md"
 LOCAL_FIXTURES = Path(__file__).parent / "fixtures" / "local"
 PASS_DIR = LOCAL_FIXTURES / "pass"
 FAIL_DIR = LOCAL_FIXTURES / "fail"
@@ -1322,3 +1323,93 @@ class TestMultiTarget:
         diag = data["diagnostics"][0]
         assert diag["status"] == "unsupported"
         assert any(e["kind"] == "multi_target_unsupported" for e in diag["evidence"])
+
+
+# ---------------------------------------------------------------------------
+# ENAMETOOLONG defence in --target disambiguation (issue #166)
+# ---------------------------------------------------------------------------
+
+
+class TestLongLiteralTargetDoesNotCrash:
+    """Issue #166: a literal ``--target`` value with a ``/``-segment longer
+    than NAME_MAX (255 bytes on Linux) used to propagate an uncaught
+    ``OSError(ENAMETOOLONG)`` from ``Path(sole).is_dir()`` inside the
+    path-vs-literal disambiguation block. The CLI must instead treat the
+    token as literal text and emit a clean Diagnostic.
+    """
+
+    def test_long_literal_target_emits_clean_diagnostic(self, capsys, monkeypatch):
+        # Force the llm-rubric backend to its unconfigured-provider path so
+        # the test exercises the CLI surface without depending on a real
+        # provider key. ``_load_env_file`` is the only knob that reliably
+        # masks any developer dotenv (see test_dogfooding_rules.py for the
+        # rationale on why patching DOTENV_PATH is insufficient).
+        from gate_keeper.backends import llm_rubric
+
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+
+        # 600-byte literal blob with two ``/``-segments, each well above
+        # NAME_MAX (255 bytes). No glob metachars so the disambiguation
+        # block reaches the ``Path(sole).is_dir()`` call.
+        long_literal = ("a" * 300) + "/" + ("b" * 300)
+        assert "/" in long_literal
+        assert max(len(seg) for seg in long_literal.split("/")) > 255
+        assert not any(c in long_literal for c in "*?[")
+
+        rc = main(
+            [
+                "validate",
+                str(DOGFOODING_RULES_DOC),
+                "--target",
+                long_literal,
+                "--backend",
+                "llm-rubric",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Must produce well-formed JSON (no Python traceback on stderr).
+        data = json.loads(captured.out)
+        assert "diagnostics" in data
+        assert isinstance(data["diagnostics"], list)
+        assert data["diagnostics"], "expected at least one diagnostic"
+
+        # Each rule routes to llm-rubric; with the provider stubbed
+        # unconfigured, every diagnostic is UNAVAILABLE with
+        # ``provider_unconfigured`` evidence — the contract documented in
+        # docs/llm-rubric.md.
+        for diag in data["diagnostics"]:
+            assert diag["status"] == "unavailable"
+            kinds = {ev["kind"] for ev in diag["evidence"]}
+            assert "provider_unconfigured" in kinds, f"expected provider_unconfigured evidence, got {kinds}"
+
+        # Exit code is fail-closed (FAIL) for unavailable diagnostics.
+        assert rc == EXIT_FAIL
+
+    def test_long_literal_target_no_traceback_on_stderr(self, capsys, monkeypatch):
+        # Companion check: the previous bug surfaced as a Python traceback
+        # on stderr. Pin the no-traceback contract explicitly.
+        from gate_keeper.backends import llm_rubric
+
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+
+        long_literal = "x" * 400  # single segment > NAME_MAX, no slash
+        main(
+            [
+                "validate",
+                str(DOGFOODING_RULES_DOC),
+                "--target",
+                long_literal,
+                "--backend",
+                "llm-rubric",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        assert "ENAMETOOLONG" not in captured.err
+        assert "File name too long" not in captured.err

@@ -544,13 +544,28 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # Order matters: a literal directory or an existing literal file
         # always wins over glob detection so a real filename like
         # ``a[b].txt`` does not get mis-expanded as a pattern.
-        if sole_path.is_dir():
+        #
+        # The ``is_dir`` / ``is_file`` calls can raise ``OSError`` when the
+        # token cannot be a real path on the host filesystem — most commonly
+        # ``ENAMETOOLONG`` (errno 36) when a ``/``-segment exceeds NAME_MAX
+        # (255 bytes on Linux), and ``EINVAL`` on some kernels for embedded
+        # NULs.  Such inputs cannot possibly resolve to a path, so we treat
+        # them as literal text and fall through to the non-path branch
+        # rather than letting the traceback escape (issue #166).
+        try:
+            sole_is_dir = sole_path.is_dir()
+            sole_is_file = sole_path.is_file()
+        except OSError:
+            sole_is_dir = False
+            sole_is_file = False
+
+        if sole_is_dir:
             try:
                 target = resolve_targets(raw_targets)
             except TargetExpansionError as exc:
                 print(f"error: --target: {exc}", file=sys.stderr)
                 return EXIT_USAGE
-        elif sole_path.is_file():
+        elif sole_is_file:
             target = sole
         elif looks_like_glob(sole):
             # Token has glob metacharacters but the literal path doesn't
