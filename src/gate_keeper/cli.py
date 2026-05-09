@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob as _glob
 import json
 import sys
 from pathlib import Path
@@ -11,6 +12,121 @@ from gate_keeper.models import RuleSet
 
 # Backend choices exposed by the registry (always includes auto).
 _BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric", "external"]
+
+
+class _IncludeError(Exception):
+    """Raised when --include glob expansion or rule-id merge fails.
+
+    Carries a pre-formatted human-readable message that the CLI prints to
+    stderr. Always maps to ``EXIT_USAGE`` (exit code 2) per the issue #145
+    spec.
+    """
+
+
+def _expand_include_globs(patterns: list[str]) -> list[Path]:
+    """Expand --include glob patterns to a deterministic, sorted list of paths.
+
+    Each pattern is resolved with ``glob.glob`` (relative to the current
+    working directory). The combined match list is sorted lexicographically by
+    string path so iteration order is stable across platforms (the spec
+    guarantees a deterministic, documented include-expansion order).
+
+    Each pattern must match at least one path; unmatched patterns raise
+    ``_IncludeError`` per the empty-include policy in issue #145.
+    """
+    # Dedup on the resolved (canonical) path so different glob spellings of
+    # the same physical file (e.g. ``a.md`` vs ``./a.md``, or distinct
+    # patterns whose hits overlap) are merged into a single include. Without
+    # this, the same file would be parsed twice and ``_check_duplicate_ids``
+    # would surface a false ``EXIT_USAGE`` for an otherwise-valid bundle.
+    seen_canonical: set[Path] = set()
+    matched: list[str] = []
+    for pattern in patterns:
+        # ``glob`` expands shell-style globs; recursive ``**`` requires
+        # ``recursive=True``. Patterns without metacharacters resolve to a
+        # single path (or zero, which we report as an unmatched glob below).
+        hits = _glob.glob(pattern, recursive=True)
+        if not hits:
+            raise _IncludeError(f"--include: no files matched pattern {pattern!r}")
+        for hit in hits:
+            # ``Path.resolve()`` can raise ``RuntimeError`` on symlink loops
+            # (e.g. ``a.md -> b.md -> a.md``) and ``OSError`` on broken paths.
+            # Translate either into ``_IncludeError`` so the CLI surfaces a
+            # ``EXIT_USAGE`` (2) instead of an uncaught traceback — the
+            # ``_cmd_compile`` / ``_cmd_validate`` wrappers only catch
+            # ``_IncludeError``.
+            try:
+                canonical = Path(hit).resolve()
+            except (OSError, RuntimeError) as exc:
+                raise _IncludeError(f"--include: cannot resolve path {hit!r}: {exc}") from exc
+            if canonical not in seen_canonical:
+                seen_canonical.add(canonical)
+                matched.append(hit)
+    # Lexicographic sort on the string path keeps order deterministic across
+    # platforms and across multiple --include flags. The retained spelling
+    # for each physical file is the first one encountered, so per-rule
+    # ``source.path`` reflects how the user wrote the include.
+    matched.sort()
+    return [Path(p) for p in matched]
+
+
+def _read_ruleset_from_paths(paths: list[Path]) -> RuleSet:
+    """Parse each Markdown document into a Rule list, then merge into one RuleSet.
+
+    Each document is parsed with its own source path so per-rule
+    ``SourceLocation`` entries point back to the originating file. Rule
+    objects from every document are concatenated in path-order; classification
+    happens once on the merged set.
+    """
+    from gate_keeper import classifier, parser
+
+    merged_rules = []
+    for path in paths:
+        content = _read_text(path)
+        # ``parser.parse`` is a pure parse step — it never makes network calls
+        # and preserves source.path / source.line for each candidate rule.
+        ruleset = parser.parse(str(path), content)
+        merged_rules.extend(ruleset.rules)
+
+    # Classify once over the merged list; classification is per-rule so
+    # ordering is preserved and no document boundary matters here.
+    classified = classifier.classify(RuleSet(rules=merged_rules))
+
+    # Detect duplicate rule ids before validation/output. The default rule-id
+    # scheme is ``rule-<stem>-L<line>`` so two files with the same stem at the
+    # same line collide; per #145 we must fail clearly with both source
+    # locations rather than silently rename.
+    _check_duplicate_ids(classified)
+    return classified
+
+
+def _read_text(path: Path) -> str:
+    """Read *path* as UTF-8 and translate IO errors to ``_IncludeError``."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise _IncludeError(f"{path}: {exc.strerror}") from exc
+    except UnicodeDecodeError as exc:
+        raise _IncludeError(f"{path}: not valid UTF-8 ({exc.reason})") from exc
+
+
+def _check_duplicate_ids(ruleset: RuleSet) -> None:
+    """Raise ``_IncludeError`` if two rules share the same id.
+
+    The error message lists the duplicated id and the source path/line for
+    both occurrences so the user can locate and rename either rule.
+    """
+    first_seen: dict[str, tuple[str, int]] = {}
+    for rule in ruleset.rules:
+        loc = (rule.source.path, rule.source.line)
+        if rule.id in first_seen:
+            prev_path, prev_line = first_seen[rule.id]
+            raise _IncludeError(
+                f"duplicate rule id {rule.id!r}: "
+                f"first at {prev_path}:{prev_line}, "
+                f"second at {loc[0]}:{loc[1]}"
+            )
+        first_seen[rule.id] = loc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,7 +142,27 @@ def build_parser() -> argparse.ArgumentParser:
         "compile",
         help="extract rules from a document into the rule IR",
     )
-    compile_parser.add_argument("document", help="path to a rule document")
+    # ``document`` stays a single positional path for the existing
+    # single-document form. Composition uses ``--include`` instead, which
+    # avoids ambiguity with multiple positional arguments (per issue #145
+    # CLI-shape decision).
+    compile_parser.add_argument(
+        "document",
+        nargs="?",
+        default=None,
+        help="path to a rule document (omit when using --include)",
+    )
+    compile_parser.add_argument(
+        "--include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "include Markdown rule documents matching GLOB; may be repeated. "
+            "Globs expand in lexicographic path order; the merged result is "
+            "one RuleSet."
+        ),
+    )
     compile_parser.add_argument(
         "--format",
         choices=["json"],
@@ -52,9 +188,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument(
         "rules",
+        nargs="?",
+        default=None,
         help=(
             "path to the rule input; interpreted as Markdown by default, or as "
-            "Rule IR JSON when --rules-format ir is given"
+            "Rule IR JSON when --rules-format ir is given. Omit when using --include."
+        ),
+    )
+    validate_parser.add_argument(
+        "--include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "include Markdown rule documents matching GLOB; may be repeated. "
+            "Globs expand in lexicographic path order; the merged result is "
+            "one RuleSet. IR composition is not supported (use a single "
+            "positional path with --rules-format ir for IR input)."
         ),
     )
     validate_parser.add_argument("--target", required=True, help="artifact or PR to validate")
@@ -145,6 +295,36 @@ def build_parser() -> argparse.ArgumentParser:
 def _cmd_compile(args: argparse.Namespace) -> int:
     from gate_keeper import classifier, parser
 
+    # Mutually-exclusive sources: exactly one of ``document`` or ``--include``.
+    if args.document is None and not args.include:
+        print(
+            "error: compile requires either a document path or --include GLOB",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.document is not None and args.include:
+        print(
+            "error: compile accepts either a document path or --include, not both",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    if args.include:
+        # Composition path: expand globs, parse each, merge, classify, then
+        # check for duplicate ids before emitting the IR.
+        try:
+            paths = _expand_include_globs(args.include)
+            ruleset = _read_ruleset_from_paths(paths)
+        except _IncludeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        print(json.dumps(ruleset.to_dict(), indent=2))
+        return EXIT_OK
+
+    # Single-document positional form (existing behaviour, unchanged).
+    # ``args.document`` is non-None here: the input-validation block above
+    # rejects (None, no --include) before we reach this branch.
+    assert args.document is not None
     path = Path(args.document)
 
     if not path.exists():
@@ -263,20 +443,53 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"error: unknown backend {backend!r}", file=sys.stderr)
         return EXIT_USAGE
 
-    # Read and compile the rule document.
-    doc_path = Path(args.rules)
-    if not doc_path.exists():
-        print(f"error: {args.rules}: No such file or directory", file=sys.stderr)
+    # Mutually-exclusive sources: exactly one of ``rules`` or ``--include``.
+    if args.rules is None and not args.include:
+        print(
+            "error: validate requires either a rules path or --include GLOB",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.rules is not None and args.include:
+        print(
+            "error: validate accepts either a rules path or --include, not both",
+            file=sys.stderr,
+        )
         return EXIT_USAGE
 
     rules_format = getattr(args, "rules_format", "markdown")
-    if rules_format == "ir":
-        loaded = _load_ir_ruleset(doc_path)
+    if args.include:
+        # Composition path: expand globs, parse each, merge, classify, then
+        # check for duplicate ids before running validation. Markdown only —
+        # IR composition is intentionally out of scope (use single positional
+        # with --rules-format ir for IR input).
+        if rules_format == "ir":
+            print(
+                "error: --include is incompatible with --rules-format ir (IR composition is not supported)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        try:
+            paths = _expand_include_globs(args.include)
+            ruleset = _read_ruleset_from_paths(paths)
+        except _IncludeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
     else:
-        loaded = _load_markdown_ruleset(doc_path)
-    if isinstance(loaded, int):
-        return loaded
-    ruleset = loaded
+        # Single positional path. ``args.rules`` is non-None here: the
+        # input-validation block above rejects (None, no --include) already.
+        assert args.rules is not None
+        doc_path = Path(args.rules)
+        if not doc_path.exists():
+            print(f"error: {args.rules}: No such file or directory", file=sys.stderr)
+            return EXIT_USAGE
+        if rules_format == "ir":
+            loaded = _load_ir_ruleset(doc_path)
+        else:
+            loaded = _load_markdown_ruleset(doc_path)
+        if isinstance(loaded, int):
+            return loaded
+        ruleset = loaded
 
     # Validate reproducibility argument.
     if args.reproducibility < 1:
