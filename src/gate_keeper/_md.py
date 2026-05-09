@@ -82,9 +82,115 @@ def strip_fenced_blocks(text: str) -> str:
     return "".join(out)
 
 
+_ATX_HEADING_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
+
+
+def heading_present(text: str, heading: str) -> bool:
+    """Return True if *text* contains an ATX heading whose trimmed title is *heading*.
+
+    Matching is exact (case-sensitive, no Unicode normalisation) and ignores
+    heading level. Helper for backends that want to distinguish "missing
+    heading" from "heading present but no fenced block follows".
+    """
+    for line in text.splitlines():
+        m = _ATX_HEADING_RE.match(line)
+        if m is not None and m.group("title").strip() == heading:
+            return True
+    return False
+
+
+def find_first_fenced_block_after_heading(text: str, heading: str) -> tuple[str, int, str | None] | None:
+    """Find the first fenced code block after the first ATX heading equal to *heading*.
+
+    *heading* matches verbatim against the trimmed heading title (the text after
+    the leading ``#`` characters and the required separating whitespace, with
+    any trailing ``#`` characters and surrounding whitespace removed). Matching
+    is exact: case-sensitive, no Unicode normalisation. Heading level (``#`` vs
+    ``###``) is not constrained.
+
+    Returns ``(block_content, fence_line_1based, info_string)`` for the first
+    fenced code block that starts after the matched heading and before the next
+    heading at the same or shallower level. ``info_string`` is the trimmed info
+    string on the opening fence (e.g. ``"yaml"``); empty info strings yield
+    ``None``.
+
+    Returns ``None`` when:
+      - no heading with title equal to *heading* exists, or
+      - no fenced block opens between the heading and the next sibling/parent
+        heading (or end of document).
+
+    Unterminated fences (no closing fence before EOF) consume to end of
+    document; the partial body is returned. Mirrors
+    :func:`strip_fenced_blocks`'s fence-detection rules so behaviour is
+    consistent across helpers.
+    """
+    lines = text.splitlines()
+    heading_idx: int | None = None
+    heading_level: int | None = None
+    for i, line in enumerate(lines):
+        m = _ATX_HEADING_RE.match(line)
+        if not m:
+            continue
+        title = m.group("title").strip()
+        if title == heading:
+            heading_idx = i
+            heading_level = len(m.group("hashes"))
+            break
+    if heading_idx is None or heading_level is None:
+        return None
+
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    fence_start_line: int | None = None
+    fence_info: str | None = None
+    body: list[str] = []
+    for j in range(heading_idx + 1, len(lines)):
+        raw = lines[j]
+        if not in_fence:
+            # Stop at the next heading at the same or shallower level.
+            mh = _ATX_HEADING_RE.match(raw)
+            if mh and len(mh.group("hashes")) <= heading_level:
+                return None
+            stripped = raw.rstrip("\r\n")
+            mf = FENCE_START_RE.match(stripped)
+            if mf:
+                marker = mf.group("marker")
+                info_raw = mf.group("info") or ""
+                # Backtick fences disallow backticks in their info string.
+                if marker[0] == "`" and "`" in info_raw:
+                    continue
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+                fence_start_line = j + 1  # 1-based
+                info_trimmed = info_raw.strip()
+                fence_info = info_trimmed or None
+                body = []
+            continue
+        # in_fence: try to close, otherwise accumulate body
+        stripped = raw.rstrip("\r\n")
+        mf = FENCE_START_RE.match(stripped)
+        if mf:
+            marker = mf.group("marker")
+            info_raw = mf.group("info") or ""
+            if marker[0] == fence_char and len(marker) >= fence_len and not info_raw.strip():
+                # Closing fence
+                assert fence_start_line is not None
+                return ("\n".join(body), fence_start_line, fence_info)
+        body.append(raw)
+    if in_fence:
+        # Unterminated fence: return what we have.
+        assert fence_start_line is not None
+        return ("\n".join(body), fence_start_line, fence_info)
+    return None
+
+
 __all__ = [
     "TASK_CHECKED_RE",
     "TASK_UNCHECKED_RE",
     "FENCE_START_RE",
     "strip_fenced_blocks",
+    "find_first_fenced_block_after_heading",
+    "heading_present",
 ]

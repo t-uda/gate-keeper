@@ -491,6 +491,23 @@ class TestBareCheckboxRouting:
 
 
 # ---------------------------------------------------------------------------
+# markdown_evidence_block routing
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceBlockRouting:
+    def test_explicit_evidence_block_phrase_routes(self):
+        rule = _classify_text("The PR must include a policy evidence block.")
+        assert rule.backend_hint is Backend.FILESYSTEM
+        assert rule.kind is RuleKind.MARKDOWN_EVIDENCE_BLOCK
+        assert rule.confidence is Confidence.MEDIUM
+
+    def test_evidence_block_alternate_phrasing(self):
+        rule = _classify_text("The target must contain a markdown evidence block.")
+        assert rule.kind is RuleKind.MARKDOWN_EVIDENCE_BLOCK
+
+
+# ---------------------------------------------------------------------------
 # Codex P2 fix: draft matching requires PR context
 # ---------------------------------------------------------------------------
 

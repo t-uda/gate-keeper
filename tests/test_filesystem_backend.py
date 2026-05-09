@@ -279,6 +279,208 @@ class TestMarkdownTasksComplete:
 
 
 # ---------------------------------------------------------------------------
+# markdown_evidence_block
+# ---------------------------------------------------------------------------
+
+
+_EVIDENCE_DEFAULT_PARAMS = {
+    "heading": "Policy evidence",
+    "format": "yaml",
+    "required_keys": ["policy_bundle", "required_reads", "unresolved_decisions"],
+    "allowed_sentinel_values": [
+        "not_applicable",
+        "not_defined_yet",
+        "missing_blocker",
+        "unavailable",
+    ],
+}
+
+
+class TestMarkdownEvidenceBlock:
+    """Six required fixtures: pass, missing heading, missing block, malformed
+    YAML, missing required keys, sentinel-value violation."""
+
+    _EBF = _FIXTURES / "evidence_block"
+
+    def test_pass(self):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)), self._EBF / "pass.md"
+        )
+        assert diag.status is Status.PASS, diag.message
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["heading"] == "Policy evidence"
+        assert ev.data["format"] == "yaml"
+
+    def test_fail_missing_heading(self):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            self._EBF / "missing_heading.md",
+        )
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["failure"] == "heading_missing"
+
+    def test_fail_missing_block(self):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            self._EBF / "missing_block.md",
+        )
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["failure"] == "block_missing"
+
+    def test_fail_malformed_yaml(self):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            self._EBF / "malformed_yaml.md",
+        )
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["failure"] == "malformed"
+        assert "fence_line" in ev.data
+        assert "error" in ev.data
+
+    def test_fail_missing_required_keys(self):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            self._EBF / "missing_keys.md",
+        )
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["failure"] == "key_or_sentinel"
+        assert set(ev.data["missing_keys"]) >= {"required_reads", "unresolved_decisions"}
+
+    def test_fail_invalid_sentinel(self):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            self._EBF / "bad_sentinel.md",
+        )
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["failure"] == "key_or_sentinel"
+        invalid = ev.data["invalid_sentinels"]
+        assert any(item["key"] == "unresolved_decisions" and item["value"] == "tbd" for item in invalid)
+
+    def test_unavailable_when_heading_param_missing(self, tmp_path):
+        target = tmp_path / "x.md"
+        target.write_text("# nothing\n")
+        params = dict(_EVIDENCE_DEFAULT_PARAMS)
+        del params["heading"]
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.UNAVAILABLE
+
+    def test_unavailable_when_format_param_missing(self, tmp_path):
+        target = tmp_path / "x.md"
+        target.write_text("# nothing\n")
+        params = dict(_EVIDENCE_DEFAULT_PARAMS)
+        del params["format"]
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.UNAVAILABLE
+
+    def test_unsupported_format(self, tmp_path):
+        target = tmp_path / "x.md"
+        target.write_text("# nothing\n")
+        params = dict(_EVIDENCE_DEFAULT_PARAMS)
+        params["format"] = "json"
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.UNSUPPORTED
+
+    def test_unavailable_when_required_keys_empty(self, tmp_path):
+        target = tmp_path / "x.md"
+        target.write_text("# nothing\n")
+        params = dict(_EVIDENCE_DEFAULT_PARAMS)
+        params["required_keys"] = []
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.UNAVAILABLE
+
+    def test_unavailable_when_target_missing(self, tmp_path):
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            tmp_path / "nope.md",
+        )
+        assert diag.status is Status.UNAVAILABLE
+
+    def test_dotted_key_pass(self, tmp_path):
+        target = tmp_path / "doc.md"
+        target.write_text(
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "policy:\n"
+            "  bundle: spread-applicant-ai/v3\n"
+            "  reviewer: jdoe\n"
+            "```\n"
+        )
+        params = {
+            "heading": "Policy evidence",
+            "format": "yaml",
+            "required_keys": ["policy.bundle", "policy.reviewer"],
+        }
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.PASS
+
+    def test_dotted_key_missing(self, tmp_path):
+        target = tmp_path / "doc.md"
+        target.write_text("## Policy evidence\n\n```yaml\npolicy:\n  bundle: spread-applicant-ai/v3\n```\n")
+        params = {
+            "heading": "Policy evidence",
+            "format": "yaml",
+            "required_keys": ["policy.bundle", "policy.reviewer"],
+        }
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert "policy.reviewer" in ev.data["missing_keys"]
+
+    def test_sentinel_check_skips_non_sentinel_strings(self, tmp_path):
+        # "spread-applicant-ai/v3" contains hyphens and a slash → not sentinel-shaped.
+        target = tmp_path / "doc.md"
+        target.write_text(
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "policy_bundle: spread-applicant-ai/v3\n"
+            "required_reads:\n"
+            "  - docs/x.md\n"
+            "unresolved_decisions: not_applicable\n"
+            "```\n"
+        )
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            target,
+        )
+        assert diag.status is Status.PASS
+
+    def test_sentinel_check_skipped_when_allowlist_empty(self, tmp_path):
+        target = tmp_path / "doc.md"
+        target.write_text(
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "policy_bundle: spread-applicant-ai/v3\n"
+            "required_reads:\n"
+            "  - docs/x.md\n"
+            "unresolved_decisions: tbd\n"
+            "```\n"
+        )
+        params = {
+            "heading": "Policy evidence",
+            "format": "yaml",
+            "required_keys": ["policy_bundle", "required_reads", "unresolved_decisions"],
+        }
+        diag = check(_rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, params), target)
+        assert diag.status is Status.PASS
+
+    def test_block_must_be_a_mapping(self, tmp_path):
+        target = tmp_path / "doc.md"
+        target.write_text("## Policy evidence\n\n```yaml\n- foo\n- bar\n```\n")
+        diag = check(
+            _rule(RuleKind.MARKDOWN_EVIDENCE_BLOCK, dict(_EVIDENCE_DEFAULT_PARAMS)),
+            target,
+        )
+        assert diag.status is Status.FAIL
+        ev = next(e for e in diag.evidence if e.kind == "evidence_block")
+        assert ev.data["failure"] == "not_a_mapping"
+
+
+# ---------------------------------------------------------------------------
 # UnicodeDecodeError → unavailable (P2 fix)
 # ---------------------------------------------------------------------------
 

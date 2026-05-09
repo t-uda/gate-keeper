@@ -17,6 +17,12 @@ from gate_keeper._md import (
     TASK_UNCHECKED_RE as _TASK_UNCHECKED_RE,
 )
 from gate_keeper._md import (
+    find_first_fenced_block_after_heading as _find_first_fenced_block_after_heading,
+)
+from gate_keeper._md import (
+    heading_present as _heading_present,
+)
+from gate_keeper._md import (
     strip_fenced_blocks as _strip_fenced_blocks_impl,
 )
 from gate_keeper.models import (
@@ -38,8 +44,19 @@ _FILESYSTEM_KINDS = frozenset(
         RuleKind.TEXT_REQUIRED,
         RuleKind.TEXT_FORBIDDEN,
         RuleKind.MARKDOWN_TASKS_COMPLETE,
+        RuleKind.MARKDOWN_EVIDENCE_BLOCK,
     }
 )
+
+#: Formats supported by ``markdown_evidence_block``. Extending this set is a
+#: deliberate IR change — keep it small and reviewed.
+_EVIDENCE_BLOCK_FORMATS = frozenset({"yaml"})
+
+#: A "sentinel-shaped" string is a lowercase-ASCII machine token: starts with
+#: a-z, contains only ``[a-z0-9_]``, and is at least one character long.
+#: Free-form values (with spaces, hyphens, uppercase, slashes, etc.) are not
+#: sentinel-shaped and bypass the ``allowed_sentinel_values`` check entirely.
+_SENTINEL_SHAPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) -> Diagnostic:
@@ -88,8 +105,10 @@ def _dispatch(rule: Rule, target: Path) -> Diagnostic:
         return _text_required(rule, target)
     if kind is RuleKind.TEXT_FORBIDDEN:
         return _text_forbidden(rule, target)
-    # RuleKind.MARKDOWN_TASKS_COMPLETE
-    return _markdown_tasks_complete(rule, target)
+    if kind is RuleKind.MARKDOWN_TASKS_COMPLETE:
+        return _markdown_tasks_complete(rule, target)
+    # RuleKind.MARKDOWN_EVIDENCE_BLOCK
+    return _markdown_evidence_block(rule, target)
 
 
 def _file_exists(rule: Rule, target: Path) -> Diagnostic:
@@ -218,6 +237,278 @@ def _strip_fenced_blocks(text: str) -> str:
     compatibility with any internal callers in this module.
     """
     return _strip_fenced_blocks_impl(text)
+
+
+def _lookup_dotted_key(data: object, key: str) -> tuple[bool, object]:
+    """Resolve dotted *key* against *data*.
+
+    Returns ``(found, value)``. ``found`` is ``True`` only when every segment
+    of *key* resolves to a present mapping key on a ``dict``-shaped node.
+    Resolution stops at the first segment that cannot be looked up (missing
+    key, non-dict node, or empty key segment) and returns ``(False, None)``.
+    """
+    node: object = data
+    if not key:
+        return False, None
+    for segment in key.split("."):
+        if not segment:
+            return False, None
+        if not isinstance(node, dict) or segment not in node:
+            return False, None
+        node = node[segment]
+    return True, node
+
+
+def _markdown_evidence_block(rule: Rule, target: Path) -> Diagnostic:
+    heading = rule.params.get("heading")
+    if not isinstance(heading, str) or not heading:
+        return _diag(
+            rule,
+            Status.UNAVAILABLE,
+            "params.heading is required for markdown_evidence_block but was not provided",
+            [Evidence(kind="params_error", data={"missing": "heading"})],
+        )
+    fmt = rule.params.get("format")
+    if not isinstance(fmt, str) or not fmt:
+        return _diag(
+            rule,
+            Status.UNAVAILABLE,
+            "params.format is required for markdown_evidence_block but was not provided",
+            [Evidence(kind="params_error", data={"missing": "format"})],
+        )
+    if fmt not in _EVIDENCE_BLOCK_FORMATS:
+        return _diag(
+            rule,
+            Status.UNSUPPORTED,
+            f"params.format {fmt!r} is not supported; expected one of {sorted(_EVIDENCE_BLOCK_FORMATS)}",
+            [
+                Evidence(
+                    kind="params_error",
+                    data={"field": "format", "value": fmt, "supported": sorted(_EVIDENCE_BLOCK_FORMATS)},
+                )
+            ],
+        )
+    required_keys_raw = rule.params.get("required_keys")
+    if not isinstance(required_keys_raw, list) or not required_keys_raw:
+        return _diag(
+            rule,
+            Status.UNAVAILABLE,
+            "params.required_keys is required for markdown_evidence_block "
+            "and must be a non-empty list of dotted-key strings",
+            [Evidence(kind="params_error", data={"missing": "required_keys"})],
+        )
+    required_keys: list[str] = []
+    for k in required_keys_raw:
+        if not isinstance(k, str) or not k:
+            return _diag(
+                rule,
+                Status.UNAVAILABLE,
+                "params.required_keys entries must be non-empty strings",
+                [
+                    Evidence(
+                        kind="params_error",
+                        data={"field": "required_keys", "invalid_entry": repr(k)},
+                    )
+                ],
+            )
+        required_keys.append(k)
+    sentinel_raw = rule.params.get("allowed_sentinel_values", [])
+    if not isinstance(sentinel_raw, list):
+        return _diag(
+            rule,
+            Status.UNAVAILABLE,
+            "params.allowed_sentinel_values must be a list of strings when provided",
+            [
+                Evidence(
+                    kind="params_error",
+                    data={"field": "allowed_sentinel_values", "type": type(sentinel_raw).__name__},
+                )
+            ],
+        )
+    allowed_sentinels: list[str] = []
+    for s in sentinel_raw:
+        if not isinstance(s, str):
+            return _diag(
+                rule,
+                Status.UNAVAILABLE,
+                "params.allowed_sentinel_values entries must be strings",
+                [
+                    Evidence(
+                        kind="params_error",
+                        data={"field": "allowed_sentinel_values", "invalid_entry": repr(s)},
+                    )
+                ],
+            )
+        allowed_sentinels.append(s)
+
+    content, err = _read_file(rule, target)
+    if err is not None:
+        return err
+    assert content is not None
+    path_str = str(target)
+
+    found = _find_first_fenced_block_after_heading(content, heading)
+    if found is None:
+        # Distinguish missing heading from missing block to make diagnostics
+        # actionable.
+        if not _heading_present(content, heading):
+            return _diag(
+                rule,
+                Status.FAIL,
+                f"{path_str}: heading {heading!r} not found.",
+                [
+                    Evidence(
+                        kind="evidence_block",
+                        data={
+                            "path": path_str,
+                            "heading": heading,
+                            "failure": "heading_missing",
+                        },
+                    )
+                ],
+            )
+        return _diag(
+            rule,
+            Status.FAIL,
+            f"{path_str}: no fenced code block follows heading {heading!r}.",
+            [
+                Evidence(
+                    kind="evidence_block",
+                    data={
+                        "path": path_str,
+                        "heading": heading,
+                        "failure": "block_missing",
+                    },
+                )
+            ],
+        )
+    block_body, fence_line, info_string = found
+
+    # Parse the block per the requested format.
+    import yaml  # local import keeps PyYAML out of the import path until needed
+
+    try:
+        parsed = yaml.safe_load(block_body) if block_body.strip() else None
+    except yaml.YAMLError as exc:
+        # yaml.YAMLError exposes problem_mark for many subclasses (parser/scanner errors).
+        block_relative_line = None
+        problem_mark = getattr(exc, "problem_mark", None)
+        if problem_mark is not None:
+            block_relative_line = int(problem_mark.line) + 1
+        absolute_line = fence_line + block_relative_line if block_relative_line is not None else fence_line
+        return _diag(
+            rule,
+            Status.FAIL,
+            f"{path_str}: malformed {fmt} in evidence block at line {fence_line}: {exc}",
+            [
+                Evidence(
+                    kind="evidence_block",
+                    data={
+                        "path": path_str,
+                        "heading": heading,
+                        "format": fmt,
+                        "fence_line": fence_line,
+                        "info_string": info_string,
+                        "failure": "malformed",
+                        "error": str(exc),
+                        "error_line": absolute_line,
+                    },
+                )
+            ],
+        )
+
+    if not isinstance(parsed, dict):
+        return _diag(
+            rule,
+            Status.FAIL,
+            (
+                f"{path_str}: evidence block at line {fence_line} did not parse as a "
+                f"{fmt} mapping (got {type(parsed).__name__})."
+            ),
+            [
+                Evidence(
+                    kind="evidence_block",
+                    data={
+                        "path": path_str,
+                        "heading": heading,
+                        "format": fmt,
+                        "fence_line": fence_line,
+                        "info_string": info_string,
+                        "failure": "not_a_mapping",
+                        "parsed_type": type(parsed).__name__,
+                    },
+                )
+            ],
+        )
+
+    missing: list[str] = []
+    invalid_sentinels: list[dict[str, str]] = []
+    for key in required_keys:
+        present, value = _lookup_dotted_key(parsed, key)
+        if not present:
+            missing.append(key)
+            continue
+        # Sentinel validation only runs when an allowlist is supplied AND the
+        # value is a *sentinel-shaped* string leaf (see ``_SENTINEL_SHAPE_RE``).
+        # Non-string values (mappings, lists, numbers, bools, null) and free-
+        # form strings (e.g. ``"spread-applicant-ai/v3"``) bypass the check.
+        if (
+            allowed_sentinels
+            and isinstance(value, str)
+            and _SENTINEL_SHAPE_RE.match(value) is not None
+            and value not in allowed_sentinels
+        ):
+            invalid_sentinels.append({"key": key, "value": value})
+
+    if missing or invalid_sentinels:
+        msg_parts: list[str] = []
+        if missing:
+            msg_parts.append(f"missing required keys: {missing}")
+        if invalid_sentinels:
+            invalid_summary = [f"{item['key']}={item['value']!r}" for item in invalid_sentinels]
+            msg_parts.append(f"invalid sentinel value(s): {invalid_summary}")
+        return _diag(
+            rule,
+            Status.FAIL,
+            f"{path_str}: evidence block at line {fence_line}: " + "; ".join(msg_parts),
+            [
+                Evidence(
+                    kind="evidence_block",
+                    data={
+                        "path": path_str,
+                        "heading": heading,
+                        "format": fmt,
+                        "fence_line": fence_line,
+                        "info_string": info_string,
+                        "failure": "key_or_sentinel",
+                        "missing_keys": missing,
+                        "invalid_sentinels": invalid_sentinels,
+                    },
+                )
+            ],
+        )
+    return _diag(
+        rule,
+        Status.PASS,
+        (
+            f"{path_str}: evidence block under {heading!r} at line {fence_line} has "
+            f"all required keys ({len(required_keys)})."
+        ),
+        [
+            Evidence(
+                kind="evidence_block",
+                data={
+                    "path": path_str,
+                    "heading": heading,
+                    "format": fmt,
+                    "fence_line": fence_line,
+                    "info_string": info_string,
+                    "required_keys": required_keys,
+                    "allowed_sentinel_values": allowed_sentinels,
+                },
+            )
+        ],
+    )
 
 
 def _markdown_tasks_complete(rule: Rule, target: Path) -> Diagnostic:

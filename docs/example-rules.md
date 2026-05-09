@@ -217,7 +217,94 @@ rules.md:3: warning: [llm-rubric/fail] rule-L3: The description does not summari
 
 ---
 
-## 6. textlint prose quality — `external / external_check`
+## 6. Structured policy evidence — filesystem `markdown_evidence_block`
+
+`markdown_evidence_block` rules check that a Markdown target carries a structured
+fenced code block under a named heading. Useful for PR descriptions, issue body
+exports, or local reports that must declare a policy bundle, required reads,
+and a list of unresolved decisions in machine-readable form.
+
+The classifier does not auto-infer the structured params (`heading`, `format`,
+`required_keys`, `allowed_sentinel_values`) from natural-language bullets. Build
+the rule JSON directly or compile + edit:
+
+**IR shape:**
+
+```json
+{
+  "rules": [{
+    "id": "policy-evidence-required",
+    "title": "PR description carries a Policy evidence block",
+    "kind": "markdown_evidence_block",
+    "severity": "error",
+    "backend_hint": "filesystem",
+    "params": {
+      "heading": "Policy evidence",
+      "format": "yaml",
+      "required_keys": ["policy_bundle", "required_reads", "unresolved_decisions"],
+      "allowed_sentinel_values": [
+        "not_applicable",
+        "not_defined_yet",
+        "missing_blocker",
+        "unavailable"
+      ]
+    }
+  }]
+}
+```
+
+**Passing target (Markdown):**
+
+````markdown
+## Policy evidence
+
+```yaml
+policy_bundle: spread-applicant-ai/v3
+required_reads:
+  - docs/policy.md
+  - docs/checklist.md
+unresolved_decisions: not_applicable
+```
+````
+
+**Failing target — invalid sentinel:**
+
+````markdown
+## Policy evidence
+
+```yaml
+policy_bundle: spread-applicant-ai/v3
+required_reads:
+  - docs/policy.md
+unresolved_decisions: tbd
+```
+````
+
+```
+filesystem/fail — policy-evidence-required: target.md: evidence block at line 4: invalid sentinel value(s): ["unresolved_decisions='tbd'"]
+  [evidence_block(path=target.md, heading=Policy evidence, format=yaml, fence_line=4,
+      failure=key_or_sentinel, missing_keys=[], invalid_sentinels=[{'key': 'unresolved_decisions', 'value': 'tbd'}])]
+```
+
+**Notes:**
+
+- Heading match is exact (case-sensitive). Heading level is not constrained.
+- "First fenced block after the heading" wins; later blocks under the same
+  heading are not inspected.
+- Sentinel validation is shape-based: only string values matching
+  `^[a-z][a-z0-9_]*$` (e.g. `tbd`, `not_applicable`) are checked against the
+  allowlist. Free-form strings like `"spread-applicant-ai/v3"` or
+  `"Reviewed by jdoe"` are not flagged.
+- YAML parsing uses `yaml.safe_load` only; tags and constructors are never
+  evaluated as Python objects.
+- Local Markdown files only. To check a GitHub PR body, save it to a local
+  `.md` file first.
+- See `docs/rule-ir.md#markdown_evidence_block--structured-policy-evidence`
+  for the full PASS/FAIL contract and evidence shape.
+
+---
+
+## 7. textlint prose quality — `external / external_check`
 
 textlint rules use `kind: external_check` with `params.tool: textlint`.
 The textlint adapter is registered automatically at CLI entry.

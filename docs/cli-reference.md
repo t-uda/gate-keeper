@@ -235,6 +235,14 @@ Each line: `path:line: severity: [backend/status] rule_id: message [evidence]`.
 - `--backend auto` (default) routes each rule individually; `--backend
   llm-rubric` overrides the classifier and sends every rule to the LLM, which
   may produce `unsupported` diagnostics for non-`semantic_rubric` kinds.
+- `markdown_evidence_block` rules require structured params (`heading`,
+  `format`, `required_keys`, optional `allowed_sentinel_values`) that cannot
+  be inferred from natural-language Markdown bullets. Compile a rule, edit the
+  resulting JSON IR to set the params, and feed it back through the Python API
+  (the CLI reparses the rule document on every run; see the textlint note in
+  [docs/example-rules.md](example-rules.md) for the same constraint). See
+  [docs/rule-ir.md](rule-ir.md#markdown_evidence_block--structured-policy-evidence)
+  for the full PASS/FAIL contract.
 - `--reproducibility N` only affects the `llm-rubric` backend. Passing it with
   `--backend filesystem`, `--backend github`, or `--backend external` is
   accepted but has no effect — reproducibility entries will not appear in

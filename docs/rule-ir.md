@@ -88,10 +88,11 @@ backend rather than minting new `Backend` enum values; see
 
 ### `RuleKind`
 `file_exists`, `file_absent`, `path_matches`, `text_required`, `text_forbidden`,
-`markdown_tasks_complete`, `github_pr_open`, `github_not_draft`,
-`github_labels_absent`, `github_tasks_complete`, `github_checks_success`,
-`github_threads_resolved`, `github_non_author_approval`,
-`github_changed_files_absent`, `semantic_rubric`, `external_check`
+`markdown_tasks_complete`, `markdown_evidence_block`, `github_pr_open`,
+`github_not_draft`, `github_labels_absent`, `github_tasks_complete`,
+`github_checks_success`, `github_threads_resolved`,
+`github_non_author_approval`, `github_changed_files_absent`,
+`semantic_rubric`, `external_check`
 
 ### `Severity`
 `error`, `warning`, `advisory`
@@ -110,6 +111,72 @@ backend rather than minting new `Backend` enum values; see
 | `github_checks_success` | _(none)_ | — | Evaluates every entry in `statusCheckRollup` as required; only `SUCCESS` state/conclusion passes. Branch protection remains the authoritative control plane. |
 | `external_check` | `tool` | _(required)_ | String adapter ID selecting which `external` adapter handles the rule (e.g. `"textlint"`). Missing → `unavailable` / `params_error`; unregistered → `unsupported` / `adapter_unknown`. All other `params` keys are forwarded verbatim to the adapter, which owns its own per-tool keys. See [`docs/backend-external.md`](backend-external.md). |
 | `github_changed_files_absent` | `patterns`, `case_sensitive` | `case_sensitive=true` | `patterns` is required and must be a non-empty list of glob strings; missing or invalid → `unavailable` / `params_error`. `case_sensitive` is optional (default `true`). Glob semantics: `**` matches zero or more path segments, `*` matches anything except `/`, `?` matches one non-`/` char. See the dedicated section below for the data policy. |
+| `markdown_evidence_block` | `heading` | _(required)_ | Verbatim ATX heading title (case-sensitive). Backend locates the first fenced code block following this heading and stops at the next sibling/parent heading. Missing → `unavailable` / `params_error`. |
+| `markdown_evidence_block` | `format` | _(required)_ | Format of the fenced block. Currently only `"yaml"` is supported. Other values → `unsupported`. |
+| `markdown_evidence_block` | `required_keys` | _(required)_ | Non-empty list of dotted-key strings (e.g. `"policy.bundle"`). Each must resolve through nested mappings. Missing or empty → `unavailable`. |
+| `markdown_evidence_block` | `allowed_sentinel_values` | `[]` | Optional list of allowed lowercase-token sentinel values (e.g. `["not_applicable", "missing_blocker"]`). When non-empty, any string leaf at a required key that matches the sentinel-token shape `^[a-z][a-z0-9_]*$` must appear in this list; free-form strings (with spaces, hyphens, mixed case, slashes) are not validated. |
+
+## `markdown_evidence_block` — structured policy evidence
+
+Validates a fenced code block embedded in a Markdown target. Useful for
+checking that a PR description, issue body export, or local report carries a
+structured policy-evidence block (required reads, policy bundle IDs, lists of
+unresolved decisions, …).
+
+The backend reads the local Markdown file at `--target`, locates the first ATX
+heading whose trimmed title equals `params.heading`, and looks for the first
+fenced code block before the next sibling/parent heading.
+
+### PASS
+
+- Heading found.
+- A fenced code block follows it.
+- Block parses as a `params.format` mapping (currently `yaml` only — parsed
+  with `yaml.safe_load`; tags and arbitrary object construction are not
+  evaluated).
+- Every dotted key in `params.required_keys` resolves to a present mapping
+  entry.
+- For string leaves whose value matches the sentinel-token shape
+  `^[a-z][a-z0-9_]*$` (e.g. `not_applicable`), the value is in
+  `params.allowed_sentinel_values` (or the allowlist is empty).
+
+### FAIL
+
+- Heading missing → evidence `failure: heading_missing`.
+- Heading found but no fenced block follows before the next sibling/parent
+  heading → `failure: block_missing`.
+- Block does not parse as the requested format → `failure: malformed`, with
+  `error_line` (1-based, absolute) when the parser exposes a problem mark.
+- Block parses but is not a mapping → `failure: not_a_mapping`.
+- One or more required keys missing OR one or more sentinel-shaped string
+  values are not in the allowlist → `failure: key_or_sentinel`, with
+  `missing_keys` and `invalid_sentinels` listed in the evidence payload.
+
+### UNAVAILABLE / UNSUPPORTED
+
+- Missing `heading`, `format`, or `required_keys` params → `unavailable` with
+  `params_error` evidence.
+- `format` value other than `yaml` → `unsupported`.
+- Target file missing or unreadable → `unavailable`.
+
+### Boundaries
+
+- Local Markdown files only. GitHub PR bodies must be saved to a Markdown
+  target via a wrapper or future GitHub backend feature.
+- Heading match is exact (case-sensitive, no Unicode normalisation, ignores
+  heading level).
+- The "first" fenced block under a heading wins; later blocks under the same
+  heading are not inspected.
+- Sentinel validation is shape-based, not allowlist-only: free-form strings
+  bypass the check entirely. Pattern is intentionally narrow so values like
+  `"spread-applicant-ai/v3"` or `"Reviewed by jdoe"` are not flagged.
+- Arbitrary JSON Schema validation is out of scope. The first slice supports
+  required-key presence and sentinel-value membership only.
+- YAML parsing uses `yaml.safe_load`. `safe_load` evaluates a single document;
+  multi-document streams cause a parser error and are reported as
+  `failure: malformed`. Anchors and aliases are resolved within YAML as
+  normal; the security guarantee is specifically that `!tag` constructors
+  cannot instantiate arbitrary Python objects.
 
 ## `github_non_author_approval` — formal evidence and limitations
 

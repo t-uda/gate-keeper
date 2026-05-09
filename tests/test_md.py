@@ -12,6 +12,8 @@ import pytest
 from gate_keeper._md import (
     TASK_CHECKED_RE,
     TASK_UNCHECKED_RE,
+    find_first_fenced_block_after_heading,
+    heading_present,
     strip_fenced_blocks,
 )
 
@@ -175,3 +177,76 @@ class TestStripFencedBlocksCommonMark:
         assert "first" not in result
         assert "still inside" not in result
         assert "after" in result
+
+
+class TestHeadingPresent:
+    def test_exact_match(self):
+        assert heading_present("# Policy evidence\n\nbody\n", "Policy evidence") is True
+
+    def test_subheading_level(self):
+        assert heading_present("## Policy evidence\n\nbody\n", "Policy evidence") is True
+
+    def test_no_match(self):
+        assert heading_present("# Other\n", "Policy evidence") is False
+
+    def test_case_sensitive(self):
+        assert heading_present("# policy evidence\n", "Policy evidence") is False
+
+    def test_trailing_hashes_stripped(self):
+        assert heading_present("## Policy evidence ##\n", "Policy evidence") is True
+
+
+class TestFindFirstFencedBlockAfterHeading:
+    def test_returns_block_body_and_line(self):
+        text = "# Title\n\n## Policy evidence\n\n```yaml\nfoo: 1\n```\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, fence_line, info = out
+        assert body == "foo: 1"
+        assert fence_line == 5
+        assert info == "yaml"
+
+    def test_missing_heading_returns_none(self):
+        text = "# Title\n\n## Other\n\n```yaml\nfoo: 1\n```\n"
+        assert find_first_fenced_block_after_heading(text, "Policy evidence") is None
+
+    def test_missing_block_returns_none(self):
+        text = "## Policy evidence\n\nprose only\n\n## Next\n\n```yaml\nfoo: 1\n```\n"
+        assert find_first_fenced_block_after_heading(text, "Policy evidence") is None
+
+    def test_block_before_heading_does_not_count(self):
+        text = "```yaml\nbefore: 1\n```\n\n## Policy evidence\n\nprose\n"
+        assert find_first_fenced_block_after_heading(text, "Policy evidence") is None
+
+    def test_block_under_subheading_is_picked_up(self):
+        # A deeper heading does NOT terminate the search; the next fenced block
+        # encountered before a sibling/parent heading wins.
+        text = "## Policy evidence\n\n### Detail\n\n```yaml\nfoo: 1\n```\n\n## Next\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "foo: 1"
+        assert info == "yaml"
+
+    def test_unterminated_fence_returns_partial_body(self):
+        text = "## Policy evidence\n\n```yaml\nfoo: 1\nbar: 2\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, _ = out
+        assert "foo: 1" in body
+        assert "bar: 2" in body
+
+    def test_empty_info_string_yields_none_info(self):
+        text = "## Policy evidence\n\n```\nfoo: 1\n```\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        _, _, info = out
+        assert info is None
+
+    def test_tilde_fence_supported(self):
+        text = "## Policy evidence\n\n~~~yaml\nfoo: 1\n~~~\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "foo: 1"
+        assert info == "yaml"
