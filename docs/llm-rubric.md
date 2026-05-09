@@ -69,12 +69,16 @@ Setup:
    ```sh
    GATE_KEEPER_LLM_PROVIDER=anthropic
    ANTHROPIC_API_KEY=sk-ant-...
+   # optional model override; defaults to claude-haiku-4-5
+   GATE_KEEPER_ANTHROPIC_MODEL=claude-opus-4-7
    ```
 
    **OpenAI:**
    ```sh
    GATE_KEEPER_LLM_PROVIDER=openai
    OPENAI_API_KEY=sk-...
+   # optional model override; defaults to gpt-4o-mini
+   GATE_KEEPER_OPENAI_MODEL=gpt-4o
    ```
 
 3. (container, automatic) `gate-keeper` reads the file via `python-dotenv`
@@ -83,6 +87,34 @@ Setup:
 If `GATE_KEEPER_LLM_PROVIDER` is missing, set to a value other than
 `anthropic` or `openai`, or the corresponding API key is absent, behavior
 falls back to the unconfigured `unavailable` diagnostic above.
+
+### Model selection
+
+Provider model selection is also dotenv-driven. The active model is
+resolved from the same per-project file (no `os.environ` lookup) using:
+
+| Provider | Override variable | Default |
+| --- | --- | --- |
+| `anthropic` | `GATE_KEEPER_ANTHROPIC_MODEL` | `claude-haiku-4-5` |
+| `openai` | `GATE_KEEPER_OPENAI_MODEL` | `gpt-4o-mini` |
+
+Behavior:
+
+- An unset, missing, or whitespace-only override falls back to the source
+  default constant.
+- The provider-specific override only applies when the matching provider
+  is active (e.g. `GATE_KEEPER_OPENAI_MODEL` is ignored when the provider
+  is `anthropic`).
+- The actual model used is recorded in `llm_judgment.evidence[0].data.model`
+  on every successful run.
+- If the override names a model that is not in the static `_MODEL_PRICING`
+  snapshot/table (see "Per-rule observability fields" below),
+  `cost_estimate_usd` will be `null` (fail-closed: cost is never guessed).
+  Telemetry fields (`latency_ms`, `tokens_in`, `tokens_out`) are still
+  recorded.
+
+`gate-keeper diagnose` surfaces the resolved model and whether it came
+from an override or the default.
 
 ### CI exception: GitHub Actions secret projection
 

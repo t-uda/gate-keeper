@@ -115,3 +115,63 @@ def test_diagnose_provider_set_but_key_unset_reports_no(monkeypatch, capsys):
     out = captured.out
     assert "OPENAI_API_KEY: <unset>" in out
     assert "provider configured: no" in out
+
+
+def test_diagnose_reports_default_model_openai(monkeypatch, capsys):
+    """Without an override, ``diagnose`` reports the default OpenAI model."""
+    env = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-test",
+    }
+    monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **kw: env)
+
+    rc = main(["diagnose"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert f"model:              {llm_backend.OPENAI_DEFAULT_MODEL} (default)" in out
+
+
+def test_diagnose_reports_override_model_openai(monkeypatch, capsys):
+    """``GATE_KEEPER_OPENAI_MODEL`` is surfaced in the ``diagnose`` model line."""
+    env = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-test",
+        "GATE_KEEPER_OPENAI_MODEL": "gpt-4o",
+    }
+    monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **kw: env)
+
+    rc = main(["diagnose"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "model:              gpt-4o (override)" in out
+
+
+def test_diagnose_reports_default_model_anthropic(monkeypatch, capsys):
+    env = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+    }
+    monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **kw: env)
+
+    rc = main(["diagnose"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert f"model:              {llm_backend.ANTHROPIC_DEFAULT_MODEL} (default)" in out
+
+
+def test_diagnose_reports_override_model_anthropic(monkeypatch, capsys):
+    env = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+        "GATE_KEEPER_ANTHROPIC_MODEL": "claude-opus-4-7",
+    }
+    monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **kw: env)
+
+    rc = main(["diagnose"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "model:              claude-opus-4-7 (override)" in out

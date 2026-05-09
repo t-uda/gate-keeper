@@ -194,14 +194,39 @@ def _load_env_file(path: Path = DOTENV_PATH) -> dict[str, str]:
     return {k: v for k, v in values.items() if v is not None}
 
 
-def _is_configured() -> bool:
-    """Return True iff a supported provider and its API key are present in the dotenv."""
-    env = _load_env_file()
+def _is_configured(env: dict[str, str] | None = None) -> bool:
+    """Return True iff a supported provider and its API key are present.
+
+    When *env* is ``None`` the dotenv is read fresh; callers that already
+    hold a snapshot should pass it in so the configured decision and any
+    follow-up access (provider, key, model override) all read from the
+    same snapshot — otherwise a concurrent dotenv edit could split the
+    decision across two reads.
+    """
+    if env is None:
+        env = _load_env_file()
     provider = env.get("GATE_KEEPER_LLM_PROVIDER")
     if provider not in _SUPPORTED_PROVIDERS:
         return False
     key_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
     return bool(env.get(key_var))
+
+
+def _resolve_model(provider: str, env: dict[str, str]) -> str:
+    """Return the model identifier to use for *provider*.
+
+    Reads ``GATE_KEEPER_<PROVIDER>_MODEL`` from the dotenv snapshot when set
+    and non-empty (after stripping); otherwise falls back to the source
+    default constant. Empty / whitespace-only overrides are ignored so a
+    blank line in the dotenv does not silently produce an invalid model id.
+    """
+    if provider == "anthropic":
+        override = env.get("GATE_KEEPER_ANTHROPIC_MODEL", "").strip()
+        return override or ANTHROPIC_DEFAULT_MODEL
+    if provider == "openai":
+        override = env.get("GATE_KEEPER_OPENAI_MODEL", "").strip()
+        return override or OPENAI_DEFAULT_MODEL
+    raise ValueError(f"unsupported provider: {provider!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -567,19 +592,22 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
 
     rubric_input = _build_rubric_input(rule, target)
 
-    if not _is_configured():
+    # Single-snapshot read: load the dotenv once and drive the configured
+    # check, provider lookup, and model resolution all from the same dict.
+    # Reading twice would let a concurrent dotenv edit split the decision
+    # (e.g. configured=True at first read, provider=None at second read).
+    env = _load_env_file()
+    if not _is_configured(env):
         return _unavailable_unconfigured(rule, rubric_input)
 
-    env = _load_env_file()
     provider = env["GATE_KEEPER_LLM_PROVIDER"]
+    model = _resolve_model(provider, env)
     system, user = _build_prompt(rule, target)
 
     try:
         if provider == "anthropic":
-            model = ANTHROPIC_DEFAULT_MODEL
             response_text, telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
         else:
-            model = OPENAI_DEFAULT_MODEL
             response_text, telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
     except Exception as exc:  # noqa: BLE001 — fail-closed: any provider error → unavailable
         return _unavailable_provider_error(rule, rubric_input, provider, type(exc).__name__, str(exc))

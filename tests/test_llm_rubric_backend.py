@@ -253,6 +253,133 @@ def _patch_env(monkeypatch, env: dict[str, str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_model — dotenv-driven model override (#157)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModel:
+    """Issue #157 — provider-specific model override from the dotenv snapshot."""
+
+    def test_anthropic_override_takes_precedence(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "GATE_KEEPER_ANTHROPIC_MODEL": "claude-opus-4-7",
+        }
+        assert llm_backend._resolve_model("anthropic", env) == "claude-opus-4-7"
+
+    def test_anthropic_unset_falls_back_to_default(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+        }
+        assert llm_backend._resolve_model("anthropic", env) == llm_backend.ANTHROPIC_DEFAULT_MODEL
+
+    def test_anthropic_blank_override_falls_back_to_default(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "GATE_KEEPER_ANTHROPIC_MODEL": "   ",
+        }
+        assert llm_backend._resolve_model("anthropic", env) == llm_backend.ANTHROPIC_DEFAULT_MODEL
+
+    def test_openai_override_takes_precedence(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "gpt-4o",
+        }
+        assert llm_backend._resolve_model("openai", env) == "gpt-4o"
+
+    def test_openai_unset_falls_back_to_default(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+        }
+        assert llm_backend._resolve_model("openai", env) == llm_backend.OPENAI_DEFAULT_MODEL
+
+    def test_openai_blank_override_falls_back_to_default(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "",
+        }
+        assert llm_backend._resolve_model("openai", env) == llm_backend.OPENAI_DEFAULT_MODEL
+
+    def test_unsupported_provider_raises(self):
+        with pytest.raises(ValueError):
+            llm_backend._resolve_model("bedrock", {})
+
+    def test_cross_provider_override_does_not_apply(self):
+        """``GATE_KEEPER_OPENAI_MODEL`` must not influence the anthropic resolution."""
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "GATE_KEEPER_OPENAI_MODEL": "gpt-4o",
+        }
+        assert llm_backend._resolve_model("anthropic", env) == llm_backend.ANTHROPIC_DEFAULT_MODEL
+
+    def test_check_uses_anthropic_override(self, monkeypatch, tmp_path):
+        """check() must pass the override model to the provider helper and record it."""
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "GATE_KEEPER_ANTHROPIC_MODEL": "claude-opus-4-7",
+        }
+        _patch_env(monkeypatch, env)
+        seen: dict[str, str] = {}
+
+        def _capture(_key, _system, _user, model):
+            seen["model"] = model
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _capture)
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert seen["model"] == "claude-opus-4-7"
+        assert diag.evidence[0].data["model"] == "claude-opus-4-7"
+
+    def test_check_uses_openai_override(self, monkeypatch, tmp_path):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "gpt-4o",
+        }
+        _patch_env(monkeypatch, env)
+        seen: dict[str, str] = {}
+
+        def _capture(_key, _system, _user, model):
+            seen["model"] = model
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _capture)
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert seen["model"] == "gpt-4o"
+        assert diag.evidence[0].data["model"] == "gpt-4o"
+
+    def test_check_unknown_override_model_yields_null_cost(self, monkeypatch, tmp_path):
+        """An override model not in ``_MODEL_PRICING`` yields ``cost_estimate_usd: None``."""
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "gpt-future-unknown",
+        }
+        _patch_env(monkeypatch, env)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 100, "tokens_in": 1000, "tokens_out": 200},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        data = diag.evidence[0].data
+        assert data["model"] == "gpt-future-unknown"
+        assert "cost_estimate_usd" in data
+        assert data["cost_estimate_usd"] is None
+
+
+# ---------------------------------------------------------------------------
 # Provider dispatch — Anthropic (#67: updated to structured schema)
 # ---------------------------------------------------------------------------
 

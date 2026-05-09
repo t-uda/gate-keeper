@@ -646,6 +646,9 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
         else:
             print("ANTHROPIC_API_KEY: <unset>")
         configured = bool(key_value)
+        model = llm_rubric._resolve_model("anthropic", env)
+        override = env.get("GATE_KEEPER_ANTHROPIC_MODEL", "").strip()
+        print(f"model:              {model} ({'override' if override else 'default'})")
     elif provider == "openai":
         key_value = env.get("OPENAI_API_KEY")
         if key_value:
@@ -653,6 +656,9 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
         else:
             print("OPENAI_API_KEY: <unset>")
         configured = bool(key_value)
+        model = llm_rubric._resolve_model("openai", env)
+        override = env.get("GATE_KEEPER_OPENAI_MODEL", "").strip()
+        print(f"model:              {model} ({'override' if override else 'default'})")
     else:
         print("api key:            <unsupported provider; no key reported>")
         configured = False
