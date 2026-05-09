@@ -291,9 +291,7 @@ class TestGithubUnavailable:
         monkeypatch.setattr(
             _target,
             "run_gh",
-            _make_run_gh_sequence(
-                [_fail(stderr="gh binary not found", returncode=127, binary_missing=True)]
-            ),
+            _make_run_gh_sequence([_fail(stderr="gh binary not found", returncode=127, binary_missing=True)]),
         )
         rule = _make_rule()
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -312,9 +310,7 @@ class TestGithubUnavailable:
         assert "Repository" in ev.data["errors"][0]
 
     def test_malformed_json_unavailable(self, monkeypatch):
-        bad_json = _gh.GhResult(
-            ok=True, stdout="not valid json {{{", stderr="", returncode=0, cmd=("gh",)
-        )
+        bad_json = _gh.GhResult(ok=True, stdout="not valid json {{{", stderr="", returncode=0, cmd=("gh",))
         _patch_with_pages(monkeypatch, _ok(_RESOLVE_OK), [bad_json])
         rule = _make_rule()
         diag = gh_backend.check(rule, "owner/repo#42")
@@ -403,9 +399,7 @@ class TestPagination:
             captured.append(list(args))
             # First call → has next page, cursor "c1"; second call → end.
             if len(captured) == 1:
-                return _ok(
-                    _files_response(["a.py"], has_next_page=True, end_cursor="cursor-A")
-                )
+                return _ok(_files_response(["a.py"], has_next_page=True, end_cursor="cursor-A"))
             return _ok(_files_response(["b.py"], has_next_page=False, end_cursor=None))
 
         monkeypatch.setattr(_target, "run_gh", _make_run_gh_sequence([_ok(_RESOLVE_OK)]))

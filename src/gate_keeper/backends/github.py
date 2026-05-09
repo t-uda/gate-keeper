@@ -861,9 +861,7 @@ _CHANGED_FILES_QUERY = (
 )
 
 
-def _fetch_changed_files(
-    pr: PrTarget, rule: Rule
-) -> tuple[list[str] | None, int | None, Diagnostic | None]:
+def _fetch_changed_files(pr: PrTarget, rule: Rule) -> tuple[list[str] | None, int | None, Diagnostic | None]:
     """Fetch the *complete* list of changed file paths for *pr*.
 
     Returns ``(filenames, page_count, None)`` on success.
@@ -997,18 +995,14 @@ def _fetch_changed_files(
                 return (
                     None,
                     None,
-                    gh_missing_field_diag(
-                        rule, "graphql", "data.repository.pullRequest.files.nodes[].path"
-                    ),
+                    gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files.nodes[].path"),
                 )
             path = node.get("path")
             if not isinstance(path, str) or not path:
                 return (
                     None,
                     None,
-                    gh_missing_field_diag(
-                        rule, "graphql", "data.repository.pullRequest.files.nodes[].path"
-                    ),
+                    gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files.nodes[].path"),
                 )
             filenames.append(path)
 
@@ -1126,12 +1120,7 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
                     i += 3
                     continue
                 # ``/**/`` between segments → optional zero-or-more directories.
-                if (
-                    out
-                    and out[-1] == "/"
-                    and i + 2 < n
-                    and pattern[i + 2] == "/"
-                ):
+                if out and out[-1] == "/" and i + 2 < n and pattern[i + 2] == "/":
                     out.pop()  # remove the preceding ``/``
                     out.append("(?:/.*)?/")
                     i += 3

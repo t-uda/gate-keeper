@@ -175,7 +175,7 @@ Missing or malformed `patterns` (or non-bool `case_sensitive`) produces
 | `**`  | zero or more path segments (matches across `/`) |
 | `*`   | any sequence of characters except `/` |
 | `?`   | exactly one character except `/` |
-| literal | matched verbatim (regex metacharacters are escaped) |
+| literal | matched verbatim (regular expression metacharacters are escaped) |
 
 `**/*.xlsx` matches both `data.xlsx` and `deep/nested/data.xlsx`.
 `src/*.py` matches `src/a.py` but **not** `src/sub/b.py`.
