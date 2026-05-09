@@ -182,7 +182,7 @@ gate-keeper validate [--rules-format {markdown,ir}]
                      [--backend {auto,filesystem,github,llm-rubric,external}]
                      [--format {text,json}] [--verbose]
                      [--reproducibility N]
-                     --target <TARGET>
+                     --target <TARGET> [--target <TARGET> ...]
                      (<rules> | --include GLOB [--include GLOB ...])
 ```
 
@@ -195,7 +195,7 @@ Provide either a single positional `rules` document **or** one or more
 |---|---|---|---|
 | `rules` | positional | — | Path to a Markdown rule document, or to a precompiled Rule IR JSON file when `--rules-format ir` is given. Omit when using `--include`. |
 | `--include GLOB` | option (repeatable) | — | Compose a policy bundle from every Markdown document matching `GLOB`. May be passed multiple times. Mutually exclusive with the positional `rules`. Not compatible with `--rules-format ir`. |
-| `--target TARGET` | option | **required** | Artifact or PR to validate. Pass a local path for filesystem rules; a GitHub PR URL or `owner/repo#N` for GitHub rules. |
+| `--target TARGET` | option (repeatable) | **required** | Artifact or PR to validate. May be specified multiple times for filesystem multi-target evaluation (see [Multi-target evaluation](#multi-target-evaluation)). Each value is a local path, directory, quoted glob, GitHub PR URL, or `owner/repo#N` shorthand. |
 | `--rules-format {markdown,ir}` | option | `markdown` | How to interpret `rules`. `markdown` (default) parses and classifies a Markdown rule document — the historical behaviour. `ir` loads a precompiled `RuleSet` JSON file (the same shape `compile` emits) using the strict IR parser and **bypasses the classifier**, so hand-authored `kind`, `backend_hint`, and `params` fields reach the validator unchanged. |
 | `--backend {auto,filesystem,github,llm-rubric,external}` | option | `auto` | Validation backend. `auto` delegates each rule to the backend the classifier (or the IR file) selected. |
 | `--format {text,json}` | option | `text` | Output format. |
@@ -338,6 +338,58 @@ Each line: `path:line: severity: [backend/status] rule_id: message [evidence]`.
   generated workbook outputs"*) to this kind; ambiguous filesystem rules
   remain on the filesystem or semantic backends. See
   [docs/rule-ir.md](rule-ir.md) for the full params and evidence shape.
+
+### Multi-target evaluation
+
+`--target` accepts multiple occurrences for filesystem rules; the resolved
+file set is deduplicated, sorted lexicographically, and evaluated as a single
+aggregated diagnostic per rule.
+
+| Form | Example | Behaviour |
+|---|---|---|
+| Single file | `--target README.md` | Unchanged from earlier releases — the path is forwarded verbatim. |
+| Repeated flag | `--target a.md --target b.md` | Both files are evaluated; one diagnostic per rule. |
+| Directory | `--target docs/` | Recursively walks the directory; only text-readable files are included. |
+| Quoted glob | `--target 'docs/**/*.md'` | Expanded by the CLI with `recursive=True`; matched directories are walked. Quote the pattern to bypass shell expansion when desired. |
+
+```sh
+# All three filesystem rules, evaluated against every text-readable file
+# under docs/:
+uv run gate-keeper validate rules.md --target docs/ --format json
+
+# Two specific files:
+uv run gate-keeper validate rules.md \
+    --target README.md --target docs/cli-reference.md
+
+# Recursive Markdown glob:
+uv run gate-keeper validate rules.md --target 'docs/**/*.md'
+```
+
+**Aggregation rules** (filesystem backend):
+
+- `pass` only when every resolved file passes.
+- `fail` when at least one file fails; the diagnostic message names the
+  first few failing paths and the `multi_target_summary` evidence record
+  carries `pass_count` / `fail_count` / `file_count`.
+- `unavailable` when the resolved file set is empty (fail-closed) or when
+  any per-file evaluation surfaces `unavailable` / `unsupported` / `error`.
+- Per-file outcomes appear as `Evidence(kind="file_result", ...)` items,
+  capped at 50; the `multi_target_summary` record reports
+  `evidence_truncated` when the cap clips the list.
+
+**File-count cap.** Expansion is bounded at **200 files** by default. When a
+directory or glob expands to more than the cap, the CLI exits with
+`EXIT_USAGE` (`2`) and prints `error: --target: target expansion produced N
+files; exceeds limit of 200.` Narrow the target or split the run.
+
+**Non-filesystem backends.** GitHub, LLM-rubric, and external backends do
+*not* support multi-target invocation in this slice. They fail closed with
+`unsupported` and a `multi_target_unsupported` evidence record listing the
+raw targets and the resolved file count, rather than silently using only one
+of the resolved paths.
+
+See [docs/design/multi-target.md](design/multi-target.md) for the design
+background; this section documents the first implemented slice.
 
 ---
 

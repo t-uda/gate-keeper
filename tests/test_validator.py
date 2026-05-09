@@ -221,3 +221,58 @@ class TestReturnContract:
         report = validate(_make_ruleset(r1, r2), tmp_path)
         ids = [d.rule_id for d in report.diagnostics]
         assert ids == ["alpha", "beta"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-target target argument (issue #146)
+# ---------------------------------------------------------------------------
+
+
+class TestTargetSpecArgument:
+    """``validate`` accepts a ``TargetSpec`` and forwards it to the backend."""
+
+    def test_targetspec_forwarded_to_filesystem_backend(self, tmp_path):
+        from gate_keeper.targets import TargetSpec
+
+        a = tmp_path / "a.txt"
+        a.write_text("x\n")
+        b = tmp_path / "b.txt"
+        b.write_text("x\n")
+        spec = TargetSpec(
+            paths=sorted([a, b], key=str),
+            raw_targets=[str(a), str(b)],
+            is_multi=True,
+        )
+        rule = _rule(kind=RuleKind.FILE_EXISTS, backend_hint=Backend.FILESYSTEM)
+        report = validate(_make_ruleset(rule), spec, backend="filesystem")
+        diag = report.diagnostics[0]
+        assert diag.status is Status.PASS
+        assert any(e.kind == "multi_target_summary" for e in diag.evidence)
+
+    def test_targetspec_forwarded_to_github_backend_unsupported(self, tmp_path):
+        from gate_keeper.targets import TargetSpec
+
+        spec = TargetSpec(
+            paths=[tmp_path / "a.txt"],
+            raw_targets=[str(tmp_path / "a.txt"), str(tmp_path / "b.txt")],
+            is_multi=True,
+        )
+        rule = _rule(kind=RuleKind.GITHUB_PR_OPEN, backend_hint=Backend.GITHUB)
+        report = validate(_make_ruleset(rule), spec, backend="github")
+        diag = report.diagnostics[0]
+        assert diag.status is Status.UNSUPPORTED
+        assert any(e.kind == "multi_target_unsupported" for e in diag.evidence)
+
+    def test_targetspec_forwarded_to_llm_rubric_backend_unsupported(self, tmp_path):
+        from gate_keeper.targets import TargetSpec
+
+        spec = TargetSpec(
+            paths=[tmp_path / "a.txt"],
+            raw_targets=[str(tmp_path / "a.txt"), str(tmp_path / "b.txt")],
+            is_multi=True,
+        )
+        rule = _rule(kind=RuleKind.SEMANTIC_RUBRIC, backend_hint=Backend.LLM_RUBRIC)
+        report = validate(_make_ruleset(rule), spec, backend="llm-rubric")
+        diag = report.diagnostics[0]
+        assert diag.status is Status.UNSUPPORTED
+        assert any(e.kind == "multi_target_unsupported" for e in diag.evidence)

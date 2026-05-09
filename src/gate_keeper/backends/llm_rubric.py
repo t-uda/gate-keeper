@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
+from gate_keeper.targets import TargetSpec
 
 name = "llm-rubric"
 
@@ -501,7 +502,7 @@ def _unavailable_provider_error(
 # ---------------------------------------------------------------------------
 
 
-def check(rule: Rule, target: str | Path) -> Diagnostic:
+def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     """Evaluate a semantic-rubric rule against *target*.
 
     When no provider is configured (or the env file is absent), returns
@@ -511,6 +512,14 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     ``LlmJudgment``). Provider errors and unparseable responses map to
     ``UNAVAILABLE`` with ``provider_error`` evidence — never to a crash,
     ``pass``, or ``fail``.
+
+    Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
+    supported by this backend in the first slice (issue #146); the call
+    returns ``UNSUPPORTED`` with a ``multi_target_unsupported`` evidence
+    record so callers can see that targets were silently dropped is *not*
+    happening — content assembly is deferred to a follow-up. Single-file
+    ``TargetSpec`` values are unwrapped to the underlying path so callers
+    can mix CLI surfaces freely.
 
     On success the ``evidence[0].data`` dict contains:
 
@@ -529,6 +538,33 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
 
     ``Diagnostic.remediation`` is set to ``suggested_action`` on fail.
     """
+    if isinstance(target, TargetSpec):
+        if target.is_multi:
+            return Diagnostic(
+                rule_id=rule.id,
+                source=rule.source,
+                backend=Backend.LLM_RUBRIC,
+                status=Status.UNSUPPORTED,
+                severity=rule.severity,
+                message=(
+                    "llm-rubric backend does not support multi-target evaluation; "
+                    "content assembly is deferred to a follow-up."
+                ),
+                evidence=[
+                    Evidence(
+                        kind="multi_target_unsupported",
+                        data={
+                            "backend": "llm-rubric",
+                            "raw_targets": list(target.raw_targets),
+                            "file_count": len(target.paths),
+                        },
+                    )
+                ],
+            )
+        # Single-file spec: unwrap so the rest of the function operates on
+        # the underlying path exactly as it did before #146.
+        target = target.paths[0] if target.paths else ""
+
     rubric_input = _build_rubric_input(rule, target)
 
     if not _is_configured():

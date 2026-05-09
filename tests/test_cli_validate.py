@@ -282,7 +282,14 @@ class TestExampleRulesSmoke:
             assert "evidence" in diag
 
     def test_example_rules_has_github_unavailable_diagnostics(self, capsys):
-        """GitHub rules in example-rules.md produce UNAVAILABLE (fail-closed)."""
+        """GitHub rules in example-rules.md produce a fail-closed status.
+
+        With ``--target <dir>`` the CLI builds a multi-target ``TargetSpec``;
+        the github backend rejects multi-target with ``unsupported`` (issue
+        #146). Either ``unavailable`` (legacy single-target rejection) or
+        ``unsupported`` (new multi-target rejection) is fail-closed and
+        acceptable.
+        """
         main(
             [
                 "validate",
@@ -298,8 +305,7 @@ class TestExampleRulesSmoke:
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         statuses = {d["status"] for d in data["diagnostics"]}
-        # github stubs return unavailable → fail-closed
-        assert "unavailable" in statuses
+        assert {"unavailable", "unsupported"} & statuses
 
 
 # ---------------------------------------------------------------------------
@@ -930,3 +936,334 @@ class TestRulesFormatIR:
                 ]
             )
         assert exc_info.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Multi-target evaluation (issue #146)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiTarget:
+    """``--target`` accepts multiple paths, directories, and globs."""
+
+    def _write_rules(self, tmp_path):
+        """Return a minimal rules doc that produces one ``file_exists`` rule.
+
+        ``file_exists`` is the simplest classifier-friendly kind that needs no
+        params; aggregated multi-target dispatch can therefore be exercised
+        purely from the CLI without hand-built IR.
+        """
+        rules = tmp_path / "rules.md"
+        rules.write_text(
+            "# Rules\n\n## Required Files\n\n- `README.md` must exist.\n",
+            encoding="utf-8",
+        )
+        return rules
+
+    def test_repeated_target_flags_aggregate(self, tmp_path, capsys):
+        # Use a ``file_exists`` rule because it requires no params and
+        # exercises per-file dispatch directly (each target path is the
+        # ``file_exists`` argument).
+        rules = self._write_rules(tmp_path)
+        a = tmp_path / "a.txt"
+        a.write_text("hello\n")
+        b = tmp_path / "b.txt"
+        b.write_text("hello\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(a),
+                "--target",
+                str(b),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Exactly one diagnostic per rule, regardless of file count.
+        assert len(data["diagnostics"]) == 1
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "pass"
+        summary = next(e for e in diag["evidence"] if e["kind"] == "multi_target_summary")
+        assert summary["data"]["file_count"] == 2
+
+    def test_directory_target_aggregates(self, tmp_path, capsys):
+        rules = self._write_rules(tmp_path)
+        target_dir = tmp_path / "files"
+        target_dir.mkdir()
+        (target_dir / "a.md").write_text("hello\n")
+        (target_dir / "b.md").write_text("hello\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(target_dir),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "pass"
+
+    def test_glob_target_expands(self, tmp_path, capsys):
+        rules = self._write_rules(tmp_path)
+        target_dir = tmp_path / "files"
+        target_dir.mkdir()
+        (target_dir / "a.md").write_text("hello\n")
+        (target_dir / "b.md").write_text("hello\n")
+        (target_dir / "skip.txt").write_text("skip\n")
+        glob_pattern = str(target_dir / "*.md")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                glob_pattern,
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        summary = next(e for e in diag["evidence"] if e["kind"] == "multi_target_summary")
+        assert summary["data"]["file_count"] == 2
+
+    def test_repeated_target_with_missing_path_fails(self, tmp_path, capsys):
+        # Mixed pass/fail: one existing target + one nonexistent target
+        # → aggregated FAIL (any per-file FAIL → overall FAIL).
+        rules = self._write_rules(tmp_path)
+        a = tmp_path / "a.txt"
+        a.write_text("hello\n")
+        ghost = tmp_path / "ghost.txt"
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(a),
+                "--target",
+                str(ghost),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "fail"
+        summary = next(e for e in diag["evidence"] if e["kind"] == "multi_target_summary")
+        assert summary["data"]["fail_count"] == 1
+        assert summary["data"]["pass_count"] == 1
+
+    def test_empty_glob_fails_closed(self, tmp_path, capsys):
+        rules = self._write_rules(tmp_path)
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(tmp_path / "no_match_*.zzz"),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        # Empty file set → UNAVAILABLE → fail-closed exit code.
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unavailable"
+
+    def test_over_cap_emits_usage_error(self, tmp_path, capsys, monkeypatch):
+        rules = self._write_rules(tmp_path)
+        # Lower the cap via monkeypatch on the module-level constant; the CLI
+        # reads the constant on every call so this is sufficient.
+        monkeypatch.setattr("gate_keeper.targets.DEFAULT_FILE_LIMIT", 2)
+        for i in range(5):
+            (tmp_path / f"f{i}.md").write_text("hello\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(tmp_path),
+                "--backend",
+                "filesystem",
+            ]
+        )
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "exceeds limit" in captured.err
+
+    def test_repeated_targets_dispatched_to_non_filesystem_backend_fails_closed(
+        self, tmp_path, capsys
+    ):
+        # Force --backend external. Two targets → multi-target → external
+        # dispatcher must reject (UNSUPPORTED), not silently use one path.
+        rules = self._write_rules(tmp_path)
+        a = tmp_path / "a.txt"
+        a.write_text("uv\n")
+        b = tmp_path / "b.txt"
+        b.write_text("uv\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(a),
+                "--target",
+                str(b),
+                "--backend",
+                "external",
+                "--format",
+                "json",
+            ]
+        )
+        # Exit code is FAIL because UNSUPPORTED is non-pass.
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unsupported"
+        ev_kinds = {e["kind"] for e in diag["evidence"]}
+        assert "multi_target_unsupported" in ev_kinds
+
+    def test_single_file_target_unchanged(self, tmp_path, capsys):
+        # The sole-target compatibility path: passes the raw string straight
+        # through. We sanity-check by inspecting that no multi_target_summary
+        # evidence is emitted (legacy single-file evidence kind preserved).
+        rules = self._write_rules(tmp_path)
+        f = tmp_path / "single.md"
+        f.write_text("hello\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(f),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        ev_kinds = {e["kind"] for e in diag["evidence"]}
+        assert "multi_target_summary" not in ev_kinds
+        # Legacy single-file evidence kind preserved (file_exists rule).
+        assert "file_stat" in ev_kinds
+
+    def test_determinism_across_path_orderings(self, tmp_path, capsys):
+        rules = self._write_rules(tmp_path)
+        a = tmp_path / "a.txt"
+        a.write_text("hello\n")
+        b = tmp_path / "b.txt"
+        b.write_text("hello\n")
+        c = tmp_path / "c.txt"
+        c.write_text("hello\n")
+
+        def _run(order):
+            argv = ["validate", str(rules)]
+            for p in order:
+                argv.extend(["--target", str(p)])
+            argv.extend(["--backend", "filesystem", "--format", "json"])
+            main(argv)
+            captured = capsys.readouterr()
+            return json.loads(captured.out)
+
+        def _strip_volatile(report):
+            # Drop ``raw_targets`` from each summary because it intentionally
+            # preserves caller-supplied order; compare everything else.
+            for diag in report["diagnostics"]:
+                for ev in diag["evidence"]:
+                    if ev["kind"] == "multi_target_summary":
+                        ev["data"].pop("raw_targets", None)
+            return report
+
+        first = _strip_volatile(_run([a, b, c]))
+        second = _strip_volatile(_run([c, b, a]))
+        third = _strip_volatile(_run([b, a, c]))
+        # Aggregate diagnostic content (per-file evidence + statuses) is
+        # order-independent: paths are sorted lexicographically before
+        # evaluation.
+        assert first == second == third
+
+    def test_repeated_target_with_github_backend_unsupported(self, tmp_path, capsys):
+        # github backend cannot accept multi-target — fail closed.
+        rules = self._write_rules(tmp_path)
+        a = tmp_path / "a.txt"
+        a.write_text("uv\n")
+        b = tmp_path / "b.txt"
+        b.write_text("uv\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(a),
+                "--target",
+                str(b),
+                "--backend",
+                "github",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unsupported"
+        assert any(e["kind"] == "multi_target_unsupported" for e in diag["evidence"])
+
+    def test_repeated_target_with_llm_rubric_backend_unsupported(self, tmp_path, capsys):
+        # llm-rubric backend rejects multi-target in this slice.
+        rules = self._write_rules(tmp_path)
+        a = tmp_path / "a.txt"
+        a.write_text("uv\n")
+        b = tmp_path / "b.txt"
+        b.write_text("uv\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(a),
+                "--target",
+                str(b),
+                "--backend",
+                "llm-rubric",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unsupported"
+        assert any(e["kind"] == "multi_target_unsupported" for e in diag["evidence"])
