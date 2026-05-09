@@ -178,7 +178,7 @@ context passed to the model:
 
 ### Structured judgment schema (`LlmJudgment`)
 
-The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v2"`)
+The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v4"`)
 to respond with a JSON object matching the `LlmJudgment` dataclass:
 
 ```json
@@ -423,30 +423,64 @@ uv run gate-keeper bench tests/fixtures/semantic/entries/ \
   > tests/fixtures/semantic/baseline.json
 ```
 
-Measured results at prompt version `v2` (model `gpt-4o-mini`; for cost per
+Measured results at prompt version `v4` (model `gpt-4o-mini`; for cost per
 token see the pricing snapshot table in the "Per-rule observability fields"
 section above):
 
 | Metric | Value |
 | --- | --- |
-| Entries | 25 |
-| Correct | 17 |
-| Accuracy | 68.0% |
-| Reproducibility (avg) | 98.7% |
+| Entries | 28 |
+| Correct | 16 |
+| Accuracy | 57.1% |
+| Reproducibility (avg) | 100.0% |
 | Reproducibility N | 3 |
-| Tokens in | 59,313 |
-| Tokens out | 6,715 |
-| Latency (total) | 179,241 ms |
+| Tokens in | 65,288 |
+| Tokens out | 6,289 |
+| Latency (total) | 112,186 ms |
 | Model | `gpt-4o-mini` |
-| Prompt version | `v2` |
+| Prompt version | `v4` |
 
-Reference history (prompt version `v1`, 24 entries): 19 correct / 79.2%
-accuracy / 31,080 tokens in. The v1 → v2 transition added one fixture
-(`justification-06-commit-message-rationale-past-opening`, the L25
-first-line-quote bias case from issue #168) and tightened
-`supporting_evidence_quotes` constraints; see PR #168's "Prompt
-regression analysis" / "Prompt regression justification" sections for
-the full delta and the regression-justification record.
+Reference history:
+
+- v1 (24 entries): 19 correct / 79.2% accuracy / 31,080 tokens in.
+- v2 (25 entries): 17 correct / 68.0%. The v1 → v2 transition added
+  `justification-06-commit-message-rationale-past-opening` (L25
+  first-line-quote bias from #168) and tightened
+  `supporting_evidence_quotes` constraints; see PR #168.
+- v3 (26 entries): 14 correct / 53.8%. The v2 → v3 transition added the
+  optional `target_kind` annotation, the artifact-kind prompt block, and
+  the `target-kind-mismatch-01` fixture; see PR #174 / #169.
+- v4 (28 entries): 16 correct / 57.1%. The v3 → v4 transition (#175)
+  rewrites the artifact-kind block to name the rule's annotated
+  `target_kind` value, replaces the canned ``unsupported`` example with
+  kind-neutral placeholders, and **gates the unsupported-example block
+  and the artifact-kind dispatch instruction on annotation** so an
+  unannotated rule never sees the lure of an `"unsupported"` schema
+  option. (Pre-gating, an unannotated rule like
+  `completeness-05-rule-doc-has-target-cue` would emit a stray
+  `"unsupported"` verdict that the backend then degrades to
+  `provider_error / unsupported_without_target_kind` — surfaced by
+  Copilot review on PR #176.) v4 also adds two regression fixtures
+  (`target-kind-mismatch-02-commit-rule-on-pr` and
+  `target-kind-mismatch-03-commit-rule-on-commit-no-mismatch`) so the
+  corpus exercises both directions of the dispatch and the positive
+  grounding case. The qualitative win — primary_reason now grounds the
+  rule's annotated kind verbatim ("The rule is annotated
+  `commit_message` but the artifact provided is a pull request
+  description.") — is the observable goal.
+
+### Per-model dispatch accuracy (#175)
+
+The v4 prompt fixes the verbatim-parroting bug at the prompt-template
+level, but `gpt-4o-mini` still misjudges the **artifact kind** itself in
+some cases — for example, treating a short commit message as a "PR
+description" so the artifact-kind dispatch never fires. This is a
+model-capability limitation, not a prompt bug. When dispatch accuracy
+matters (e.g. for advisory dogfood gates that route per `target_kind`),
+prefer a stronger model via the `GATE_KEEPER_OPENAI_MODEL` /
+`GATE_KEEPER_ANTHROPIC_MODEL` dotenv override; gpt-4o-mini is appropriate
+for the per-PR cost target but not for high-confidence artifact-kind
+dispatch.
 
 ### Regression tolerance and justification template
 
