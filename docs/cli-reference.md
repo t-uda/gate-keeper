@@ -18,7 +18,7 @@ Subcommands: [`compile`](#compile), [`explain`](#explain),
 |------|----------|---------|
 | `0`  | `EXIT_OK`   | All rules passed (or `bench` ran without a usage error). |
 | `1`  | `EXIT_FAIL` | One or more rules produced a non-passing status (`fail`, `unavailable`, `unsupported`, or `error`). |
-| `2`  | `EXIT_USAGE` | Bad arguments, unreadable input file, or other usage error. |
+| `2`  | `EXIT_USAGE` | Bad arguments, unreadable input file, an unmatched `--include` glob, or a duplicate rule id across composed documents. |
 
 Defined in `src/gate_keeper/diagnostics.py`.
 
@@ -30,26 +30,59 @@ accuracy is observational and does not constitute a CLI-level failure. It exits
 
 ## compile
 
-Extract rules from a Markdown rule document and emit them as the rule IR (JSON).
+Extract rules from one or more Markdown rule documents and emit them as the
+rule IR (JSON).
 
 ### Synopsis
 
 ```
-gate-keeper compile [--format {json}] <document>
+gate-keeper compile [--format {json}] (<document> | --include GLOB [--include GLOB ...])
 ```
+
+Provide either a single positional `document` **or** one or more `--include`
+globs — not both.
 
 ### Arguments and options
 
 | Argument / option | Type | Default | Description |
 |---|---|---|---|
-| `document` | positional | — | Path to a Markdown rule document. |
+| `document` | positional | — | Path to a single Markdown rule document. Omit when using `--include`. |
+| `--include GLOB` | option (repeatable) | — | Compose a policy bundle from every Markdown document matching `GLOB`. May be passed multiple times to combine multiple glob patterns. Mutually exclusive with the positional `document`. |
 | `--format {json}` | option | `json` | Output format. Only `json` is supported. |
 | `-h, --help` | flag | — | Show help and exit. |
+
+### `--include` semantics
+
+- Each `--include` glob is expanded with Python's `glob.glob(..., recursive=True)`,
+  so `**` matches across directory boundaries when used.
+- The combined set of matched paths is **sorted lexicographically** before
+  parsing. Iteration order is therefore deterministic across platforms and
+  independent of the order in which `--include` flags appear on the command
+  line.
+- Each matched document is parsed with its own source path, then all rules
+  are merged into a single RuleSet. Per-rule `source.path` and `source.line`
+  point back to the originating document.
+- If any `--include` glob matches no files, the command exits `2` and prints
+  the unmatched pattern.
+- Rule ids must be unique across the composed RuleSet. If two documents
+  produce the same rule id (the default scheme is `rule-<stem>-L<line>`,
+  so two files with the same stem and a rule on the same line collide),
+  the command exits `2` and reports both source path/line locations. Rule
+  ids are never silently renamed.
 
 ### Sample invocation
 
 ```sh
+# single document (positional)
 uv run gate-keeper compile docs/dogfooding-rules.md
+
+# policy bundle composed from one glob
+uv run gate-keeper compile --include 'rules/gatekeeper/*.md'
+
+# policy bundle composed from multiple globs
+uv run gate-keeper compile \
+    --include 'rules/repo-structure/*.md' \
+    --include 'rules/pr-governance/*.md'
 ```
 
 ### Sample output
@@ -139,8 +172,8 @@ Each block contains:
 
 ## validate
 
-Validate an artifact (local directory, file, or GitHub PR) against a rule
-document and report pass/fail with evidence.
+Validate an artifact (local directory, file, or GitHub PR) against one or more
+Markdown rule documents and report pass/fail with evidence.
 
 ### Synopsis
 
@@ -149,14 +182,19 @@ gate-keeper validate [--rules-format {markdown,ir}]
                      [--backend {auto,filesystem,github,llm-rubric,external}]
                      [--format {text,json}] [--verbose]
                      [--reproducibility N]
-                     --target <TARGET> <rules>
+                     --target <TARGET>
+                     (<rules> | --include GLOB [--include GLOB ...])
 ```
+
+Provide either a single positional `rules` document **or** one or more
+`--include` globs — not both.
 
 ### Arguments and options
 
 | Argument / option | Type | Default | Description |
 |---|---|---|---|
-| `rules` | positional | — | Path to a Markdown rule document, or to a precompiled Rule IR JSON file when `--rules-format ir` is given. |
+| `rules` | positional | — | Path to a Markdown rule document, or to a precompiled Rule IR JSON file when `--rules-format ir` is given. Omit when using `--include`. |
+| `--include GLOB` | option (repeatable) | — | Compose a policy bundle from every Markdown document matching `GLOB`. May be passed multiple times. Mutually exclusive with the positional `rules`. Not compatible with `--rules-format ir`. |
 | `--target TARGET` | option | **required** | Artifact or PR to validate. Pass a local path for filesystem rules; a GitHub PR URL or `owner/repo#N` for GitHub rules. |
 | `--rules-format {markdown,ir}` | option | `markdown` | How to interpret `rules`. `markdown` (default) parses and classifies a Markdown rule document — the historical behaviour. `ir` loads a precompiled `RuleSet` JSON file (the same shape `compile` emits) using the strict IR parser and **bypasses the classifier**, so hand-authored `kind`, `backend_hint`, and `params` fields reach the validator unchanged. |
 | `--backend {auto,filesystem,github,llm-rubric,external}` | option | `auto` | Validation backend. `auto` delegates each rule to the backend the classifier (or the IR file) selected. |
@@ -178,6 +216,14 @@ gate-keeper validate [--rules-format {markdown,ir}]
 The default Markdown path remains the right choice when authoring rules from
 natural-language documents — the classifier turns prose into routed rules.
 
+### `--include` semantics
+
+`--include` follows the same semantics as in [`compile`](#compile): globs are
+expanded with `glob.glob(..., recursive=True)`, the matched paths are sorted
+lexicographically before parsing, an unmatched glob exits `2`, and duplicate
+rule IDs across documents exit `2` with both source locations reported.
+`--include` is Markdown-only and not compatible with `--rules-format ir`.
+
 ### Sample invocation
 
 ```sh
@@ -190,6 +236,9 @@ uv run gate-keeper validate --rules-format ir rules.json --target .
 
 # JSON output
 uv run gate-keeper validate docs/dogfooding-rules.md --target . --format json
+
+# Validate against a policy bundle composed from a glob
+uv run gate-keeper validate --include 'rules/gatekeeper/*.md' --target .
 
 # With verbose LLM rationale
 uv run gate-keeper validate docs/dogfooding-rules.md --target . --verbose
