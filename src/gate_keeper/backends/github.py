@@ -45,6 +45,7 @@ from gate_keeper.backends._target import (  # noqa: F401  (re-export)
     resolve_target,
 )
 from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, RuleKind, Status
+from gate_keeper.targets import TargetSpec
 
 name = "github"
 
@@ -1259,7 +1260,7 @@ _DIRECT_HANDLERS = {
 # ---------------------------------------------------------------------------
 
 
-def check(rule: Rule, target: str | Path) -> Diagnostic:
+def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     """Resolve the target, then dispatch by rule kind.
 
     Resolution failures (bad target, missing gh, auth error, PR not found)
@@ -1268,7 +1269,36 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
     - Six rule kinds share a single ``gh pr view`` call (_PR_VIEW_HANDLERS).
     - ``github_threads_resolved`` makes its own GraphQL call (_DIRECT_HANDLERS).
     - Unrecognised kinds receive a defensive UNAVAILABLE fall-through.
+
+    Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
+    supported by the GitHub backend; this backend operates on a single PR
+    reference at a time. Such calls fail closed with ``UNSUPPORTED`` and a
+    ``multi_target_unsupported`` evidence record (issue #146).
     """
+    if isinstance(target, TargetSpec):
+        if target.is_multi:
+            return Diagnostic(
+                rule_id=rule.id,
+                source=rule.source,
+                backend=Backend.GITHUB,
+                status=Status.UNSUPPORTED,
+                severity=rule.severity,
+                message=(
+                    "github backend does not support multi-target evaluation; "
+                    "pass a single PR URL or owner/repo#number reference."
+                ),
+                evidence=[
+                    Evidence(
+                        kind="multi_target_unsupported",
+                        data={
+                            "backend": "github",
+                            "raw_targets": list(target.raw_targets),
+                            "file_count": len(target.paths),
+                        },
+                    )
+                ],
+            )
+        target = target.paths[0] if target.paths else ""
     target_str = str(target)
     pr, diag = resolve_target(rule, target_str)
     if diag is not None:

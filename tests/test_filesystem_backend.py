@@ -14,6 +14,7 @@ from gate_keeper.models import (
     SourceLocation,
     Status,
 )
+from gate_keeper.targets import TargetSpec, resolve_targets
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "filesystem"
 
@@ -545,3 +546,141 @@ class TestDiagnosticContract:
 
     def test_unsupported(self):
         self._assert_valid(check(_rule(RuleKind.GITHUB_PR_OPEN), _FIXTURES / "content.txt"))
+
+
+# ---------------------------------------------------------------------------
+# Multi-target aggregation (issue #146)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiTarget:
+    """Filesystem backend aggregates per-file results into one Diagnostic."""
+
+    def test_single_file_targetspec_preserves_behaviour(self, tmp_path):
+        # is_multi=False with a single resolved path → identical to legacy
+        # single-target call.
+        f = tmp_path / "a.txt"
+        f.write_text("uv\n")
+        spec = TargetSpec(paths=[f], raw_targets=[str(f)], is_multi=False)
+        diag_multi = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        diag_single = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), f)
+        assert diag_multi.status is Status.PASS
+        assert diag_single.status is Status.PASS
+        # Single-path TargetSpec must round-trip through the legacy path —
+        # diagnostics should be byte-identical (same evidence schema).
+        assert [e.kind for e in diag_multi.evidence] == [e.kind for e in diag_single.evidence]
+
+    def test_pass_when_all_files_pass(self, tmp_path):
+        a = tmp_path / "a.txt"
+        a.write_text("uv\n")
+        b = tmp_path / "b.txt"
+        b.write_text("uv elsewhere\n")
+        spec = resolve_targets([str(a), str(b)])
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        assert diag.status is Status.PASS
+        summary = next(e for e in diag.evidence if e.kind == "multi_target_summary")
+        assert summary.data["file_count"] == 2
+        assert summary.data["pass_count"] == 2
+        assert summary.data["fail_count"] == 0
+
+    def test_fail_when_any_file_fails(self, tmp_path):
+        a = tmp_path / "a.txt"
+        a.write_text("uv\n")
+        b = tmp_path / "b.txt"
+        b.write_text("nothing here\n")
+        spec = resolve_targets([str(a), str(b)])
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        assert diag.status is Status.FAIL
+        summary = next(e for e in diag.evidence if e.kind == "multi_target_summary")
+        assert summary.data["fail_count"] == 1
+        assert summary.data["pass_count"] == 1
+        # Per-file evidence records present.
+        file_results = [e for e in diag.evidence if e.kind == "file_result"]
+        statuses = {e.data["status"] for e in file_results}
+        assert statuses == {"pass", "fail"}
+        # Failing path appears in the diagnostic message for quick scanning.
+        assert "b.txt" in diag.message
+
+    def test_unavailable_when_any_file_unavailable(self, tmp_path):
+        # text_required on a binary file → UNAVAILABLE per-file → aggregated
+        # UNAVAILABLE (fail-closed for evaluator-state failures).
+        good = tmp_path / "a.txt"
+        good.write_text("uv\n")
+        bad = tmp_path / "b.txt"
+        bad.write_bytes(b"\xff\xfe binary \x00")
+        # ``resolve_targets`` filters binaries during directory expansion;
+        # construct the spec explicitly so the backend has to handle a binary
+        # entry that snuck in via a literal --target.
+        spec_explicit = TargetSpec(
+            paths=sorted([good, bad], key=str),
+            raw_targets=[str(good), str(bad)],
+            is_multi=True,
+        )
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec_explicit)
+        assert diag.status is Status.UNAVAILABLE
+        summary = next(e for e in diag.evidence if e.kind == "multi_target_summary")
+        assert summary.data["unavailable_count"] >= 1
+
+    def test_unavailable_when_file_set_empty(self, tmp_path):
+        # Empty multi-target spec → UNAVAILABLE (fail-closed).
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        spec = resolve_targets([str(empty)])
+        assert spec.paths == []
+        diag = check(_rule(RuleKind.FILE_EXISTS), spec)
+        assert diag.status is Status.UNAVAILABLE
+        # Summary still emitted (file_count=0).
+        summary = next(e for e in diag.evidence if e.kind == "multi_target_summary")
+        assert summary.data["file_count"] == 0
+
+    def test_unsupported_kind_short_circuits(self, tmp_path):
+        a = tmp_path / "a.txt"
+        a.write_text("hi\n")
+        b = tmp_path / "b.txt"
+        b.write_text("hi\n")
+        spec = resolve_targets([str(a), str(b)])
+        diag = check(_rule(RuleKind.GITHUB_PR_OPEN), spec)
+        assert diag.status is Status.UNSUPPORTED
+
+    def test_directory_target_aggregates(self, tmp_path):
+        (tmp_path / "a.md").write_text("uv\n")
+        (tmp_path / "b.md").write_text("uv\n")
+        spec = resolve_targets([str(tmp_path)])
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        assert diag.status is Status.PASS
+
+    def test_glob_target_aggregates(self, tmp_path):
+        (tmp_path / "a.md").write_text("uv\n")
+        (tmp_path / "b.md").write_text("uv\n")
+        (tmp_path / "skip.txt").write_text("nothing\n")
+        spec = resolve_targets([str(tmp_path / "*.md")])
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        assert diag.status is Status.PASS
+        summary = next(e for e in diag.evidence if e.kind == "multi_target_summary")
+        assert summary.data["file_count"] == 2
+
+    def test_diagnostic_round_trips(self, tmp_path):
+        from gate_keeper.models import Diagnostic
+
+        a = tmp_path / "a.txt"
+        a.write_text("uv\n")
+        b = tmp_path / "b.txt"
+        b.write_text("nothing\n")
+        spec = resolve_targets([str(a), str(b)])
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        rebuilt = Diagnostic.from_dict(diag.to_dict())
+        assert rebuilt.status is Status.FAIL
+        assert any(e.kind == "multi_target_summary" for e in rebuilt.evidence)
+
+    def test_per_file_evidence_truncates_when_over_limit(self, tmp_path):
+        # Force more files than the per-file evidence cap so the summary
+        # carries an evidence_truncated counter.
+        from gate_keeper.backends import filesystem as fsmod
+
+        for i in range(fsmod._PER_FILE_EVIDENCE_LIMIT + 5):
+            (tmp_path / f"f{i:03d}.txt").write_text("uv\n")
+        spec = resolve_targets([str(tmp_path)], file_limit=fsmod._PER_FILE_EVIDENCE_LIMIT + 10)
+        diag = check(_rule(RuleKind.TEXT_REQUIRED, {"pattern": "uv"}), spec)
+        assert diag.status is Status.PASS
+        summary = next(e for e in diag.evidence if e.kind == "multi_target_summary")
+        assert summary.data["evidence_truncated"] == 5

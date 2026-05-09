@@ -207,7 +207,19 @@ def build_parser() -> argparse.ArgumentParser:
             "positional path with --rules-format ir for IR input)."
         ),
     )
-    validate_parser.add_argument("--target", required=True, help="artifact or PR to validate")
+    validate_parser.add_argument(
+        "--target",
+        required=True,
+        action="append",
+        dest="target",
+        metavar="TARGET",
+        help=(
+            "artifact or PR to validate. May be specified multiple times to evaluate "
+            "filesystem rules across several files; values may be paths, directories, "
+            "or quoted globs. Repeated values are deduplicated and sorted "
+            "lexicographically. Non-filesystem backends accept a single value only."
+        ),
+    )
     validate_parser.add_argument(
         "--rules-format",
         dest="rules_format",
@@ -436,6 +448,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     from gate_keeper import validator
     from gate_keeper.backends import is_registered
     from gate_keeper.diagnostics import compute_exit_code, render_json, render_text
+    from gate_keeper.targets import TargetExpansionError, resolve_targets
 
     # Validate backend choice defensively (argparse choices= should catch most).
     backend = args.backend
@@ -499,8 +512,61 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         )
         return EXIT_USAGE
 
+    # Resolve --target values into a single value passed to validator.
+    #
+    # Compatibility rule (issue #146): when exactly one --target is supplied
+    # and it is a plain literal (not a directory, not a glob), forward the raw
+    # string. This preserves every pre-#146 behaviour, including GitHub PR
+    # references like ``owner/repo#1`` and PR URLs that contain ``?``/``#``
+    # (which the GitHub backend's parser tolerates). Multi-target invocations
+    # and directory/glob single-targets are resolved into a TargetSpec; the
+    # chosen backend then either aggregates (filesystem) or fails closed
+    # (github / llm-rubric / external).
+    raw_targets: list[str] = list(args.target)
+    target: object
+    if len(raw_targets) == 1:
+        from gate_keeper.backends._target import parse_target
+        from gate_keeper.targets import looks_like_glob
+
+        sole = raw_targets[0]
+        sole_path = Path(sole)
+
+        # Order matters: a literal directory or an existing literal file
+        # always wins over glob detection so a real filename like
+        # ``a[b].txt`` does not get mis-expanded as a pattern.
+        if sole_path.is_dir():
+            try:
+                target = resolve_targets(raw_targets)
+            except TargetExpansionError as exc:
+                print(f"error: --target: {exc}", file=sys.stderr)
+                return EXIT_USAGE
+        elif sole_path.is_file():
+            target = sole
+        elif looks_like_glob(sole):
+            # Token has glob metacharacters but the literal path doesn't
+            # exist. A GitHub PR URL with a query string (``?diff=split``)
+            # falls into this bucket — recognise that case explicitly so
+            # the github backend still receives the raw URL it needs.
+            pr, _ = parse_target(sole)
+            if pr is not None:
+                target = sole
+            else:
+                try:
+                    target = resolve_targets(raw_targets)
+                except TargetExpansionError as exc:
+                    print(f"error: --target: {exc}", file=sys.stderr)
+                    return EXIT_USAGE
+        else:
+            target = sole
+    else:
+        try:
+            target = resolve_targets(raw_targets)
+        except TargetExpansionError as exc:
+            print(f"error: --target: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+
     # Run validation.
-    report = validator.validate(ruleset, args.target, backend=backend, reproducibility=args.reproducibility)
+    report = validator.validate(ruleset, target, backend=backend, reproducibility=args.reproducibility)
 
     # Render output.
     if args.format == "json":

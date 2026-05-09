@@ -4,6 +4,28 @@
 
 Tracking issue: #74. Design phase only — no IR or backend changes in this doc.
 
+> **Implementation status (first slice).** Issue #146 implements the
+> filesystem multi-target slice of this design. Shipped in that slice:
+>
+> - `TargetSpec` internal helper (`src/gate_keeper/targets.py`).
+> - `validate --target` accepts multiple occurrences (CLI `append` action).
+> - Single literal-file targets preserve pre-#146 behaviour exactly.
+> - Directory and quoted-glob expansion (recursive, text-readable filter).
+> - Lexicographic dedup + sort across resolved paths.
+> - Filesystem backend aggregates per-file results into one Diagnostic
+>   (`pass` only if all files pass; `fail` if any fail; `unavailable` if the
+>   resolved set is empty or any file is `unavailable`/`unsupported`/`error`).
+> - Default file-count cap of 200; exceeding the cap is a CLI usage error.
+> - Non-filesystem backends (`github`, `llm-rubric`, `external`) reject
+>   multi-target inputs with `unsupported` and a `multi_target_unsupported`
+>   evidence record (fail-closed; never silently use only one target).
+>
+> **Out of slice (deferred):** LLM-rubric multi-file content assembly
+> (`params.targets`, token budgeting), external adapter multi-target
+> contract, dotenv-driven cap override, remote/non-filesystem URIs,
+> heuristic relevance ranking, streaming evaluation. The user-facing
+> reference is `docs/cli-reference.md` § "Multi-target evaluation".
+
 ---
 
 ## 1. Problem Statement

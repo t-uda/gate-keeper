@@ -39,6 +39,7 @@ from gate_keeper.models import (
     RuleSet,
     Status,
 )
+from gate_keeper.targets import TargetSpec
 
 
 def _backend_for(name: str) -> Backend:
@@ -86,7 +87,7 @@ def _resolve_backend_name(rule: Rule, backend_name: str) -> str:
 def _run_n(
     check_fn: Callable,
     rule: Rule,
-    target: str | Path,
+    target: str | Path | TargetSpec,
     n: int,
 ) -> Diagnostic:
     """Run *check_fn* ``n`` times and aggregate via majority vote.
@@ -133,7 +134,7 @@ def _run_n(
 
 def validate(
     ruleset: RuleSet,
-    target: str | Path,
+    target: str | Path | TargetSpec,
     backend: str = "auto",
     reproducibility: int = 1,
 ) -> DiagnosticReport:
@@ -144,7 +145,19 @@ def validate(
     ruleset:
         Compiled ``RuleSet`` (output of parse + classify).
     target:
-        Local path or GitHub PR reference passed through to the backend.
+        One of:
+
+        - a local filesystem path (``str`` or ``Path``);
+        - a GitHub PR reference (``str``);
+        - a :class:`gate_keeper.targets.TargetSpec` describing a multi-target
+          filesystem evaluation produced by ``--target`` repetition,
+          directory, or glob expansion (issue #146).
+
+        Single-target callers continue to pass a path or reference directly;
+        the value is forwarded verbatim to the backend.  Multi-target callers
+        pass a ``TargetSpec``; backends that cannot honour it must produce an
+        ``UNSUPPORTED`` / ``UNAVAILABLE`` diagnostic rather than silently
+        evaluating only one of the resolved paths.
     backend:
         ``"auto"`` dispatches each rule by its ``backend_hint``; any other
         registered name sends all rules to that single backend.

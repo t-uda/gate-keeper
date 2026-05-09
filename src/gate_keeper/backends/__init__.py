@@ -23,9 +23,13 @@ from gate_keeper.backends import filesystem as _fs
 from gate_keeper.backends import github as _gh
 from gate_keeper.backends import llm_rubric as _llm
 from gate_keeper.models import Diagnostic, Rule
+from gate_keeper.targets import TargetSpec
 
-# Registry: name -> check callable
-_REGISTRY: dict[str, Callable[[Rule, str | Path], Diagnostic]] = {
+# Registry: name -> check callable.
+# Backends accept ``str | Path`` for single-target calls or ``TargetSpec`` for
+# multi-target calls (issue #146). Backends that do not support multi-target
+# return UNSUPPORTED diagnostics rather than silently dropping targets.
+_REGISTRY: dict[str, Callable[[Rule, str | Path | TargetSpec], Diagnostic]] = {
     _fs.name: _fs.check,
     _gh.name: _gh.check,
     _llm.name: _llm.check,
@@ -36,7 +40,7 @@ _REGISTRY: dict[str, Callable[[Rule, str | Path], Diagnostic]] = {
 BACKEND_NAMES: list[str] = sorted(_REGISTRY)
 
 
-def get(name: str) -> Callable[[Rule, str | Path], Diagnostic] | None:
+def get(name: str) -> Callable[[Rule, str | Path | TargetSpec], Diagnostic] | None:
     """Return the check callable for *name*, or ``None`` if not registered."""
     return _REGISTRY.get(name)
 

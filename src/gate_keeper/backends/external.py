@@ -48,6 +48,7 @@ from gate_keeper.models import (
     RuleKind,
     Status,
 )
+from gate_keeper.targets import TargetSpec
 
 name = "external"
 
@@ -132,11 +133,40 @@ def _diag(
     )
 
 
-def check(rule: Rule, target: str | Path) -> Diagnostic:
+def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     """Dispatch *rule* to the adapter named by ``rule.params['tool']``.
 
     See module docstring for the full fail-closed contract.
+
+    Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
+    supported by the external dispatcher in the first slice (issue #146);
+    each adapter's contract is single-target today and silently using only
+    one of the resolved files would be unsafe. Multi-target calls fail
+    closed with ``UNSUPPORTED`` and a ``multi_target_unsupported`` evidence
+    record. Single-file ``TargetSpec`` values are unwrapped before dispatch
+    so the adapter sees a plain ``Path``.
     """
+    if isinstance(target, TargetSpec):
+        if target.is_multi:
+            return _diag(
+                rule,
+                Status.UNSUPPORTED,
+                (
+                    "external backend does not support multi-target evaluation; "
+                    "external adapters are single-target in the current contract."
+                ),
+                [
+                    Evidence(
+                        kind="multi_target_unsupported",
+                        data={
+                            "backend": "external",
+                            "raw_targets": list(target.raw_targets),
+                            "file_count": len(target.paths),
+                        },
+                    )
+                ],
+            )
+        target = target.paths[0] if target.paths else ""
     if rule.kind is not RuleKind.EXTERNAL_CHECK:
         return _diag(
             rule,

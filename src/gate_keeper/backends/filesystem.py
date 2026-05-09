@@ -1,6 +1,29 @@
 """Filesystem and text backend for gate-keeper.
 
 Evaluates a single compiled Rule against a local target path.
+
+Targets
+-------
+``check`` accepts either:
+
+- a single path-like target (``str`` or :class:`pathlib.Path`) — preserves the
+  pre-#146 behaviour exactly; or
+- a :class:`gate_keeper.targets.TargetSpec` carrying one or more resolved
+  paths (issue #146).  When the spec contains a single path that came from a
+  literal file argument, behaviour is identical to the single-path case.
+  Otherwise, the rule is evaluated against each resolved file and the results
+  are aggregated into a single ``Diagnostic`` per the contract documented in
+  ``docs/design/multi-target.md`` §6:
+
+  * ``PASS`` only if every per-file evaluation passes.
+  * ``FAIL`` if any per-file evaluation fails.
+  * ``UNAVAILABLE`` if the resolved file set is empty (fail-closed) or if
+    any per-file evaluation produces an ``UNAVAILABLE`` /
+    ``UNSUPPORTED`` / ``ERROR`` status.
+  * Per-file outcomes are recorded in ``Evidence(kind="file_result", ...)``
+    items, capped to keep diagnostic JSON bounded; a
+    ``multi_target_summary`` evidence record carries the file-count totals.
+
 Never raises — all exceptions are translated into diagnostics.
 """
 
@@ -33,6 +56,12 @@ from gate_keeper.models import (
     RuleKind,
     Status,
 )
+from gate_keeper.targets import TargetSpec
+
+# Cap the number of per-file evidence records included in an aggregated
+# diagnostic.  Beyond this point we summarise the remainder so the JSON output
+# stays bounded even when the file-count cap is raised in future work.
+_PER_FILE_EVIDENCE_LIMIT = 50
 
 name = "filesystem"
 
@@ -71,9 +100,26 @@ def _diag(rule: Rule, status: Status, message: str, evidence: list[Evidence]) ->
     )
 
 
-def check(rule: Rule, target: str | Path) -> Diagnostic:
-    """Evaluate *rule* against *target*. Returns a Diagnostic; never raises."""
+def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
+    """Evaluate *rule* against *target*. Returns a Diagnostic; never raises.
+
+    *target* may be a single path-like value (legacy single-target call) or a
+    :class:`gate_keeper.targets.TargetSpec` (multi-target call introduced in
+    issue #146).  See the module docstring for the multi-target aggregation
+    contract.
+    """
     try:
+        if isinstance(target, TargetSpec):
+            if not target.is_multi:
+                # Single literal-file spec: preserve the per-file dispatch
+                # path exactly so existing diagnostics remain bit-identical.
+                if target.paths:
+                    return _dispatch(rule, target.paths[0])
+                # Empty single-target spec is structurally impossible (the
+                # CLI requires at least one --target) but we still fail
+                # closed defensively.
+                return _multi_unavailable_empty(rule, target)
+            return _multi_check(rule, target)
         return _dispatch(rule, Path(target))
     except Exception as exc:  # noqa: BLE001
         return _diag(
@@ -82,6 +128,149 @@ def check(rule: Rule, target: str | Path) -> Diagnostic:
             f"internal error: {exc}",
             [Evidence(kind="exception", data={"type": type(exc).__name__, "message": str(exc)})],
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-target aggregation (issue #146)
+# ---------------------------------------------------------------------------
+
+
+def _multi_unavailable_empty(rule: Rule, spec: TargetSpec) -> Diagnostic:
+    """Return an UNAVAILABLE diagnostic for an empty resolved file set."""
+    return _diag(
+        rule,
+        Status.UNAVAILABLE,
+        (
+            "multi-target evaluation resolved to zero files; "
+            "fail-closed (refine the target or check the glob)."
+        ),
+        [
+            Evidence(
+                kind="multi_target_summary",
+                data={
+                    "raw_targets": list(spec.raw_targets),
+                    "file_count": 0,
+                    "pass_count": 0,
+                    "fail_count": 0,
+                    "unavailable_count": 0,
+                },
+            )
+        ],
+    )
+
+
+def _multi_check(rule: Rule, spec: TargetSpec) -> Diagnostic:
+    """Aggregate per-file evaluations of *rule* across ``spec.paths``.
+
+    Contract is documented in the module docstring; implementation follows
+    ``docs/design/multi-target.md`` §6 (filesystem backend).
+    """
+    # Empty file set after expansion: fail-closed.
+    if not spec.paths:
+        return _multi_unavailable_empty(rule, spec)
+
+    # Special-case kinds that depend on the rule.kind being supported.  An
+    # unsupported kind never reaches per-file dispatch — emit UNSUPPORTED once.
+    if rule.kind not in _FILESYSTEM_KINDS:
+        return _diag(
+            rule,
+            Status.UNSUPPORTED,
+            f"rule kind {rule.kind.value!r} is not supported by the filesystem backend",
+            [
+                Evidence(
+                    kind="backend_capability",
+                    data={"backend": "filesystem", "kind": rule.kind.value},
+                )
+            ],
+        )
+
+    pass_count = 0
+    fail_count = 0
+    unavailable_count = 0
+    other_count = 0
+    file_results: list[Evidence] = []
+    failing_paths: list[str] = []
+    unavailable_paths: list[str] = []
+
+    for path in spec.paths:
+        per = _dispatch(rule, path)
+        status = per.status
+        if status is Status.PASS:
+            pass_count += 1
+        elif status is Status.FAIL:
+            fail_count += 1
+            failing_paths.append(str(path))
+        elif status is Status.UNAVAILABLE:
+            unavailable_count += 1
+            unavailable_paths.append(str(path))
+        else:
+            other_count += 1
+
+        if len(file_results) < _PER_FILE_EVIDENCE_LIMIT:
+            file_results.append(
+                Evidence(
+                    kind="file_result",
+                    data={
+                        "path": str(path),
+                        "status": status.value,
+                        "message": per.message,
+                    },
+                )
+            )
+
+    total = len(spec.paths)
+    truncated = total - len(file_results)
+    summary_data: dict[str, object] = {
+        "raw_targets": list(spec.raw_targets),
+        "file_count": total,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "unavailable_count": unavailable_count,
+    }
+    if other_count:
+        summary_data["other_count"] = other_count
+    if truncated > 0:
+        summary_data["evidence_truncated"] = truncated
+
+    evidence: list[Evidence] = [
+        Evidence(kind="multi_target_summary", data=summary_data),
+        *file_results,
+    ]
+
+    # Aggregation policy:
+    # - any UNAVAILABLE / UNSUPPORTED / ERROR result short-circuits to
+    #   UNAVAILABLE (fail-closed for evaluator-state failures).
+    # - otherwise: FAIL if any per-file FAIL; PASS only when every file PASSed.
+    if unavailable_count > 0 or other_count > 0:
+        sample_unavailable = unavailable_paths[:3]
+        message_parts = [
+            f"multi-target evaluation could not complete for {unavailable_count + other_count}",
+            f"of {total} file(s)",
+        ]
+        if sample_unavailable:
+            message_parts.append(f"(first: {', '.join(sample_unavailable)})")
+        return _diag(
+            rule,
+            Status.UNAVAILABLE,
+            " ".join(message_parts) + ".",
+            evidence,
+        )
+
+    if fail_count > 0:
+        sample_failing = failing_paths[:3]
+        msg = (
+            f"{fail_count} of {total} file(s) failed rule"
+            + (f" (first: {', '.join(sample_failing)})" if sample_failing else "")
+            + "."
+        )
+        return _diag(rule, Status.FAIL, msg, evidence)
+
+    return _diag(
+        rule,
+        Status.PASS,
+        f"all {total} file(s) passed rule.",
+        evidence,
+    )
 
 
 def _dispatch(rule: Rule, target: Path) -> Diagnostic:
