@@ -197,13 +197,45 @@ Constraints enforced by `_parse_llm_judgment()`:
   verdict — both `"pass"` and `"fail"`** (#168). The prompt additionally
   instructs the model to draw quotes as near-verbatim substrings of the
   target text and to favor representative content over opening-line
-  citations on long artifacts. Schema-level grounding (substring
-  verification) is intentionally not enforced by the parser today —
-  prompt-side discipline is the v2 mechanism; a substring check would
-  reject quotes the model lightly normalised (whitespace, capitalisation)
-  and is deferred until the failure mode reappears.
+  citations on long artifacts.
 - `suggested_action` must be a non-empty string on `"fail"` and is coerced to `null` on `"pass"`.
 - Extra fields in the JSON response are silently ignored (forward-compatible).
+
+### Parser-side substring grounding (#172)
+
+Prompt-side discipline alone is not sufficient. Tick 6 of umbrella #164's
+dogfood loop showed that on the first sample after the v2 prompt merged
+the model returned six fail verdicts whose `supporting_evidence_quotes`
+had **zero overlap** with the artifact (generic "fail-shaped" placeholder
+strings). A model-instruction-only constraint is by design unreliable.
+
+The backend therefore enforces the substring contract in `check()` after
+`_parse_llm_judgment()` succeeds:
+
+- Each entry of `supporting_evidence_quotes` must occur as a substring of
+  the artifact text the rule is being evaluated against. Whitespace runs
+  are normalised (collapsed to a single space) and a small set of smart
+  punctuation pairs (curly single/double quotes, en/em dashes) is folded
+  to their ASCII counterparts, so the model may copy with cosmetic
+  differences. **Paraphrase or rewording is not tolerated.**
+- The artifact text is resolved from the `target` reference: if `target`
+  is a path that resolves to a file, the file contents are read; otherwise
+  the literal `str(target)` is used (this is the `--target "<PR body>"`
+  inline case).
+- On any violation the verdict is **rejected**: the diagnostic returns
+  `status=unsupported` with `evidence[0]` of kind
+  `llm_quote_fabrication`. The evidence preserves the model's claimed
+  judgment, primary reason, all returned quotes, the subset that failed
+  containment (`fabricated_quotes`), and the standard telemetry / cost
+  fields. `Diagnostic.remediation` advises the operator not to act on the
+  verdict.
+- Empty / whitespace-only quotes are treated as fabricated (zero-grounding
+  is a degenerate case, not a forgivable normalisation difference).
+
+This is option (A) from #172's design: reject the verdict rather than
+strip-and-flag offending quotes. The user-visible signal "this verdict
+came from a model that ignored the substring contract" is more valuable
+than a verdict whose grounding has been silently degraded.
 
 ### Successful diagnostic shape
 
@@ -250,13 +282,16 @@ reflect that single representative run, not an aggregate. The separate
 ## Failure modes
 
 Any provider failure path maps to `unavailable` — never to `pass` or `fail`.
-Failure modes recorded in `evidence[0]`:
+Quote fabrication maps to `unsupported` (the request succeeded but the
+verdict is rejected as ungrounded).  Failure modes recorded in
+`evidence[0]`:
 
-| Failure | `evidence[0].kind` | `data.failure_mode` |
-| --- | --- | --- |
-| File missing or provider unset | `provider_unconfigured` | n/a |
-| SDK/HTTP error, timeout, etc. | `provider_error` | exception class name |
-| Response is not the expected JSON shape | `provider_error` | `unparseable_response` |
+| Failure | `status` | `evidence[0].kind` | `data.failure_mode` |
+| --- | --- | --- | --- |
+| File missing or provider unset | `unavailable` | `provider_unconfigured` | n/a |
+| SDK/HTTP error, timeout, etc. | `unavailable` | `provider_error` | exception class name |
+| Response is not the expected JSON shape | `unavailable` | `provider_error` | `unparseable_response` |
+| Quotes not substrings of artifact (#172) | `unsupported` | `llm_quote_fabrication` | n/a (offending quotes in `data.fabricated_quotes`) |
 
 There is no retry. Investigate the failure mode, then rerun.
 

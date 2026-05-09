@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -517,6 +518,111 @@ def _parse_response(text: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Quote-fabrication validator (#172)
+#
+# The v2 prompt (#168) instructs the model that every quote in
+# ``supporting_evidence_quotes`` must be drawn as a near-verbatim substring of
+# the artifact text. Tick 6 of umbrella #164's dogfood loop (issue #172) showed
+# that prompt-side instruction alone is insufficient: on the first post-merge
+# sample, the model emitted six fail verdicts whose quotes had **zero overlap**
+# with the artifact (generic "fail-shaped" placeholder strings). The parser
+# below enforces the contract: when any quote is not a substring of the
+# artifact, the verdict is rejected and converted to ``UNSUPPORTED`` with
+# ``evidence.kind=llm_quote_fabrication`` so downstream callers can see that
+# the model violated the grounding contract rather than acting on a verdict
+# whose evidence is fabricated.
+# ---------------------------------------------------------------------------
+
+
+# Smart-quote ↔ ASCII-quote folding table. We accept the model lightly
+# normalising punctuation when copying from the artifact (e.g. the artifact
+# carries U+2019 RIGHT SINGLE QUOTATION MARK but the model emits a plain
+# ASCII apostrophe). We do NOT accept paraphrasing or rewording.
+_QUOTE_FOLDING: dict[int, str] = {
+    ord("‘"): "'",  # LEFT SINGLE QUOTATION MARK
+    ord("’"): "'",  # RIGHT SINGLE QUOTATION MARK
+    ord("“"): '"',  # LEFT DOUBLE QUOTATION MARK
+    ord("”"): '"',  # RIGHT DOUBLE QUOTATION MARK
+    ord("′"): "'",  # PRIME
+    ord("″"): '"',  # DOUBLE PRIME
+    ord("–"): "-",  # EN DASH
+    ord("—"): "-",  # EM DASH
+}
+
+
+def _normalise_for_substring(text: str) -> str:
+    """Return *text* normalised for substring containment checks.
+
+    Folds smart quotes and dashes to ASCII counterparts and collapses runs of
+    whitespace (including newlines) to single spaces. The result is tolerant
+    enough that a quote copied with cosmetic differences (line wrapping,
+    curly-quote rendering) still matches; it is **not** tolerant of paraphrase.
+    """
+    folded = text.translate(_QUOTE_FOLDING)
+    # Collapse any run of whitespace (spaces, tabs, newlines) into a single
+    # space. ``re`` is imported at module scope; using ``\\s+`` is correct
+    # because the ``re`` regex flavour already treats CR/LF/TAB as whitespace.
+    collapsed = re.sub(r"\s+", " ", folded)
+    return collapsed.strip()
+
+
+def _resolve_artifact_text(target: str | Path) -> str:
+    """Return the artifact text used for substring validation.
+
+    The backend's ``target`` is a reference (a filesystem path, a PR URL, or
+    a literal artifact body passed via ``--target "<text>"``). For
+    fabrication detection we want the **content** the model was supposed to
+    quote from. Resolution order:
+
+    1. If *target* is a ``Path`` (or ``str`` that resolves to an existing
+       readable file), return the file contents decoded as UTF-8.
+    2. Otherwise, return ``str(target)`` verbatim — the literal string was
+       what the model received as the artifact (this is the dogfood case
+       where ``--target "<PR body>"`` passes the body inline).
+
+    Failure to read a path falls back to the verbatim string so a transient
+    filesystem issue does not turn every judgment into a fabrication report.
+    """
+    s = str(target)
+    if isinstance(target, Path):
+        try:
+            return target.read_text(encoding="utf-8")
+        except OSError:
+            return s
+    # Heuristic file-path detection: don't probe arbitrarily long inputs (a PR
+    # body can be tens of kilobytes and is never a valid path on Linux). Path
+    # components on most filesystems max out at 255 bytes; PATH_MAX is 4096
+    # bytes. Above that, skip the filesystem probe entirely.
+    if len(s) <= 4096:
+        try:
+            p = Path(s)
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+    return s
+
+
+def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
+    """Return quotes from *quotes* that are NOT substrings of *artifact_text*.
+
+    Substring check is performed on the ``_normalise_for_substring`` form of
+    both inputs so cosmetic whitespace and smart-quote differences do not
+    cause false positives. An empty quote string is treated as fabricated
+    (a degenerate / zero-grounding case).
+    """
+    normalised_artifact = _normalise_for_substring(artifact_text)
+    fabricated: list[str] = []
+    for quote in quotes:
+        if not isinstance(quote, str) or not quote.strip():
+            fabricated.append(quote if isinstance(quote, str) else "")
+            continue
+        if _normalise_for_substring(quote) not in normalised_artifact:
+            fabricated.append(quote)
+    return fabricated
+
+
+# ---------------------------------------------------------------------------
 # Diagnostic constructors — #51 contract preserved byte-for-byte
 # ---------------------------------------------------------------------------
 
@@ -673,6 +779,51 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     assert telemetry.keys() >= {"latency_ms", "tokens_in", "tokens_out"}, (
         f"provider helper returned incomplete telemetry: {sorted(telemetry.keys())}"
     )
+
+    # #172 — parser-side enforcement of the v2 prompt's substring-grounding
+    # contract. If any quote is not a substring of the artifact text, reject
+    # the verdict and surface UNSUPPORTED with llm_quote_fabrication evidence.
+    artifact_text = _resolve_artifact_text(target)
+    fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
+    if fabricated:
+        cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=(
+                "LLM rubric verdict rejected: the model returned "
+                f"{len(fabricated)} of {len(parsed.supporting_evidence_quotes)} "
+                "supporting quotes that are not substrings of the artifact "
+                "(quote fabrication)."
+            ),
+            evidence=[
+                Evidence(
+                    kind="llm_quote_fabrication",
+                    data={
+                        "model": model,
+                        "prompt_version": PROMPT_VERSION,
+                        "claimed_judgment": parsed.judgment,
+                        "primary_reason": parsed.primary_reason,
+                        "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+                        "fabricated_quotes": fabricated,
+                        "suggested_action": parsed.suggested_action,
+                        "latency_ms": telemetry["latency_ms"],
+                        "tokens_in": telemetry["tokens_in"],
+                        "tokens_out": telemetry["tokens_out"],
+                        "cost_estimate_usd": cost,
+                    },
+                )
+            ],
+            remediation=(
+                "The model violated the substring-grounding contract for "
+                "supporting_evidence_quotes (v2 prompt, #168). Re-run the "
+                "rule; if the failure persists, investigate prompt drift or "
+                "switch model. Do not act on this verdict."
+            ),
+        )
 
     status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
     cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])

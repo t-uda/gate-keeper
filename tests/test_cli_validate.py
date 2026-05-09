@@ -641,7 +641,9 @@ class TestReproducibilityFlag:
                         "judgment": "pass",
                         "primary_reason": "looks good",
                         # #168: pass also requires non-empty supporting quotes.
-                        "supporting_evidence_quotes": ["a representative substring"],
+                        # #172: quote must be a substring of the artifact text
+                        # (PASS_README contents — see fixtures/local/pass/README.md).
+                        "supporting_evidence_quotes": ["This file exists"],
                         "suggested_action": None,
                     }
                 ),
