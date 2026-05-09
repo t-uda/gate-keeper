@@ -1,0 +1,19 @@
+# Project-local dependency manifest consumed by scripts/dependency_gates/
+# validators. Schema: docs/design/dependency-gates.md §3.
+#
+# Slice 1 (umbrella #159 / issue #161) ships exactly one edge: when
+# src/gate_keeper/cli.py changes in a PR, docs/cli-reference.md must change
+# too — or a reviewer ack must land at .gate-keeper/acks/cli-implementation-documents-cli-reference.yml.
+
+nodes:
+  - id: cli-implementation
+    path: src/gate_keeper/cli.py
+    kind: code
+  - id: cli-reference
+    path: docs/cli-reference.md
+    kind: reference
+
+edges:
+  - from: cli-implementation
+    to: cli-reference
+    relation: documents

@@ -43,10 +43,34 @@ The seed pool of semantic self-gating rules lives in
 document are advisory only at the time of authoring; none meets the
 promotion criteria in this document yet.
 
+## Dependency-gate dogfood (umbrella #159)
+
+Slice 1 of umbrella #159 ships a project-local `external_check` rule that
+gates `src/gate_keeper/cli.py` against `docs/cli-reference.md`. The rule
+lives in [`dependency-gate-rules.json`](dependency-gate-rules.json) and runs
+through the `command` adapter. Because `command` adapter rules are disabled
+by default, exercising it requires `--allow-command-adapter`:
+
+```sh
+uv run gate-keeper validate \
+  --rules-format ir docs/dependency-gate-rules.json \
+  --target docs/cli-reference.md \
+  --allow-command-adapter
+```
+
+The validator script (`scripts/dependency_gates/check_cli_reference.py`)
+is general — it reads `.gate-keeper/dependency-manifest.yml` and validates
+any edge whose `to` matches the supplied target. Adding new dependency
+edges does not require a new rule. The contract is documented in
+[`design/dependency-gates.md`](design/dependency-gates.md). This rule is
+**advisory only**; promotion follows the §"Promotion criteria" path above.
+
 ## Out of scope
 
 - External repos consuming `gate-keeper` set their own promotion policy.
 - This document does not list specific rules. Rule-level state lives next to
   the rule definitions (see [`dogfooding-rules.md`](dogfooding-rules.md) for
-  the semantic advisory pool, and [`example-rules.md`](example-rules.md)
-  for the deterministic examples).
+  the semantic advisory pool, [`example-rules.md`](example-rules.md) for
+  the deterministic examples, and
+  [`dependency-gate-rules.json`](dependency-gate-rules.json) for the
+  declarative artifact-dependency gate).
