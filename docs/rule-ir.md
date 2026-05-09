@@ -90,8 +90,8 @@ backend rather than minting new `Backend` enum values; see
 `file_exists`, `file_absent`, `path_matches`, `text_required`, `text_forbidden`,
 `markdown_tasks_complete`, `github_pr_open`, `github_not_draft`,
 `github_labels_absent`, `github_tasks_complete`, `github_checks_success`,
-`github_threads_resolved`, `github_non_author_approval`, `semantic_rubric`,
-`external_check`
+`github_threads_resolved`, `github_non_author_approval`,
+`github_changed_files_absent`, `semantic_rubric`, `external_check`
 
 ### `Severity`
 `error`, `warning`, `advisory`
@@ -109,6 +109,7 @@ backend rather than minting new `Backend` enum values; see
 | `github_labels_absent` | `labels` | `["blocked","do-not-merge","needs-decision"]` | List of blocking label names (case-insensitive). Absent key uses default list; explicit `[]` means no blocking labels → always PASS. |
 | `github_checks_success` | _(none)_ | — | Evaluates every entry in `statusCheckRollup` as required; only `SUCCESS` state/conclusion passes. Branch protection remains the authoritative control plane. |
 | `external_check` | `tool` | _(required)_ | String adapter ID selecting which `external` adapter handles the rule (e.g. `"textlint"`). Missing → `unavailable` / `params_error`; unregistered → `unsupported` / `adapter_unknown`. All other `params` keys are forwarded verbatim to the adapter, which owns its own per-tool keys. See [`docs/backend-external.md`](backend-external.md). |
+| `github_changed_files_absent` | `patterns`, `case_sensitive` | `case_sensitive=true` | `patterns` is required and must be a non-empty list of glob strings; missing or invalid → `unavailable` / `params_error`. `case_sensitive` is optional (default `true`). Glob semantics: `**` matches zero or more path segments, `*` matches anything except `/`, `?` matches one non-`/` char. See the dedicated section below for the data policy. |
 
 ## `github_non_author_approval` — formal evidence and limitations
 
@@ -142,6 +143,69 @@ reviewer), which avoids any pagination concern on the full reviews connection.
 - `DISMISSED`, `COMMENTED`, `CHANGES_REQUESTED`, and `PENDING` never satisfy the rule.
 - Only the **latest** review per reviewer (by `submittedAt`) is considered.
 - Comment-only and semantically substantive review judgement are out of scope.
+
+## `github_changed_files_absent` — changed-file glob policy
+
+The `github_changed_files_absent` rule fails when any file changed by the
+target PR matches any of the configured forbidden glob patterns.  The
+backend walks the GraphQL `pullRequest.files` connection page-by-page until
+the connection reports `hasNextPage = false` and only then evaluates the
+patterns.
+
+### Params
+
+```json
+{
+  "patterns": ["outputs/**", "**/*.xlsx", "context/researcher/raw/**"],
+  "case_sensitive": true
+}
+```
+
+- `patterns` — required, non-empty list of glob strings.  Each entry must
+  be a non-empty string.
+- `case_sensitive` — optional, defaults to `true`.
+
+Missing or malformed `patterns` (or non-bool `case_sensitive`) produces
+`status = unavailable` with `evidence.kind = params_error`.
+
+### Glob semantics
+
+| Token | Meaning |
+| ----- | ------- |
+| `**`  | zero or more path segments (matches across `/`) |
+| `*`   | any sequence of characters except `/` |
+| `?`   | exactly one character except `/` |
+| literal | matched verbatim (regular expression metacharacters are escaped) |
+
+`**/*.xlsx` matches both `data.xlsx` and `deep/nested/data.xlsx`.
+`src/*.py` matches `src/a.py` but **not** `src/sub/b.py`.
+
+### Evidence — `pr_changed_files`
+
+| Field | Meaning |
+| ----- | ------- |
+| `total_changed_files` | Total count of files reported by GitHub for the PR. |
+| `forbidden_patterns` | The patterns evaluated. |
+| `case_sensitive` | The effective flag value. |
+| `offending` | List of `{path, pattern}` for each changed file that matched at least one pattern (the pattern recorded is the first match). |
+| `matched_patterns` | Sorted unique set of patterns that produced at least one offending entry. |
+| `pagination_complete` | Always `true` on `pass`/`fail`; `unavailable` is emitted instead when pagination cannot complete. |
+| `page_count` | Number of GraphQL pages fetched to assemble the full list. |
+| `owner`, `repo`, `number`, `url` | PR coordinates (echoed from the resolver). |
+
+### Failure modes
+
+| Status | Evidence kind | When |
+| ------ | ------------- | ---- |
+| `pass` | `pr_changed_files` | No changed file matched any forbidden pattern. |
+| `fail` | `pr_changed_files` | One or more changed files matched a forbidden pattern; the offending list is populated. |
+| `unavailable` | `params_error` | `patterns` is missing, not a list, empty, contains a non-string or empty entry, or `case_sensitive` is not a bool. |
+| `unavailable` | `gh_pagination_unavailable` | The GraphQL connection truncates without a usable cursor or the page count exceeds the safety bound. |
+| `unavailable` | `gh_failure` / `gh_missing` / `gh_auth_failure` / `gh_json_error` / `gh_missing_field` / `gh_graphql_error` | Any other `gh` failure on the resolve or fetch call. |
+
+The backend never returns `pass` on a partial page set — incomplete
+pagination is treated as `unavailable` so a forbidden file added in a
+later page can never be silently skipped.
 
 ## Validation policy
 

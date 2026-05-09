@@ -244,6 +244,12 @@ Each line: `path:line: severity: [backend/status] rule_id: message [evidence]`.
   provider configuration.
 - See [docs/llm-rubric.md](llm-rubric.md) for provider setup and evidence
   shape details.
+- The `github_changed_files_absent` rule kind requires per-rule `params`
+  (`patterns`, optional `case_sensitive`). The natural-language classifier
+  routes only explicit PR/path forbid wording (e.g. *"PRs must not change
+  generated workbook outputs"*) to this kind; ambiguous filesystem rules
+  remain on the filesystem or semantic backends. See
+  [docs/rule-ir.md](rule-ir.md) for the full params and evidence shape.
 
 ---
 

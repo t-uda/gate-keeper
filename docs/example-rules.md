@@ -103,7 +103,77 @@ rules.md:5: warning: [github/fail] rule-L5: PR owner/repo#43 has 2 unchecked tas
 
 ---
 
-## 4. Semantic rubric — `llm-rubric / semantic_rubric`
+## 4. PR changed-file path policy — `github / github_changed_files_absent`
+
+Forbid a PR from touching paths that match a glob (e.g. generated outputs,
+binary artifacts, raw researcher data).
+
+**Rule document:**
+
+```markdown
+## Path policy
+
+- PRs must not change generated workbook outputs.
+- PRs must not add raw Office/PDF artifacts.
+- PRs must not create context/researcher/raw/ as a tracked path.
+```
+
+**Classifier route:** `github / github_changed_files_absent / high` —
+explicit PR + verb-of-modification wording. Each rule needs `params.patterns`
+(a list of glob strings); the classifier records the kind and backend, and
+authors fill in `params` after `compile`.
+
+**Compiled rule (JSON excerpt — patterns added by hand):**
+
+```json
+{
+  "rules": [{
+    "id": "no-workbook-outputs",
+    "text": "PRs must not change generated workbook outputs.",
+    "kind": "github_changed_files_absent",
+    "severity": "error",
+    "backend_hint": "github",
+    "params": {
+      "patterns": ["outputs/**", "**/*.xlsx"],
+      "case_sensitive": true
+    }
+  }]
+}
+```
+
+**Sample run (pass — no offending paths):**
+
+```
+$ gate-keeper validate rules.md --target https://github.com/owner/repo/pull/42
+rules.md:3: error: [github/pass] no-workbook-outputs: PR owner/repo#42: 0 of 7 changed file(s) match forbidden patterns.
+  [pr_changed_files(total_changed_files=7, forbidden_patterns=['outputs/**', '**/*.xlsx'], offending=[], pagination_complete=True, ...)]
+```
+
+**Sample run (fail — generated workbook touched):**
+
+```
+$ gate-keeper validate rules.md --target https://github.com/owner/repo/pull/43
+rules.md:3: error: [github/fail] no-workbook-outputs: PR owner/repo#43: 1 of 9 changed file(s) match forbidden patterns: ['outputs/results.xlsx'].
+  [pr_changed_files(total_changed_files=9, offending=[{'path': 'outputs/results.xlsx', 'pattern': 'outputs/**'}], matched_patterns=['outputs/**'], page_count=1, ...)]
+```
+
+**Notes:**
+
+- `patterns` is required and must be a non-empty list of glob strings.
+  Missing or malformed params produce `unavailable` / `params_error`.
+- Glob semantics: `**` matches across `/`, `*` matches within a single
+  segment, `?` matches one non-`/` character. `**/*.xlsx` matches both
+  top-level and nested workbooks.
+- Pagination is exhaustive — the backend walks the full PR file list
+  before evaluating. A truncated fetch returns `unavailable` rather than
+  passing on partial data.
+- Evidence includes `total_changed_files`, `forbidden_patterns`,
+  `offending`, `pagination_complete`, and `page_count`. See
+  [docs/rule-ir.md](rule-ir.md) for the full schema.
+
+---
+
+## 5. Semantic rubric — `llm-rubric / semantic_rubric`
 
 **Rule document:**
 
@@ -147,7 +217,7 @@ rules.md:3: warning: [llm-rubric/fail] rule-L3: The description does not summari
 
 ---
 
-## 5. textlint prose quality — `external / external_check`
+## 6. textlint prose quality — `external / external_check`
 
 textlint rules use `kind: external_check` with `params.tool: textlint`.
 The textlint adapter is registered automatically at CLI entry.

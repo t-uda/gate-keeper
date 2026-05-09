@@ -1,20 +1,24 @@
 """GitHub backend for gate-keeper.
 
 Implements deterministic PR state, draft, label, tasklist, status-check
-rollup, review thread validation, and independent (non-author) approval
-checks using the ``gh`` CLI (issues #10–#13).
+rollup, review thread validation, independent (non-author) approval, and
+PR changed-file glob checks using the ``gh`` CLI (issues #10–#13, #147).
 
 Six rule kinds share a single ``gh pr view`` call per ``check()``
 invocation; the result is parsed once and dispatched to the appropriate
-handler.  The seventh kind (``github_threads_resolved``) makes its own
-GraphQL call via ``gh api graphql`` and does NOT use ``_fetch_pr_view``.
+handler.  Two further kinds (``github_threads_resolved``,
+``github_changed_files_absent``) make their own GraphQL calls via
+``gh api graphql`` and do NOT use ``_fetch_pr_view``.
 
 Any failure before dispatch (missing gh, auth, JSON, missing field)
-propagates as UNAVAILABLE — all paths fail closed.
+propagates as UNAVAILABLE — all paths fail closed.  The changed-file
+handler additionally treats incomplete pagination as UNAVAILABLE so a
+truncated result can never silently pass.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from gate_keeper._md import (
@@ -828,6 +832,409 @@ def _check_non_author_approval(rule: Rule, pr: PrTarget, data: dict) -> Diagnost
 
 
 # ---------------------------------------------------------------------------
+# Changed-file handler (issue #147 — github_changed_files_absent)
+# ---------------------------------------------------------------------------
+
+#: Page size for the GraphQL ``files`` connection on a PullRequest. 100 is
+#: GitHub's documented upper bound; explicit pagination guarantees we never
+#: silently miss offending files when a PR exceeds this size.
+_CHANGED_FILES_PAGE_SIZE = 100
+
+#: Hard upper bound on pagination — a defensive guard that prevents an
+#: unexpected ``hasNextPage=True`` loop from running unbounded if GitHub ever
+#: returns a malformed cursor.  10 pages × 100 files == 1000 changed files,
+#: which already exceeds GitHub's recommended PR size.  Beyond this we fail
+#: closed as UNAVAILABLE.
+_CHANGED_FILES_MAX_PAGES = 10
+
+_CHANGED_FILES_QUERY = (
+    "query($owner: String!, $repo: String!, $number: Int!, $first: Int!, $after: String) {\n"
+    "  repository(owner: $owner, name: $repo) {\n"
+    "    pullRequest(number: $number) {\n"
+    "      files(first: $first, after: $after) {\n"
+    "        nodes { path }\n"
+    "        pageInfo { hasNextPage endCursor }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}"
+)
+
+
+def _fetch_changed_files(pr: PrTarget, rule: Rule) -> tuple[list[str] | None, int | None, Diagnostic | None]:
+    """Fetch the *complete* list of changed file paths for *pr*.
+
+    Returns ``(filenames, page_count, None)`` on success.
+    Returns ``(None, None, diag)`` on any failure.
+
+    Pagination is explicit: we walk the GraphQL ``files`` connection until
+    ``pageInfo.hasNextPage`` is the literal boolean ``False``.  Anything
+    else (truncation, missing cursor, malformed shape, exceeding
+    ``_CHANGED_FILES_MAX_PAGES``) fails closed as UNAVAILABLE so partial
+    data can never produce a PASS.
+    """
+    filenames: list[str] = []
+    after: str | None = None
+    page_count = 0
+
+    while True:
+        page_count += 1
+        if page_count > _CHANGED_FILES_MAX_PAGES:
+            return (
+                None,
+                None,
+                gh_pagination_diag(rule, "graphql", end_cursor=after),
+            )
+
+        argv = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={_CHANGED_FILES_QUERY}",
+            "-f",
+            f"owner={pr.owner}",
+            "-f",
+            f"repo={pr.repo}",
+            "-F",
+            f"number={pr.number}",
+            "-F",
+            f"first={_CHANGED_FILES_PAGE_SIZE}",
+        ]
+        if after is not None:
+            argv.extend(["-f", f"after={after}"])
+
+        result = run_gh(argv)
+        if not result.ok:
+            return None, None, failure_diag(rule, "graphql", result)
+
+        data, err = parse_json(result.stdout)
+        if err is not None:
+            return None, None, gh_json_diag(rule, "graphql", err)
+
+        # Top-level GraphQL errors → UNAVAILABLE
+        if isinstance(data, dict) and "errors" in data:
+            raw_errors = data["errors"]
+            if not isinstance(raw_errors, list):
+                raw_errors = [raw_errors]
+            summaries: list[str] = []
+            for e in raw_errors:
+                if isinstance(e, dict):
+                    msg = str(e.get("message", repr(e)))
+                else:
+                    msg = str(e)
+                msg = _redact(msg)
+                if len(msg) > _GRAPHQL_ERROR_MSG_LIMIT:
+                    msg = msg[:_GRAPHQL_ERROR_MSG_LIMIT] + "…"
+                summaries.append(msg)
+            diag = _base_gh_diag(
+                rule,
+                Status.UNAVAILABLE,
+                "gh 'graphql' returned GraphQL errors; evaluation is unavailable.",
+                [
+                    Evidence(
+                        kind="gh_graphql_error",
+                        data={
+                            "op": "graphql",
+                            "errors": summaries,
+                            "owner": pr.owner,
+                            "repo": pr.repo,
+                            "number": pr.number,
+                        },
+                    )
+                ],
+            )
+            return None, None, diag
+
+        # Navigate to data.repository.pullRequest.files
+        if not isinstance(data, dict) or "data" not in data:
+            return None, None, gh_missing_field_diag(rule, "graphql", "data")
+        repo_data = data["data"]
+        if not isinstance(repo_data, dict) or "repository" not in repo_data:
+            return None, None, gh_missing_field_diag(rule, "graphql", "data.repository")
+        repository = repo_data["repository"]
+        if not isinstance(repository, dict) or "pullRequest" not in repository:
+            return (
+                None,
+                None,
+                gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest"),
+            )
+        pull_request = repository["pullRequest"]
+        if not isinstance(pull_request, dict) or "files" not in pull_request:
+            return (
+                None,
+                None,
+                gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files"),
+            )
+        files_conn = pull_request["files"]
+        if not isinstance(files_conn, dict):
+            return (
+                None,
+                None,
+                gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files"),
+            )
+
+        nodes = files_conn.get("nodes")
+        page_info = files_conn.get("pageInfo")
+        if not isinstance(nodes, list):
+            return (
+                None,
+                None,
+                gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files.nodes"),
+            )
+        if not isinstance(page_info, dict):
+            return (
+                None,
+                None,
+                gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files.pageInfo"),
+            )
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                # Truncated or malformed entry — fail closed rather than
+                # silently dropping it from the offending-files set.
+                return (
+                    None,
+                    None,
+                    gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files.nodes[].path"),
+                )
+            path = node.get("path")
+            if not isinstance(path, str) or not path:
+                return (
+                    None,
+                    None,
+                    gh_missing_field_diag(rule, "graphql", "data.repository.pullRequest.files.nodes[].path"),
+                )
+            filenames.append(path)
+
+        has_next = page_info.get("hasNextPage")
+        if has_next is False:
+            return filenames, page_count, None
+
+        # Pagination must continue: extract a usable cursor.  Anything other
+        # than ``hasNextPage = True`` with a string ``endCursor`` is treated
+        # as truncated → UNAVAILABLE.
+        end_cursor = page_info.get("endCursor")
+        if has_next is not True or not isinstance(end_cursor, str) or not end_cursor:
+            cursor_for_evidence = end_cursor if isinstance(end_cursor, str) else None
+            return (
+                None,
+                None,
+                gh_pagination_diag(rule, "graphql", end_cursor=cursor_for_evidence),
+            )
+        after = end_cursor
+
+
+def _validate_changed_files_params(rule: Rule) -> tuple[list[str], bool] | Diagnostic:
+    """Validate and normalize ``rule.params`` for ``github_changed_files_absent``.
+
+    Returns ``(patterns, case_sensitive)`` on success, or an UNAVAILABLE
+    Diagnostic with ``params_error`` evidence when params are missing or
+    malformed.
+
+    Contract:
+
+    - ``patterns`` is required and must be a non-empty list of non-empty
+      glob strings.
+    - ``case_sensitive`` is optional, defaults to ``True``, and must be a
+      bool when present.
+    """
+    params = rule.params
+    if "patterns" not in params:
+        return _params_error_diag(rule, "patterns is required", missing="patterns")
+
+    raw_patterns = params["patterns"]
+    if not isinstance(raw_patterns, list) or not raw_patterns:
+        return _params_error_diag(
+            rule,
+            "patterns must be a non-empty list of glob strings",
+            field="patterns",
+            actual_type=type(raw_patterns).__name__,
+        )
+
+    patterns: list[str] = []
+    for idx, item in enumerate(raw_patterns):
+        if not isinstance(item, str) or not item:
+            return _params_error_diag(
+                rule,
+                "patterns must contain only non-empty strings",
+                field=f"patterns[{idx}]",
+                actual_type=type(item).__name__,
+            )
+        patterns.append(item)
+
+    case_sensitive: bool = True
+    if "case_sensitive" in params:
+        raw_cs = params["case_sensitive"]
+        if not isinstance(raw_cs, bool):
+            return _params_error_diag(
+                rule,
+                "case_sensitive must be a boolean",
+                field="case_sensitive",
+                actual_type=type(raw_cs).__name__,
+            )
+        case_sensitive = raw_cs
+
+    return patterns, case_sensitive
+
+
+def _params_error_diag(rule: Rule, reason: str, **extra: object) -> Diagnostic:
+    """Build an UNAVAILABLE diagnostic with ``params_error`` evidence."""
+    data: dict[str, object] = {"rule_id": rule.id, "reason": reason}
+    data.update(extra)
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.GITHUB,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=f"rule {rule.id!r} has invalid params for github_changed_files_absent: {reason}",
+        evidence=[Evidence(kind="params_error", data=data)],
+    )
+
+
+def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+    """Translate a path glob to a regex.
+
+    Semantics
+    ---------
+    - ``**`` matches zero or more path segments, including separators.
+      The ``/**/`` form collapses to "zero or more directories" so that
+      ``**/*.xlsx`` matches both ``data.xlsx`` and ``deep/data.xlsx``,
+      and ``a/**/b`` matches ``a/b`` as well as ``a/x/b`` or ``a/x/y/b``.
+    - Single ``*`` matches any sequence of characters except ``/``.
+    - ``?`` matches exactly one non-``/`` character.
+    - All other characters are matched literally (regex metacharacters
+      are escaped).
+    """
+    i = 0
+    n = len(pattern)
+    out: list[str] = []
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            # ``**`` — possibly cross-segment match.
+            if i + 1 < n and pattern[i + 1] == "*":
+                # Leading ``**/`` → optional zero-or-more directories.
+                if i == 0 and i + 2 < n and pattern[i + 2] == "/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                    continue
+                # ``/**/`` between segments → optional zero-or-more directories.
+                if out and out[-1] == "/" and i + 2 < n and pattern[i + 2] == "/":
+                    out.pop()  # remove the preceding ``/``
+                    out.append("(?:/.*)?/")
+                    i += 3
+                    continue
+                # Trailing or standalone ``**`` matches the rest of the path.
+                out.append(".*")
+                i += 2
+                continue
+            # Single ``*`` — any chars except path separator.
+            out.append("[^/]*")
+            i += 1
+            continue
+        if c == "?":
+            out.append("[^/]")
+            i += 1
+            continue
+        if c in r".+()|^$\{}[]":
+            out.append(re.escape(c))
+            i += 1
+            continue
+        if c == "\\":
+            out.append(re.escape(c))
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def _match_glob(filename: str, pattern: str, *, case_sensitive: bool) -> bool:
+    """Return True if *filename* matches the glob *pattern*.
+
+    ``**`` matches zero or more path segments (including ``/``); ``*``
+    matches anything except ``/``; ``?`` matches a single non-``/`` char.
+    Case folding is controlled by *case_sensitive*.
+
+    The translator is always used (not only when ``**`` is present) so
+    ``/`` is treated as a path separator under all path globs.  Plain
+    ``fnmatch`` would treat ``*`` as "any sequence including ``/``",
+    which is the wrong semantics for changed-file path globs.
+    """
+    regex = _glob_to_regex(pattern)
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.match(regex.pattern, filename, flags) is not None
+
+
+def _check_changed_files_absent(rule: Rule, pr: PrTarget) -> Diagnostic:
+    """Pass when no PR changed file matches any forbidden glob; fail otherwise.
+
+    Evidence kind: ``pr_changed_files``.
+
+    - Missing/invalid ``patterns`` → UNAVAILABLE / ``params_error``.
+    - Incomplete pagination → UNAVAILABLE / ``gh_pagination_unavailable``.
+    - Any GitHub failure → UNAVAILABLE.
+    - Otherwise compares each repository-relative changed filename against
+      the configured glob patterns.  Offending filenames are listed
+      alongside the patterns that matched them.
+    """
+    validated = _validate_changed_files_params(rule)
+    if isinstance(validated, Diagnostic):
+        return validated
+    patterns, case_sensitive = validated
+
+    filenames, page_count, fetch_diag = _fetch_changed_files(pr, rule)
+    if fetch_diag is not None:
+        return fetch_diag
+    assert filenames is not None
+    assert page_count is not None
+
+    offending: list[dict[str, object]] = []
+    matched_patterns: set[str] = set()
+    for name in filenames:
+        for pattern in patterns:
+            if _match_glob(name, pattern, case_sensitive=case_sensitive):
+                offending.append({"path": name, "pattern": pattern})
+                matched_patterns.add(pattern)
+                break  # one pattern is enough; record the first match
+
+    evidence_data: dict[str, object] = {
+        "total_changed_files": len(filenames),
+        "forbidden_patterns": list(patterns),
+        "case_sensitive": case_sensitive,
+        "offending": offending,
+        "matched_patterns": sorted(matched_patterns),
+        "pagination_complete": True,
+        "page_count": page_count,
+        **_pr_coords(pr),
+    }
+    evidence = [Evidence(kind="pr_changed_files", data=evidence_data)]
+
+    if not offending:
+        return _diag(
+            rule,
+            Status.PASS,
+            (
+                f"PR {pr.owner}/{pr.repo}#{pr.number}: 0 of "
+                f"{len(filenames)} changed file(s) match forbidden patterns."
+            ),
+            evidence,
+        )
+
+    offending_paths = [str(entry["path"]) for entry in offending]
+    return _diag(
+        rule,
+        Status.FAIL,
+        (
+            f"PR {pr.owner}/{pr.repo}#{pr.number}: {len(offending_paths)} of "
+            f"{len(filenames)} changed file(s) match forbidden patterns: {offending_paths!r}."
+        ),
+        evidence,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dispatch tables
 # ---------------------------------------------------------------------------
 
@@ -844,6 +1251,7 @@ _PR_VIEW_HANDLERS = {
 # Handlers that make their own gh call directly (takes rule, pr only).
 _DIRECT_HANDLERS = {
     RuleKind.GITHUB_THREADS_RESOLVED: _check_threads_resolved,
+    RuleKind.GITHUB_CHANGED_FILES_ABSENT: _check_changed_files_absent,
 }
 
 # ---------------------------------------------------------------------------

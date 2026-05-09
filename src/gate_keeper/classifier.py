@@ -64,6 +64,32 @@ _PR_TASK_HIGH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Changed-file glob policy: only match when the rule explicitly mentions a PR
+# (``PR``/``PRs``/``pull request``) AND a strictly path/tree-mutation verb.
+# The verb list is intentionally narrow (``change``/``modify``/``add``/
+# ``create``/``touch``/``delete``/``remove``) so generic content rules such
+# as "PRs must not include TODO comments" or "PRs must not introduce new
+# global state" are NOT misrouted to ``github_changed_files_absent`` (which
+# requires ``params.patterns`` and would otherwise become ``unavailable``).
+#
+# The negation handles two grammatical shapes consistently:
+#   - ``must|should|may`` followed by an explicit ``not``
+#   - ``cannot|can not`` as the standalone negation (no second ``not``)
+# Earlier wording required ``cannot not …``, which never matches natural PR
+# prose like "PRs cannot change generated outputs".
+#
+# Wording examples that match (from issue #147):
+#   - "PRs must not change generated workbook outputs."
+#   - "PRs must not create context/researcher/raw/ as a tracked path."
+#   - "PRs must not add raw Office/PDF artifacts."
+#   - "PRs cannot change generated outputs."
+_CHANGED_FILES_HIGH_RE = re.compile(
+    r"\b(?:prs?|pull\s+requests?)\b\s+"
+    r"(?:(?:must|should|may)\s+not|cannot|can\s*not)\s+"
+    r"(?:change|modify|add|create|touch|delete|remove)\b",
+    re.IGNORECASE,
+)
+
 # Heading that signals this item belongs to a PR/GitHub section
 _PR_HEADING_RE = re.compile(
     r"\b(?:pr|pull\s+request|merge\s+gate|merge\s+check|github)\b",
@@ -190,6 +216,15 @@ def _classify_rule(rule: Rule) -> Rule:
             Backend.GITHUB,
             Confidence.HIGH,
             "explicit PR task/checklist reference",
+        )
+
+    if _CHANGED_FILES_HIGH_RE.search(text):
+        return _make(
+            rule,
+            RuleKind.GITHUB_CHANGED_FILES_ABSENT,
+            Backend.GITHUB,
+            Confidence.HIGH,
+            "explicit PR changed-file forbid wording",
         )
 
     # --- Medium-confidence GitHub (keyword signals without full explicit phrasing) ---
