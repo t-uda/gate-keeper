@@ -641,7 +641,10 @@ class TestReproducibilityFlag:
                         "judgment": "pass",
                         "primary_reason": "looks good",
                         # #168: pass also requires non-empty supporting quotes.
-                        "supporting_evidence_quotes": ["a representative substring"],
+                        # #172: quote must be a substring of ``str(target)`` —
+                        # the path string the prompt renders. PASS_README's
+                        # filename is "README.md" so we cite that.
+                        "supporting_evidence_quotes": ["README.md"],
                         "suggested_action": None,
                     }
                 ),

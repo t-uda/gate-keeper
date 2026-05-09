@@ -33,6 +33,18 @@ from gate_keeper.validator import validate
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Artifact text the canned PASS/FAIL stub responses claim to quote. Tests
+# that exercise the parser-side fabrication validator (#172) must pass this
+# text **inline** as the ``target`` argument so the canned quotes are real
+# substrings of the rendered prompt's ``Target reference`` block. The
+# substring check runs against ``str(target)`` — the same string the model
+# sees — not against any file off-band; passing a tmp ``Path`` whose file
+# contains the quotes would defeat the check (Codex review on PR #173).
+_STUB_ARTIFACT_TEXT = (
+    "The README documents both install and validate commands. "
+    "README.md has no '## Usage' heading and no example."
+)
+
 _VALID_PASS_JSON = json.dumps(
     {
         "judgment": "pass",
@@ -62,6 +74,19 @@ _STUB_TELEMETRY: dict[str, int] = {
 def _stub_response(text: str, telemetry: dict[str, int] | None = None) -> tuple[str, dict[str, int]]:
     """Build a ``(text, telemetry)`` tuple matching the real helper signature."""
     return text, dict(telemetry) if telemetry is not None else dict(_STUB_TELEMETRY)
+
+
+def _target_with_artifact(tmp_path, text: str = _STUB_ARTIFACT_TEXT) -> str:
+    """Return *text* — an inline artifact string suitable as a ``target``.
+
+    Kept as a helper (rather than an inline ``_STUB_ARTIFACT_TEXT`` literal
+    at every call site) so that future tweaks to the canned artifact text
+    only need to change the default here. ``tmp_path`` is accepted only to
+    keep the existing call-site signature; it is not used (the substring
+    check runs against the string itself, not against a file).
+    """
+    del tmp_path
+    return text
 
 
 def _semantic_rule(kind: RuleKind = RuleKind.SEMANTIC_RUBRIC) -> Rule:
@@ -397,7 +422,7 @@ class TestProviderDispatchAnthropic:
             "_call_anthropic",
             lambda key, system, user, model: _stub_response(_VALID_PASS_JSON),
         )
-        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.PASS
         assert diag.backend is Backend.LLM_RUBRIC
         assert diag.evidence[0].kind == "llm_judgment"
@@ -417,7 +442,7 @@ class TestProviderDispatchAnthropic:
             "_call_anthropic",
             lambda key, system, user, model: _stub_response(_VALID_FAIL_JSON),
         )
-        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.FAIL
         assert diag.evidence[0].kind == "llm_judgment"
         assert diag.evidence[0].data["judgment"] == "fail"
@@ -511,7 +536,7 @@ class TestProviderDispatchOpenAI:
             "_call_openai",
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
-        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.PASS
         assert diag.evidence[0].data["model"] == llm_backend.OPENAI_DEFAULT_MODEL
         assert diag.evidence[0].data["judgment"] == "pass"
@@ -524,7 +549,7 @@ class TestProviderDispatchOpenAI:
             "_call_openai",
             lambda *_a, **_k: _stub_response(_VALID_FAIL_JSON),
         )
-        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.FAIL
         assert diag.evidence[0].data["model"] == llm_backend.OPENAI_DEFAULT_MODEL
         assert diag.evidence[0].data["judgment"] == "fail"
@@ -806,7 +831,7 @@ class TestEvidenceObservability:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON, next(telemetries)),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 3)
         # llm_judgment evidence (representative run) carries telemetry.
         judgment_data = diag.evidence[0].data
         assert isinstance(judgment_data["latency_ms"], int)
@@ -975,6 +1000,292 @@ class TestParseLlmJudgment:
 
 
 # ---------------------------------------------------------------------------
+# Quote-fabrication validator (#172)
+# ---------------------------------------------------------------------------
+
+
+class TestQuoteFabricationDetection:
+    """#172 — parser-side enforcement of substring grounding for quotes.
+
+    The v2 prompt (#168) instructs the model that every quote in
+    ``supporting_evidence_quotes`` must be drawn as a near-verbatim substring
+    of the artifact text. Tick 6 of umbrella #164's dogfood loop (issue
+    #172) showed that prompt-side instruction alone is insufficient: the
+    model can return generic placeholder strings that have zero overlap with
+    the artifact. The parser-side validator below converts such judgments to
+    ``UNSUPPORTED`` with ``llm_quote_fabrication`` evidence so the verdict
+    is not actioned.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    def test_fabricated_quote_yields_unsupported(self, monkeypatch):
+        """Quotes that are not substrings of the artifact reject the verdict.
+
+        The substring check is performed against the same string the prompt
+        renders (``str(target)``), since that is what the model actually
+        sees. This mirrors the tick 6 dogfood failure (#172) where
+        ``--target "<PR body>"`` was passed inline and the model returned
+        generic placeholder strings unrelated to the body.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        target_text = "feat(llm-rubric): tighten supporting_evidence_quotes constraints\n\nCloses #168.\n"
+        fabricated_payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "PR body lacks rationale.",
+                "supporting_evidence_quotes": ["This PR implements several changes to improve performance."],
+                "suggested_action": "Add a rationale paragraph.",
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(fabricated_payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), target_text)
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.backend is Backend.LLM_RUBRIC
+        assert len(diag.evidence) == 1
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+        # The evidence preserves the model's claimed verdict and the offending
+        # quotes so reviewers can see what the model returned.
+        data = diag.evidence[0].data
+        assert data["claimed_judgment"] == "fail"
+        assert data["primary_reason"] == "PR body lacks rationale."
+        assert data["fabricated_quotes"] == ["This PR implements several changes to improve performance."]
+        assert data["supporting_evidence_quotes"] == data["fabricated_quotes"]
+        # Telemetry / cost are still recorded (the API call did happen).
+        assert data["latency_ms"] == _STUB_TELEMETRY["latency_ms"]
+        assert data["tokens_in"] == _STUB_TELEMETRY["tokens_in"]
+        assert data["tokens_out"] == _STUB_TELEMETRY["tokens_out"]
+        assert "cost_estimate_usd" in data
+        # Remediation steers the operator away from acting on the verdict.
+        assert diag.remediation is not None
+        assert "Do not act" in diag.remediation
+
+    def test_partially_fabricated_quotes_yield_unsupported(self, monkeypatch):
+        """Even one fabricated quote is sufficient to reject the verdict."""
+        _patch_env(monkeypatch, self._ENV)
+        target_text = "Real phrase that the model legitimately quoted.\n\nMore body here.\n"
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Body explains motivation.",
+                "supporting_evidence_quotes": [
+                    "Real phrase that the model legitimately quoted.",
+                    "Fabricated extra string never present in the artifact.",
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), target_text)
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+        # Only the offending quote is recorded as fabricated; the legitimate
+        # quote stays in supporting_evidence_quotes.
+        assert diag.evidence[0].data["fabricated_quotes"] == [
+            "Fabricated extra string never present in the artifact."
+        ]
+
+    def test_well_behaved_quote_still_passes(self, monkeypatch):
+        """Quotes that ARE substrings of the artifact produce normal llm_judgment."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT)
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+        assert diag.evidence[0].data["judgment"] == "pass"
+
+    def test_whitespace_normalisation_tolerance(self, monkeypatch):
+        """Cosmetic whitespace differences must not trigger fabrication."""
+        _patch_env(monkeypatch, self._ENV)
+        # Artifact has line wrapping; the model emits the same content as a
+        # single line. Both should normalise to the same form.
+        target_text = "The PR description names\nthe user-visible change in the\nfirst sentence."
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    "The PR description names the user-visible change in the first sentence."
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), target_text)
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+
+    def test_smart_quote_folding_tolerance(self, monkeypatch):
+        """ASCII-quote normalisation in the model's quote must still match a
+        smart-quote-bearing artifact."""
+        _patch_env(monkeypatch, self._ENV)
+        # Artifact has a curly apostrophe; the model returns ASCII.
+        target_text = "It’s the body that matters, not the subject line."
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": ["It's the body that matters, not the subject line."],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), target_text)
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+
+    def test_path_target_substring_check_uses_path_string(self, monkeypatch, tmp_path):
+        """For path targets the substring check runs against the path string itself.
+
+        Rationale: the prompt renders ``str(target)`` into the ``Target
+        reference`` block, and the provider helpers do not give the model a
+        file-read tool. The model only ever sees the path. Reading the file
+        contents off-band would diverge from what the model has access to
+        and would force every legitimate verdict on a path target into a
+        false fabrication rejection (Codex review on PR #173).
+        """
+        _patch_env(monkeypatch, self._ENV)
+        artifact = tmp_path / "pr_body.md"
+        artifact.write_text("Body text the model never sees.", encoding="utf-8")
+        # The model returns a quote that *would* be a substring of the file
+        # contents but is NOT a substring of the path string. The verdict
+        # must still be rejected because the model never had access to the
+        # file contents.
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": ["Body text the model never sees."],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+
+    def test_path_target_quote_drawn_from_path_passes(self, monkeypatch, tmp_path):
+        """When the model quotes from the path string itself (the only
+        artifact text it has access to), the verdict is accepted."""
+        _patch_env(monkeypatch, self._ENV)
+        artifact = tmp_path / "pr_body.md"
+        artifact.write_text("contents irrelevant", encoding="utf-8")
+        # Quote uses the file's basename which IS a substring of the path
+        # string the model was shown.
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "judging from filename",
+                "supporting_evidence_quotes": ["pr_body.md"],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+
+    def test_inline_string_target_validates_against_string_itself(self, monkeypatch):
+        """The dogfood case from #172: ``--target "<PR body>"`` passes the
+        literal body inline; quotes must be substrings of it."""
+        _patch_env(monkeypatch, self._ENV)
+        target_string = "feat(llm-rubric): tighten supporting_evidence_quotes constraints"
+        # Quote that is NOT a substring of the inline target.
+        fabricated_payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "Generic.",
+                "supporting_evidence_quotes": ["This PR includes some refactoring and adds new tests."],
+                "suggested_action": "Be specific.",
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(fabricated_payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), target_string)
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+
+    def test_empty_quote_string_treated_as_fabricated(self, monkeypatch):
+        """An empty / whitespace-only quote is a degenerate zero-grounding case."""
+        _patch_env(monkeypatch, self._ENV)
+        payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "x",
+                "supporting_evidence_quotes": ["   "],
+                "suggested_action": "fix it",
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT)
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+
+    def test_find_fabricated_quotes_helper(self):
+        """Direct unit test for the substring-validation helper."""
+        artifact = "alpha beta gamma delta epsilon"
+        # All present
+        assert llm_backend._find_fabricated_quotes(["alpha", "gamma"], artifact) == []
+        # One missing
+        assert llm_backend._find_fabricated_quotes(["alpha", "zeta"], artifact) == ["zeta"]
+        # All missing
+        assert llm_backend._find_fabricated_quotes(["zeta", "kappa"], artifact) == [
+            "zeta",
+            "kappa",
+        ]
+        # Whitespace tolerance — quote contains line wrapping
+        assert llm_backend._find_fabricated_quotes(["alpha\nbeta"], artifact) == []
+
+    def test_normalise_for_substring_collapses_whitespace(self):
+        norm = llm_backend._normalise_for_substring
+        assert norm("a   b\n\tc") == "a b c"
+        assert norm("  trim me  ") == "trim me"
+
+    def test_normalise_for_substring_folds_smart_quotes(self):
+        norm = llm_backend._normalise_for_substring
+        assert norm("It’s") == norm("It's")
+        assert norm("“hello”") == norm('"hello"')
+
+
+# ---------------------------------------------------------------------------
 # _parse_response backward-compat shim (legacy tests, kept for regression)
 # ---------------------------------------------------------------------------
 
@@ -1137,7 +1448,7 @@ class TestRunN:
             "_call_anthropic",
             lambda key, system, user, model: _stub_response(_VALID_PASS_JSON),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 1)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 1)
         # Only the llm_judgment evidence — no reproducibility_score appended.
         assert len(diag.evidence) == 1
         assert diag.evidence[0].kind == "llm_judgment"
@@ -1150,7 +1461,7 @@ class TestRunN:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 3)
         assert diag.status is Status.PASS
         # last evidence is the reproducibility entry
         repro = diag.evidence[-1]
@@ -1167,7 +1478,7 @@ class TestRunN:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(_VALID_FAIL_JSON),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 3)
         assert diag.status is Status.FAIL
         repro = diag.evidence[-1]
         assert repro.kind == "reproducibility_score"
@@ -1184,7 +1495,7 @@ class TestRunN:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(next(responses)),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 3)
         assert diag.status is Status.PASS
         repro = diag.evidence[-1]
         assert repro.kind == "reproducibility_score"
@@ -1201,7 +1512,7 @@ class TestRunN:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(next(responses)),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 3)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 3)
         assert diag.status is Status.FAIL
         repro = diag.evidence[-1]
         assert repro.kind == "reproducibility_score"
@@ -1218,7 +1529,7 @@ class TestRunN:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(next(responses)),
         )
-        diag = llm_backend.run_n(_semantic_rule(), tmp_path, 2)
+        diag = llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 2)
         assert diag.status is Status.FAIL
         repro = diag.evidence[-1]
         assert repro.data["pass_count"] == 1
@@ -1254,7 +1565,7 @@ class TestRunN:
             return _stub_response(_VALID_PASS_JSON)
 
         monkeypatch.setattr(llm_backend, "_call_anthropic", _counter)
-        llm_backend.run_n(_semantic_rule(), tmp_path, 5)
+        llm_backend.run_n(_semantic_rule(), _target_with_artifact(tmp_path), 5)
         assert call_count["n"] == 5
 
 

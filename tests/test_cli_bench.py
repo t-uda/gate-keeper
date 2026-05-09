@@ -33,13 +33,19 @@ def _patch_env(monkeypatch, env: dict[str, str]) -> None:
 
 
 def _stub_openai_pass(*_args, **_kwargs) -> tuple[str, dict[str, int]]:
-    """Mock OpenAI helper returning a structured `pass` judgment."""
+    """Mock OpenAI helper returning a structured `pass` judgment.
+
+    Quotes are picked to be substrings of the inline target text used by the
+    smoke fixtures below (``"example artefact body"``) so the parser-side
+    fabrication validator (#172) does not reject the verdict.
+    """
     body = json.dumps(
         {
             "judgment": "pass",
             "primary_reason": "The artefact satisfies the rule.",
             # #168: pass also requires non-empty supporting quotes.
-            "supporting_evidence_quotes": ["a representative substring"],
+            # #172: quote must be a substring of the artifact text.
+            "supporting_evidence_quotes": ["example artefact body"],
             "suggested_action": None,
         }
     )
@@ -51,7 +57,8 @@ def _stub_openai_fail(*_args, **_kwargs) -> tuple[str, dict[str, int]]:
         {
             "judgment": "fail",
             "primary_reason": "The artefact violates the rule.",
-            "supporting_evidence_quotes": ["evidence quote"],
+            # #172: quote must be a substring of the artifact text.
+            "supporting_evidence_quotes": ["example artefact body"],
             "suggested_action": "Fix it.",
         }
     )
@@ -207,7 +214,8 @@ class TestRunBenchSmoke:
                         "judgment": "pass",
                         "primary_reason": "PASS rationale — should not appear",
                         # #168: pass also requires non-empty supporting quotes.
-                        "supporting_evidence_quotes": ["a representative substring"],
+                        # #172: quote must be a substring of the artifact text.
+                        "supporting_evidence_quotes": ["example artefact body"],
                         "suggested_action": None,
                     }
                 )
@@ -216,7 +224,8 @@ class TestRunBenchSmoke:
                 {
                     "judgment": "fail",
                     "primary_reason": "FAIL rationale — majority side",
-                    "supporting_evidence_quotes": ["evidence of violation"],
+                    # #172: quote must be a substring of the artifact text.
+                    "supporting_evidence_quotes": ["example artefact body"],
                     "suggested_action": "Fix it.",
                 }
             )
@@ -255,7 +264,10 @@ class TestCliBench:
             json.dumps(
                 {
                     "rule_text": "The artefact satisfies the example rule.",
-                    "target": {"kind": "inline", "value": "example body"},
+                    # #172: keep target text in sync with ``_stub_openai_pass``'s
+                    # supporting quote so the parser-side fabrication check
+                    # accepts the verdict.
+                    "target": {"kind": "inline", "value": "example artefact body"},
                     "expected_judgment": "pass",
                     "expected_rationale_keywords": [],
                     "category": "clarity",
