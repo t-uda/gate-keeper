@@ -1054,7 +1054,13 @@ class TestPromptTemplateEvidenceConstraints:
 
     def _rendered(self) -> str:
         rule = _semantic_rule()
-        _system, user = llm_backend._build_prompt(rule, "tests/fixtures/semantic/targets/example.md")
+        # _build_prompt only string-formats the target reference into the
+        # rendered prompt; it does not read the file. We point at an
+        # existing fixture so this assertion stays grep-friendly even
+        # though the prompt-text checks below are file-content-independent.
+        _system, user = llm_backend._build_prompt(
+            rule, "tests/fixtures/semantic/targets/changelog_no_rationale.md"
+        )
         return user
 
     def test_prompt_requires_quotes_on_every_verdict(self):

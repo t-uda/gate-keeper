@@ -206,7 +206,9 @@ A failing verdict, grounded in the artifact:
 {{
   "judgment": "fail",
   "primary_reason": "The commit body restates the subject without explaining motivation.",
-  "supporting_evidence_quotes": ["fix the bug"],
+  "supporting_evidence_quotes": [
+    "This commit fixes the bug. See the diff for details. Tests updated accordingly."
+  ],
   "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
 }}
 """
