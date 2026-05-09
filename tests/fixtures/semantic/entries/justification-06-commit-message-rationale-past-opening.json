@@ -1,0 +1,12 @@
+{
+  "rule_text": "The commit message should explain why the change was made, not only what was changed.",
+  "target": {
+    "kind": "inline",
+    "value": "fix(cli): handle ENAMETOOLONG in --target disambiguation (#166) (#167)\n\nWrap ``Path(sole).is_dir()`` and ``Path(sole).is_file()`` in the\nsingle-target path-vs-literal disambiguation block (cli.py) in\n``try/except OSError``. When the host filesystem rejects the token\n(``ENAMETOOLONG`` errno 36 on Linux when any ``/``-segment exceeds\nNAME_MAX = 255 bytes; ``EINVAL`` on some kernels for embedded NULs),\nthe token cannot possibly resolve to a real path. Treat it as literal\ntext and fall through to the non-path branch instead of letting the\ntraceback escape.\n\nDiscovered by the umbrella #164 dogfood orchestrator: 4 of 10\n``validate`` runs in tick 1 crashed with an uncaught Python traceback\non PR commit-message and body text well above NAME_MAX.\n\nAdds two regression tests under\n``TestLongLiteralTargetDoesNotCrash`` that run ``validate`` against\n``docs/dogfooding-rules.md`` with a long literal ``--target`` and\nassert clean JSON output, no traceback on stderr, and the documented\n``provider_unconfigured`` evidence (``llm_rubric._load_env_file`` is\nmonkeypatched to mask the developer's local provider state, matching\nthe pattern in ``tests/test_dogfooding_rules.py``).\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["NAME_MAX", "traceback", "Discovered", "umbrella", "rationale"],
+  "category": "justification",
+  "intended_backend": "llm-rubric",
+  "notes": "Regression entry for issue #168 / umbrella #164 tick 2: the rationale paragraphs (filesystem rejection -> literal token -> avoid traceback escape; orchestrator-discovered crash mode) appear past the opening line. v1 prompt anchored only on the subject and first 'what' sentence and flipped the verdict to fail; v2 must read the whole body. If the verdict remains fail, supporting_evidence_quotes must cite the rationale paragraphs (e.g. 'NAME_MAX', 'Discovered by the umbrella #164 dogfood orchestrator'), not just the subject line."
+}

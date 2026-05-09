@@ -30,7 +30,14 @@ OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 
 # Prompt versioning constant — referenced by issue #68 (reproducibility).
-PROMPT_VERSION = "v1"
+#
+# History:
+# - v1 (#67): initial structured-judgment schema.
+# - v2 (#168): tighten ``supporting_evidence_quotes`` constraints to require
+#   non-empty grounding on every verdict (pass and fail), near-verbatim
+#   substrings of the artifact text, and representative coverage rather than
+#   first-line bias.
+PROMPT_VERSION = "v2"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -88,8 +95,12 @@ class LlmJudgment:
     primary_reason:
         One-sentence summary of why the target passed or failed.
     supporting_evidence_quotes:
-        List of verbatim quotes from the target supporting the judgment.
-        Required (non-empty) on fail; optional (may be empty) on pass.
+        Non-empty list of near-verbatim substrings of the target text that
+        ground the judgment. Required (non-empty) for both ``"pass"`` and
+        ``"fail"`` (#168). Quotes must be drawn from the artifact, not
+        paraphrases of ``primary_reason``, and at least one entry should
+        reflect the strongest evidence for or against the rule's predicate
+        rather than only the artifact's opening lines.
     suggested_action:
         Concrete remediation step. Required on fail; MUST be ``None`` on pass.
     """
@@ -139,33 +150,64 @@ artifact satisfies the given rule.
 ## Instructions
 
 1. Read the rule carefully. It describes a quality requirement.
-2. Judge whether the target (identified by the reference above) satisfies it.
-3. If you cannot read the target's content directly, judge from the reference alone.
-4. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
+2. Read the entire target text — not only the opening lines. The strongest
+   evidence for or against the rule is often in the middle or later
+   sections (rationale paragraphs, body content, trailing details).
+3. Judge whether the target (identified by the reference above) satisfies it.
+4. If you cannot read the target's content directly, judge from the reference alone.
+5. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
 
 ## Required response schema
 
 {{
   "judgment": "pass" | "fail",
   "primary_reason": "<one sentence>",
-  "supporting_evidence_quotes": ["<verbatim quote>", ...],
+  "supporting_evidence_quotes": ["<near-verbatim substring of the target>", ...],
   "suggested_action": "<concrete step to fix>" | null
 }}
 
 Constraints:
 - `judgment` must be exactly `"pass"` or `"fail"`.
 - `primary_reason` must be a single sentence (no newlines).
-- `supporting_evidence_quotes` must contain at least one entry when `judgment` is `"fail"`.
+- `supporting_evidence_quotes` must contain **at least one entry** for
+  **every verdict — both `"pass"` and `"fail"`**. An empty list is invalid.
+- Each quote must be a **near-verbatim substring of the target text** —
+  copy the words from the artifact. Do **not** paraphrase
+  `primary_reason`, do **not** invent meta-statements about the artifact,
+  and do **not** quote the rule text. Minor whitespace or capitalisation
+  normalisation is acceptable; the test is whether a reader could locate
+  the quoted phrase in the artifact by ordinary search.
+- At least one quote must be **representative of the strongest evidence**
+  for or against the rule's predicate. When the artifact is long, do not
+  cite only the opening line or the subject; cite the body / rationale /
+  trailing content where the rule's predicate is most clearly satisfied
+  or violated.
+- The grounding requirement does not raise the bar for passing — if the
+  artifact plainly satisfies the rule, return `"pass"` and quote the
+  passage that demonstrates it.
 - `suggested_action` must be a non-empty string when `judgment` is `"fail"`;
   must be `null` when `judgment` is `"pass"`.
 
-## Example of a valid response
+## Examples of valid responses
+
+A passing verdict, grounded in the artifact:
+
+{{
+  "judgment": "pass",
+  "primary_reason": "The body explains the motivation by naming the failure mode and the reproducer.",
+  "supporting_evidence_quotes": [
+    "Discovered by the umbrella #164 dogfood orchestrator: 4 of 10 validate runs in tick 1 crashed"
+  ],
+  "suggested_action": null
+}}
+
+A failing verdict, grounded in the artifact:
 
 {{
   "judgment": "fail",
-  "primary_reason": "The README lacks a usage section.",
-  "supporting_evidence_quotes": ["README.md: no '## Usage' heading found"],
-  "suggested_action": "Add a '## Usage' section with at least one code example."
+  "primary_reason": "The commit body restates the subject without explaining motivation.",
+  "supporting_evidence_quotes": ["fix the bug"],
+  "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
 }}
 """
 
@@ -422,10 +464,13 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             raw_response_excerpt=excerpt,
         )
 
-    if judgment == "fail" and len(quotes) == 0:
+    # #168 — both pass and fail must be grounded by at least one quote.
+    if len(quotes) == 0:
         return LlmJudgmentParseError(
             failure_mode="missing_field",
-            detail="supporting_evidence_quotes must contain at least one entry when judgment is 'fail'.",
+            detail=(
+                f"supporting_evidence_quotes must contain at least one entry when judgment is {judgment!r}."
+            ),
             raw_response_excerpt=excerpt,
         )
 
