@@ -1413,3 +1413,141 @@ class TestLongLiteralTargetDoesNotCrash:
         assert "Traceback" not in captured.err
         assert "ENAMETOOLONG" not in captured.err
         assert "File name too long" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Glob-metachar literal text on non-filesystem rules (issue #165)
+# ---------------------------------------------------------------------------
+
+
+class TestGlobMetacharLiteralFallthrough:
+    """Issue #165: a single ``--target`` value that contains glob metachars
+    (``*``/``?``/``[``) but expands to zero filesystem matches must be
+    forwarded as literal text when the ruleset has no filesystem rules.
+
+    Before this fix, ``resolve_targets`` produced ``TargetSpec(is_multi=True,
+    paths=[])`` and the llm-rubric backend rejected it with
+    ``multi_target_unsupported`` — the literal author-supplied prose never
+    reached the model. This dropped 5/5 PR-body samples in tick 1 of the
+    dogfood loop (umbrella #164) because every realistic markdown body
+    contains ``**bold**``, ``[link](x)`` brackets, or ``- [x] item``
+    checkbox syntax.
+    """
+
+    def test_markdown_body_with_metachars_reaches_backend_as_literal(self, capsys, monkeypatch):
+        # Mask the developer dotenv via the established stub pattern so the
+        # llm-rubric backend takes its provider-unconfigured path. See
+        # tests/test_dogfooding_rules.py for the rationale on why patching
+        # ``_load_env_file`` (rather than ``DOTENV_PATH``) is required.
+        from gate_keeper.backends import llm_rubric
+
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+
+        # Realistic PR body fragment containing every glob metachar that
+        # tick 1 sampled: ``*`` (italics/bold), ``[`` (link), ``?`` (URL
+        # query). No filesystem path on disk would ever match it.
+        body = "**bold** with [link](x?diff=split) and *italics*"
+        assert any(c in body for c in "*?[")
+
+        rc = main(
+            [
+                "validate",
+                str(DOGFOODING_RULES_DOC),
+                "--target",
+                body,
+                "--backend",
+                "llm-rubric",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["diagnostics"], "expected at least one diagnostic"
+
+        # Contract: the backend must see the literal text.  With the
+        # provider stubbed unconfigured every diagnostic is UNAVAILABLE
+        # with ``provider_unconfigured`` evidence — proving the rubric
+        # entered ``check`` rather than fast-failing on the multi-target
+        # rejection branch.  Crucially, no diagnostic carries
+        # ``multi_target_unsupported`` evidence (the bug signature).
+        for diag in data["diagnostics"]:
+            assert diag["status"] == "unavailable", (
+                f"expected unavailable, got {diag['status']}: {diag['evidence']}"
+            )
+            ev_kinds = {ev["kind"] for ev in diag["evidence"]}
+            assert "provider_unconfigured" in ev_kinds, (
+                f"backend did not reach configuration check: {ev_kinds}"
+            )
+            assert "multi_target_unsupported" not in ev_kinds, (
+                "literal --target was mis-routed through multi-target glob resolver"
+            )
+
+        # Exit code is fail-closed (FAIL) for unavailable diagnostics.
+        assert rc == EXIT_FAIL
+
+    def test_github_checkbox_syntax_reaches_backend_as_literal(self, capsys, monkeypatch):
+        # Tick 2 (PR #167 body) hit this case: a markdown task list of the
+        # form ``- [x] item`` contains the ``[`` glob metachar and no
+        # filesystem matches exist for the bracket-prefixed token.
+        from gate_keeper.backends import llm_rubric
+
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+
+        body = "- [x] item one\n- [ ] item two\n- [x] item three"
+        assert "[" in body
+
+        rc = main(
+            [
+                "validate",
+                str(DOGFOODING_RULES_DOC),
+                "--target",
+                body,
+                "--backend",
+                "llm-rubric",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["diagnostics"]
+
+        for diag in data["diagnostics"]:
+            assert diag["status"] == "unavailable"
+            ev_kinds = {ev["kind"] for ev in diag["evidence"]}
+            assert "provider_unconfigured" in ev_kinds
+            assert "multi_target_unsupported" not in ev_kinds
+
+        assert rc == EXIT_FAIL
+
+    def test_filesystem_rule_with_empty_glob_still_fails_closed(self, tmp_path, capsys):
+        # Negative regression: when the ruleset *does* contain a filesystem
+        # rule, the legacy "empty glob → UNAVAILABLE" contract must survive.
+        # Without this guard the #165 fall-through would silently rewrite
+        # ``--target docs/*.zzz`` to a literal string and mask a real
+        # missing-file diagnostic.
+        rules = tmp_path / "rules.md"
+        rules.write_text(
+            "# Rules\n\n## Required Files\n\n- `README.md` must exist.\n",
+            encoding="utf-8",
+        )
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(tmp_path / "no_match_*.zzz"),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unavailable"

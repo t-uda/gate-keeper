@@ -8,7 +8,7 @@ from pathlib import Path
 
 from gate_keeper import __version__
 from gate_keeper.diagnostics import EXIT_OK, EXIT_USAGE
-from gate_keeper.models import RuleSet
+from gate_keeper.models import Backend, RuleSet
 
 # Backend choices exposed by the registry (always includes auto).
 _BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric", "external"]
@@ -454,6 +454,20 @@ def _load_ir_ruleset(path: Path) -> RuleSet | int:
         return EXIT_USAGE
 
 
+def _ruleset_has_filesystem_rule(ruleset: RuleSet) -> bool:
+    """Return True when at least one rule in *ruleset* routes to the filesystem backend.
+
+    Used by ``_cmd_validate`` to decide whether a single ``--target`` value
+    that contains glob metacharacters but expanded to zero filesystem matches
+    should be reinterpreted as literal text (issue #165).  Filesystem rules
+    have a meaningful interpretation of an empty glob — the legacy
+    fail-closed UNAVAILABLE outcome — so we must not silently rewrite the
+    target for them; only when **no** rule needs a filesystem path is a
+    glob-shaped literal unambiguously prose to forward to the backend.
+    """
+    return any(rule.backend_hint is Backend.FILESYSTEM for rule in ruleset.rules)
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     from gate_keeper import validator
     from gate_keeper.backends import is_registered
@@ -577,10 +591,34 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 target = sole
             else:
                 try:
-                    target = resolve_targets(raw_targets)
+                    resolved = resolve_targets(raw_targets)
                 except TargetExpansionError as exc:
                     print(f"error: --target: {exc}", file=sys.stderr)
                     return EXIT_USAGE
+                # Issue #165: a literal ``--target`` containing glob
+                # metacharacters (``*``/``?``/``[``) — common in markdown
+                # PR-body text such as ``**bold** with [link](x)`` or a
+                # GitHub-style checkbox ``- [x] item`` — is mis-routed
+                # through ``resolve_targets`` even when the rules in this
+                # ruleset have no filesystem backend.  When the expansion
+                # produced zero filesystem matches AND no rule routes to
+                # the filesystem backend, the only sensible interpretation
+                # is "literal text"; fall through to the raw string so the
+                # llm-rubric / github / external backend receives the
+                # author-supplied content instead of an empty TargetSpec.
+                #
+                # The check is intentionally narrow: a filesystem rule with
+                # an empty glob still produces ``UNAVAILABLE`` (the legacy
+                # fail-closed behaviour exercised by
+                # ``test_empty_glob_fails_closed``), and a non-filesystem
+                # rule with a glob that actually matched files still
+                # surfaces as ``multi_target_unsupported`` (the user
+                # explicitly asked for multiple files; #74's job to lift
+                # that restriction).
+                if not resolved.paths and not _ruleset_has_filesystem_rule(ruleset):
+                    target = sole
+                else:
+                    target = resolved
         else:
             target = sole
     else:
