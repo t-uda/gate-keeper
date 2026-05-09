@@ -465,8 +465,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # with --rules-format ir for IR input).
         if rules_format == "ir":
             print(
-                "error: --include is incompatible with --rules-format ir "
-                "(IR composition is not supported)",
+                "error: --include is incompatible with --rules-format ir (IR composition is not supported)",
                 file=sys.stderr,
             )
             return EXIT_USAGE
