@@ -86,12 +86,8 @@ class TestCompileInclude:
     def test_compile_multiple_globs_merge(self, tmp_path, capsys, monkeypatch):
         (tmp_path / "rulesA").mkdir()
         (tmp_path / "rulesB").mkdir()
-        _write_rules_doc(
-            tmp_path / "rulesA" / "x.md", _basic_doc("X", "`x.md` must exist.")
-        )
-        _write_rules_doc(
-            tmp_path / "rulesB" / "y.md", _basic_doc("Y", "`y.md` must exist.")
-        )
+        _write_rules_doc(tmp_path / "rulesA" / "x.md", _basic_doc("X", "`x.md` must exist."))
+        _write_rules_doc(tmp_path / "rulesB" / "y.md", _basic_doc("Y", "`y.md` must exist."))
         monkeypatch.chdir(tmp_path)
         rc = main(
             [
@@ -155,9 +151,7 @@ class TestCompileInclude:
         assert paths[0].endswith("alpha.md")
         assert paths[-1].endswith("zeta.md")
 
-    def test_compile_rejects_positional_and_include_together(
-        self, tmp_path, capsys, monkeypatch
-    ):
+    def test_compile_rejects_positional_and_include_together(self, tmp_path, capsys, monkeypatch):
         doc = tmp_path / "rules.md"
         _write_rules_doc(doc, _basic_doc("R", "`README.md` must exist."))
         monkeypatch.chdir(tmp_path)
@@ -184,12 +178,8 @@ class TestValidateInclude:
         # against ``PASS_README`` (which exists) should exit OK.
         rules_dir = tmp_path / "rules"
         rules_dir.mkdir()
-        _write_rules_doc(
-            rules_dir / "a.md", _basic_doc("A", "`README.md` must exist.")
-        )
-        _write_rules_doc(
-            rules_dir / "b.md", _basic_doc("B", "`README.md` must exist.")
-        )
+        _write_rules_doc(rules_dir / "a.md", _basic_doc("A", "`README.md` must exist."))
+        _write_rules_doc(rules_dir / "b.md", _basic_doc("B", "`README.md` must exist."))
         monkeypatch.chdir(tmp_path)
         rc = main(
             [
@@ -253,9 +243,7 @@ class TestValidateInclude:
         assert "rules/sub1/shared.md" in captured.err
         assert "rules/sub2/shared.md" in captured.err
 
-    def test_validate_rejects_positional_and_include_together(
-        self, tmp_path, capsys, monkeypatch
-    ):
+    def test_validate_rejects_positional_and_include_together(self, tmp_path, capsys, monkeypatch):
         doc = tmp_path / "rules.md"
         _write_rules_doc(doc, _basic_doc("R", "`README.md` must exist."))
         monkeypatch.chdir(tmp_path)

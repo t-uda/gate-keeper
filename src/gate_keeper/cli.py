@@ -42,9 +42,7 @@ def _expand_include_globs(patterns: list[str]) -> list[Path]:
         # single path (or zero, which we report as an unmatched glob below).
         hits = _glob.glob(pattern, recursive=True)
         if not hits:
-            raise _IncludeError(
-                f"--include: no files matched pattern {pattern!r}"
-            )
+            raise _IncludeError(f"--include: no files matched pattern {pattern!r}")
         for hit in hits:
             if hit not in seen:
                 seen.add(hit)
