@@ -326,3 +326,45 @@ class TestExpandIncludeGlobs:
         out = _expand_include_globs(["a.md", "./a.md"])
         assert len(out) == 1
         assert out[0].name == "a.md"
+
+    def test_helper_translates_symlink_loop_to_include_error(self, tmp_path, monkeypatch):
+        # Regression for codex review on PR #150 (issue #145):
+        # ``Path.resolve()`` raises ``RuntimeError`` when canonicalization
+        # encounters a symlink loop (``a.md -> b.md -> a.md``). The helper
+        # must catch that and re-raise as ``_IncludeError`` so the CLI maps
+        # it to the documented usage exit (``2``) rather than crashing with
+        # an uncaught traceback in ``_cmd_compile`` / ``_cmd_validate``.
+        import os
+
+        from gate_keeper.cli import _expand_include_globs, _IncludeError
+
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        try:
+            os.symlink(b, a)
+            os.symlink(a, b)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation not supported on this platform")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(_IncludeError) as excinfo:
+            _expand_include_globs(["a.md"])
+        assert "a.md" in str(excinfo.value)
+
+    def test_cli_symlink_loop_exits_2(self, tmp_path, monkeypatch, capsys):
+        # End-to-end guard: a symlink loop reachable through ``--include``
+        # must surface as ``EXIT_USAGE`` (2) on the ``compile`` subcommand,
+        # not as an uncaught ``RuntimeError`` traceback.
+        import os
+
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        try:
+            os.symlink(b, a)
+            os.symlink(a, b)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation not supported on this platform")
+        monkeypatch.chdir(tmp_path)
+        rc = main(["compile", "--include", "a.md"])
+        captured = capsys.readouterr()
+        assert rc == EXIT_USAGE
+        assert "a.md" in captured.err

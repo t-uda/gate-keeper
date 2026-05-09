@@ -49,7 +49,16 @@ def _expand_include_globs(patterns: list[str]) -> list[Path]:
         if not hits:
             raise _IncludeError(f"--include: no files matched pattern {pattern!r}")
         for hit in hits:
-            canonical = Path(hit).resolve()
+            # ``Path.resolve()`` can raise ``RuntimeError`` on symlink loops
+            # (e.g. ``a.md -> b.md -> a.md``) and ``OSError`` on broken paths.
+            # Translate either into ``_IncludeError`` so the CLI surfaces a
+            # ``EXIT_USAGE`` (2) instead of an uncaught traceback — the
+            # ``_cmd_compile`` / ``_cmd_validate`` wrappers only catch
+            # ``_IncludeError``.
+            try:
+                canonical = Path(hit).resolve()
+            except (OSError, RuntimeError) as exc:
+                raise _IncludeError(f"--include: cannot resolve path {hit!r}: {exc}") from exc
             if canonical not in seen_canonical:
                 seen_canonical.add(canonical)
                 matched.append(hit)
