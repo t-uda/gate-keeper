@@ -34,7 +34,12 @@ def _expand_include_globs(patterns: list[str]) -> list[Path]:
     Each pattern must match at least one path; unmatched patterns raise
     ``_IncludeError`` per the empty-include policy in issue #145.
     """
-    seen: set[str] = set()
+    # Dedup on the resolved (canonical) path so different glob spellings of
+    # the same physical file (e.g. ``a.md`` vs ``./a.md``, or distinct
+    # patterns whose hits overlap) are merged into a single include. Without
+    # this, the same file would be parsed twice and ``_check_duplicate_ids``
+    # would surface a false ``EXIT_USAGE`` for an otherwise-valid bundle.
+    seen_canonical: set[Path] = set()
     matched: list[str] = []
     for pattern in patterns:
         # ``glob`` expands shell-style globs; recursive ``**`` requires
@@ -44,11 +49,14 @@ def _expand_include_globs(patterns: list[str]) -> list[Path]:
         if not hits:
             raise _IncludeError(f"--include: no files matched pattern {pattern!r}")
         for hit in hits:
-            if hit not in seen:
-                seen.add(hit)
+            canonical = Path(hit).resolve()
+            if canonical not in seen_canonical:
+                seen_canonical.add(canonical)
                 matched.append(hit)
     # Lexicographic sort on the string path keeps order deterministic across
-    # platforms and across multiple --include flags.
+    # platforms and across multiple --include flags. The retained spelling
+    # for each physical file is the first one encountered, so per-rule
+    # ``source.path`` reflects how the user wrote the include.
     matched.sort()
     return [Path(p) for p in matched]
 

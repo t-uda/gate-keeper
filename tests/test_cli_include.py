@@ -311,3 +311,18 @@ class TestExpandIncludeGlobs:
         with pytest.raises(_IncludeError) as excinfo:
             _expand_include_globs(["nope/*.md"])
         assert "nope/*.md" in str(excinfo.value)
+
+    def test_helper_dedupes_different_spellings_of_same_path(self, tmp_path, monkeypatch):
+        # Regression for codex review on PR #150 (issue #145):
+        # ``a.md`` and ``./a.md`` resolve to the same physical file but
+        # would have produced distinct entries in the raw-string dedup set,
+        # causing ``_check_duplicate_ids`` to raise a false ``EXIT_USAGE``
+        # error when both spellings appeared via different ``--include``
+        # patterns. The helper must collapse them to a single include.
+        from gate_keeper.cli import _expand_include_globs
+
+        (tmp_path / "a.md").write_text("# x\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        out = _expand_include_globs(["a.md", "./a.md"])
+        assert len(out) == 1
+        assert out[0].name == "a.md"
