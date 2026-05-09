@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gate_keeper.models import Backend, Confidence, RuleKind, Severity
+from gate_keeper.models import Backend, Confidence, RuleKind, Severity, TargetKind
 from gate_keeper.parser import parse, parse_file
 
 FIXTURES = Path(__file__).parent / "fixtures" / "parser"
@@ -391,3 +391,104 @@ class TestFixtureFiles:
         # Rules under "Code Quality" section should carry that heading
         code_quality_rules = [r for r in rules if r.source.heading == "Contribution Rules > Code Quality"]
         assert len(code_quality_rules) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Inline target_kind annotation (#169)
+# ---------------------------------------------------------------------------
+
+
+class TestTargetKindAnnotation:
+    """#169 — trailing ``[target_kind: <value>]`` annotations on bullets / paragraphs.
+
+    The parser must:
+
+    1. strip the annotation token from the rule text;
+    2. attach the parsed :class:`TargetKind` to the resulting :class:`Rule`;
+    3. tolerate unknown values without failing — strip the token, fall back
+       to :data:`TargetKind.UNSPECIFIED`, and record a parse-time warning.
+    """
+
+    def test_pr_description_annotation_attaches_to_rule(self):
+        md = "- The PR description should describe the change. [target_kind: pr_description]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].target_kind is TargetKind.PR_DESCRIPTION
+
+    def test_annotation_is_stripped_from_rule_text(self):
+        md = "- The PR description should describe the change. [target_kind: pr_description]\n"
+        rules = _parse(md)
+        assert rules[0].text == "The PR description should describe the change."
+
+    def test_commit_message_annotation_attaches_to_rule(self):
+        md = "- The commit message must explain the why. [target_kind: commit_message]\n"
+        rules = _parse(md)
+        assert rules[0].target_kind is TargetKind.COMMIT_MESSAGE
+
+    def test_annotation_works_on_task_checkbox(self):
+        md = "- [ ] State how the change was tested. [target_kind: pr_description]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].text == "State how the change was tested."
+        assert rules[0].target_kind is TargetKind.PR_DESCRIPTION
+
+    def test_annotation_works_on_ordered_list(self):
+        md = "1. The issue body must describe a reproducer. [target_kind: issue_body]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].target_kind is TargetKind.ISSUE_BODY
+
+    def test_annotation_works_on_paragraph(self):
+        md = "The documentation must describe the supported workflow. [target_kind: documentation]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].text == "The documentation must describe the supported workflow."
+        assert rules[0].target_kind is TargetKind.DOCUMENTATION
+
+    def test_unknown_value_falls_back_to_unspecified_with_warning(self):
+        md = "- The thing must be valid. [target_kind: bogus_kind]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].target_kind is TargetKind.UNSPECIFIED
+        # Annotation token is still stripped even when the value is unknown.
+        assert rules[0].text == "The thing must be valid."
+        # Warning recorded under params for visibility in IR / explain output.
+        assert "target_kind_parse_warning" in rules[0].params
+        assert "bogus_kind" in rules[0].params["target_kind_parse_warning"]
+
+    def test_hyphen_typo_value_recorded_as_warning(self):
+        """Codex review on PR #174 — a common typo like ``commit-message`` (hyphen
+        instead of underscore) must be recognised as an annotation attempt
+        and routed through the warning channel rather than silently left
+        in the rule text. This protects the contract documented in the
+        module docstring ("unknown values are tolerated with warning").
+        """
+        md = "- The commit message must explain why. [target_kind: commit-message]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].target_kind is TargetKind.UNSPECIFIED
+        # Annotation token is stripped from the rule text.
+        assert rules[0].text == "The commit message must explain why."
+        # The warning surfaces the offending value verbatim.
+        assert "target_kind_parse_warning" in rules[0].params
+        assert "commit-message" in rules[0].params["target_kind_parse_warning"]
+
+    def test_no_annotation_yields_unspecified(self):
+        md = "- The thing must be valid.\n"
+        rules = _parse(md)
+        assert rules[0].target_kind is TargetKind.UNSPECIFIED
+        assert "target_kind_parse_warning" not in rules[0].params
+
+    def test_annotation_tolerates_internal_whitespace(self):
+        md = "- The thing must be valid. [ target_kind:  pr_description  ]\n"
+        rules = _parse(md)
+        assert rules[0].target_kind is TargetKind.PR_DESCRIPTION
+
+    def test_annotation_only_recognised_at_end_of_line(self):
+        """An annotation in the middle of the text is left as-is (treated as content)."""
+        md = "- The PR description [target_kind: pr_description] must describe the change.\n"
+        rules = _parse(md)
+        # Annotation is not at the end → not recognised → no field set.
+        assert rules[0].target_kind is TargetKind.UNSPECIFIED
+        # Text is preserved verbatim.
+        assert "[target_kind: pr_description]" in rules[0].text

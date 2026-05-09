@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
+from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status, TargetKind
 from gate_keeper.targets import TargetSpec
 
 name = "llm-rubric"
@@ -38,7 +38,12 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   non-empty grounding on every verdict (pass and fail), near-verbatim
 #   substrings of the artifact text, and representative coverage rather than
 #   first-line bias.
-PROMPT_VERSION = "v2"
+# - v3 (#169): when a rule carries ``target_kind`` (PR description / commit
+#   message / issue body / documentation / code change), inject an artifact-
+#   kind sentence into the prompt and authorise an ``"unsupported"`` verdict
+#   for the target-kind-mismatch case so the model can decline rather than
+#   parrot the rule's wording onto the wrong artifact.
+PROMPT_VERSION = "v3"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -92,21 +97,32 @@ class LlmJudgment:
     Fields
     ------
     judgment:
-        ``"pass"`` or ``"fail"``.
+        ``"pass"``, ``"fail"``, or ``"unsupported"`` (#169). The
+        ``"unsupported"`` verdict is reserved for the target-kind-mismatch
+        case: when the rule carries an explicit ``target_kind`` annotation
+        and the artifact provided is a different kind, the model returns
+        ``"unsupported"`` rather than parroting the rule's wording onto an
+        artifact the rule does not address. The backend maps this to
+        :data:`Status.UNSUPPORTED` with ``evidence.kind=target_kind_mismatch``.
     primary_reason:
-        One-sentence summary of why the target passed or failed.
+        One-sentence summary of why the target passed, failed, or was
+        rejected as unsupported.
     supporting_evidence_quotes:
         Non-empty list of near-verbatim substrings of the target text that
         ground the judgment. Required (non-empty) for both ``"pass"`` and
-        ``"fail"`` (#168). Quotes must be drawn from the artifact, not
-        paraphrases of ``primary_reason``, and at least one entry should
-        reflect the strongest evidence for or against the rule's predicate
-        rather than only the artifact's opening lines.
+        ``"fail"`` (#168). For ``"unsupported"`` verdicts the list may be
+        empty: when the rule does not address the artifact kind, no
+        artifact substring exists that could ground a verdict (#169).
+        Quotes must be drawn from the artifact, not paraphrases of
+        ``primary_reason``, and at least one entry should reflect the
+        strongest evidence for or against the rule's predicate rather than
+        only the artifact's opening lines.
     suggested_action:
-        Concrete remediation step. Required on fail; MUST be ``None`` on pass.
+        Concrete remediation step. Required on fail; MUST be ``None`` on
+        pass and on unsupported.
     """
 
-    judgment: Literal["pass", "fail"]
+    judgment: Literal["pass", "fail", "unsupported"]
     primary_reason: str
     supporting_evidence_quotes: list[str]
     suggested_action: str | None
@@ -136,6 +152,55 @@ class LlmJudgmentParseError:
 # Prompt template (#67)
 # ---------------------------------------------------------------------------
 
+# Brief description of each artifact kind, injected into the prompt so the
+# model can recognise the target-kind-mismatch case (#169). Kept terse — the
+# prompt grows linearly with this dict, and a long taxonomy crowds the
+# rubric-evaluation instructions for no marginal gain.
+_TARGET_KIND_DESCRIPTIONS: dict[TargetKind, str] = {
+    TargetKind.PR_DESCRIPTION: (
+        "the body / description of a pull request — narrative prose written to "
+        "explain the change to reviewers"
+    ),
+    TargetKind.COMMIT_MESSAGE: (
+        "a Git commit message — typically a short subject line and an optional body explaining the change"
+    ),
+    TargetKind.ISSUE_BODY: (
+        "the body of a GitHub issue — narrative prose describing a bug, feature request, or investigation"
+    ),
+    TargetKind.DOCUMENTATION: (
+        "documentation prose — README, design note, runbook, or reference material intended for human readers"
+    ),
+    TargetKind.CODE_CHANGE: (
+        "source code or a code diff — programming-language text rather than narrative prose"
+    ),
+}
+
+
+def _render_target_kind_block(target_kind: TargetKind) -> str:
+    """Return the optional artifact-kind block injected before ``## Instructions`` (#169).
+
+    Returns the empty string when *target_kind* is :data:`TargetKind.UNSPECIFIED`
+    so the v3 prompt is byte-identical to v2 for unannotated rules. When set,
+    returns a short block naming the artifact kind and authorising an
+    ``"unsupported"`` verdict for the target-kind-mismatch case.
+    """
+    if target_kind is TargetKind.UNSPECIFIED:
+        return ""
+    description = _TARGET_KIND_DESCRIPTIONS.get(target_kind, "")
+    descriptor = f"`{target_kind.value}`"
+    if description:
+        descriptor = f"{descriptor} ({description})"
+    return (
+        "\n## Artifact kind\n\n"
+        f"The artifact provided is a {descriptor}. "
+        "If the rule's premise does not apply to this artifact kind — for "
+        "example, the rule talks about a PR description but the artifact "
+        'above is a commit message — return `"unsupported"` (not a verdict) '
+        "and explain the mismatch in `primary_reason`. Do not parrot the "
+        "rule's wording onto an artifact the rule does not address.\n"
+    )
+
+
 RUBRIC_PROMPT_TEMPLATE = """\
 You are a rubric evaluator. Your sole task is to judge whether the target \
 artifact satisfies the given rule.
@@ -147,7 +212,7 @@ artifact satisfies the given rule.
 ## Target reference
 
 {target}
-
+{target_kind_block}
 ## Instructions
 
 1. Read the rule carefully. It describes a quality requirement.
@@ -156,22 +221,28 @@ artifact satisfies the given rule.
    sections (rationale paragraphs, body content, trailing details).
 3. Judge whether the target (identified by the reference above) satisfies it.
 4. If you cannot read the target's content directly, judge from the reference alone.
-5. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
+5. If an "Artifact kind" block is present and the rule's premise does not
+   apply to that artifact kind, return `"unsupported"` rather than rendering
+   a verdict.
+6. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
 
 ## Required response schema
 
 {{
-  "judgment": "pass" | "fail",
+  "judgment": "pass" | "fail" | "unsupported",
   "primary_reason": "<one sentence>",
   "supporting_evidence_quotes": ["<near-verbatim substring of the target>", ...],
   "suggested_action": "<concrete step to fix>" | null
 }}
 
 Constraints:
-- `judgment` must be exactly `"pass"` or `"fail"`.
+- `judgment` must be exactly `"pass"`, `"fail"`, or `"unsupported"`.
 - `primary_reason` must be a single sentence (no newlines).
 - `supporting_evidence_quotes` must contain **at least one entry** for
-  **every verdict — both `"pass"` and `"fail"`**. An empty list is invalid.
+  **every pass or fail verdict**. An empty list is invalid for `"pass"`
+  and `"fail"`. For an `"unsupported"` verdict the list may be empty:
+  when the rule does not address the artifact kind, no artifact
+  substring exists that could ground a verdict.
 - Each quote must be a **near-verbatim substring of the target text** —
   copy the words from the artifact. Do **not** paraphrase
   `primary_reason`, do **not** invent meta-statements about the artifact,
@@ -187,7 +258,7 @@ Constraints:
   artifact plainly satisfies the rule, return `"pass"` and quote the
   passage that demonstrates it.
 - `suggested_action` must be a non-empty string when `judgment` is `"fail"`;
-  must be `null` when `judgment` is `"pass"`.
+  must be `null` when `judgment` is `"pass"` or `"unsupported"`.
 
 ## Examples of valid responses
 
@@ -211,6 +282,15 @@ A failing verdict, grounded in the artifact:
     "This commit fixes the bug. See the diff for details. Tests updated accordingly."
   ],
   "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
+}}
+
+An unsupported verdict — the rule's premise does not apply to this artifact kind:
+
+{{
+  "judgment": "unsupported",
+  "primary_reason": "The rule addresses PR descriptions but the artifact provided is a commit message.",
+  "supporting_evidence_quotes": [],
+  "suggested_action": null
 }}
 """
 
@@ -282,18 +362,36 @@ def _resolve_model(provider: str, env: dict[str, str]) -> str:
 def _build_rubric_input(rule: Rule, target: str | Path) -> dict[str, Any]:
     """Return the context dict passed to the model and recorded in evidence.
 
-    Keys: ``rule_text``, ``rule_kind``, ``target``.
+    Keys: ``rule_text``, ``rule_kind``, ``target``, and (when set on the
+    rule) ``target_kind`` so the artifact-kind annotation surfaces in
+    ``provider_unconfigured`` / ``provider_error`` evidence the same way it
+    surfaces in successful ``llm_judgment`` evidence.
     """
-    return {
+    payload: dict[str, Any] = {
         "rule_text": rule.text,
         "rule_kind": rule.kind.value,
         "target": str(target),
     }
+    if rule.target_kind is not TargetKind.UNSPECIFIED:
+        payload["target_kind"] = rule.target_kind.value
+    return payload
 
 
 def _build_prompt(rule: Rule, target: str | Path) -> tuple[str, str]:
+    """Render the system + user messages for *rule* against *target* (#169).
+
+    When ``rule.target_kind`` is :data:`TargetKind.UNSPECIFIED` the
+    ``target_kind_block`` substitution renders to the empty string and the
+    user message is byte-identical to the v2 prompt — preserving v3
+    backwards-compatibility for existing rule docs that have not yet been
+    annotated.
+    """
     system = RUBRIC_SYSTEM_PROMPT
-    user = RUBRIC_PROMPT_TEMPLATE.format(rule_text=rule.text, target=str(target))
+    user = RUBRIC_PROMPT_TEMPLATE.format(
+        rule_text=rule.text,
+        target=str(target),
+        target_kind_block=_render_target_kind_block(rule.target_kind),
+    )
     return system, user
 
 
@@ -444,10 +542,10 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             )
 
     judgment = obj["judgment"]
-    if judgment not in ("pass", "fail"):
+    if judgment not in ("pass", "fail", "unsupported"):
         return LlmJudgmentParseError(
             failure_mode="invalid_judgment_value",
-            detail=f"judgment must be 'pass' or 'fail', got {judgment!r}.",
+            detail=f"judgment must be 'pass', 'fail', or 'unsupported', got {judgment!r}.",
             raw_response_excerpt=excerpt,
         )
 
@@ -468,7 +566,10 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         )
 
     # #168 — both pass and fail must be grounded by at least one quote.
-    if len(quotes) == 0:
+    # #169 — `unsupported` may carry an empty list: when the rule's premise
+    # does not address the artifact kind, no artifact substring exists that
+    # could ground a verdict.
+    if judgment in ("pass", "fail") and len(quotes) == 0:
         return LlmJudgmentParseError(
             failure_mode="missing_field",
             detail=(
@@ -486,7 +587,7 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
                 raw_response_excerpt=excerpt,
             )
     else:
-        # pass judgment — suggested_action must be None/absent
+        # pass / unsupported — suggested_action must be None/absent
         suggested_action = None
 
     return LlmJudgment(
@@ -686,6 +787,12 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     ``UNAVAILABLE`` with ``provider_error`` evidence — never to a crash,
     ``pass``, or ``fail``.
 
+    When the rule carries an explicit ``target_kind`` annotation (#169) and
+    the model determines the rule's premise does not apply to the artifact
+    (e.g. a PR-description rule given a commit-message artifact), the
+    judgment maps to :data:`Status.UNSUPPORTED` with
+    ``evidence.kind=target_kind_mismatch`` rather than rendering a verdict.
+
     Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
     supported by this backend in the first slice (issue #146); the call
     returns ``UNSUPPORTED`` with a ``multi_target_unsupported`` evidence
@@ -774,6 +881,67 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     assert telemetry.keys() >= {"latency_ms", "tokens_in", "tokens_out"}, (
         f"provider helper returned incomplete telemetry: {sorted(telemetry.keys())}"
     )
+
+    # #169 — when the model declines because the rule does not apply to the
+    # artifact kind (target_kind_mismatch), surface UNSUPPORTED with
+    # ``target_kind_mismatch`` evidence rather than running the
+    # substring-grounding check (an unsupported verdict legitimately carries
+    # an empty quote list — see ``LlmJudgment.supporting_evidence_quotes``).
+    #
+    # We only honour the verdict when the rule actually carries a
+    # ``target_kind`` annotation. Otherwise the prompt's "## Artifact kind"
+    # block was never rendered and the model has no basis to claim a
+    # mismatch — a stray ``"unsupported"`` from a flaky model on an
+    # unannotated rule is treated as a contract violation (`provider_error`
+    # / `unsupported_without_target_kind`) and degrades the verdict to
+    # UNAVAILABLE rather than silently inventing a mismatch.
+    if parsed.judgment == "unsupported":
+        if rule.target_kind is TargetKind.UNSPECIFIED:
+            return _unavailable_provider_error(
+                rule,
+                rubric_input,
+                provider,
+                "unsupported_without_target_kind",
+                (
+                    "Model returned 'unsupported' but the rule carries no "
+                    "target_kind annotation; the artifact-kind block was "
+                    "never injected into the prompt, so the verdict has "
+                    "no grounding. Treat as provider error."
+                ),
+            )
+        cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=parsed.primary_reason,
+            evidence=[
+                Evidence(
+                    kind="target_kind_mismatch",
+                    data={
+                        "model": model,
+                        "prompt_version": PROMPT_VERSION,
+                        "judgment": parsed.judgment,
+                        "primary_reason": parsed.primary_reason,
+                        "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+                        "suggested_action": parsed.suggested_action,
+                        "rule_target_kind": rule.target_kind.value,
+                        "latency_ms": telemetry["latency_ms"],
+                        "tokens_in": telemetry["tokens_in"],
+                        "tokens_out": telemetry["tokens_out"],
+                        "cost_estimate_usd": cost,
+                    },
+                )
+            ],
+            remediation=(
+                "The rule's premise does not apply to this artifact kind. "
+                "Either evaluate the rule against an artifact whose kind "
+                f"matches its `target_kind` ({rule.target_kind.value}), or "
+                "remove / change the `target_kind` annotation on the rule."
+            ),
+        )
 
     # #172 — parser-side enforcement of the v2 prompt's substring-grounding
     # contract. If any quote is not a substring of the artifact text, reject

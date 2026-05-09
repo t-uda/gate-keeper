@@ -44,6 +44,7 @@ from gate_keeper.models import (
     Severity,
     SourceLocation,
     Status,
+    TargetKind,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,10 +62,15 @@ _REQUIRED_FIELDS = frozenset(
         "intended_backend",
     }
 )
-_OPTIONAL_FIELDS = frozenset({"notes"})
+# ``rule_target_kind`` (#169) is optional. When set on an entry, the bench
+# harness propagates the value into the synthesised :class:`Rule` so the
+# rubric backend renders the v3 artifact-kind block. Distinct name from the
+# pre-existing ``target.kind`` (path / inline) below — the two address
+# different concerns (artifact kind vs. how the target value is encoded).
+_OPTIONAL_FIELDS = frozenset({"notes", "rule_target_kind"})
 _TARGET_FIELDS = frozenset({"kind", "value"})
 _VALID_KINDS = ("path", "inline")
-_VALID_JUDGMENTS = ("pass", "fail")
+_VALID_JUDGMENTS = ("pass", "fail", "unsupported")
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,8 @@ class BenchEntry:
     intended_backend: str
     notes: str | None
     source_path: Path
+    # #169 — optional artifact-kind annotation on the synthesised rule.
+    rule_target_kind: TargetKind = TargetKind.UNSPECIFIED
 
     def resolve_target(self, targets_root: Path) -> str:
         """Return the literal text the rule should be evaluated against."""
@@ -155,6 +163,24 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
             f"BenchEntry({source_path.name}).notes: expected str or absent, got {type(notes_value).__name__}"
         )
 
+    rule_target_kind_value = data.get("rule_target_kind")
+    if rule_target_kind_value is None:
+        rule_target_kind = TargetKind.UNSPECIFIED
+    else:
+        if not isinstance(rule_target_kind_value, str):
+            raise ValueError(
+                f"BenchEntry({source_path.name}).rule_target_kind: expected str, got "
+                f"{type(rule_target_kind_value).__name__}"
+            )
+        try:
+            rule_target_kind = TargetKind(rule_target_kind_value)
+        except ValueError as exc:
+            valid = sorted(member.value for member in TargetKind)
+            raise ValueError(
+                f"BenchEntry({source_path.name}).rule_target_kind: "
+                f"{rule_target_kind_value!r} is not a valid TargetKind; expected one of {valid}"
+            ) from exc
+
     return BenchEntry(
         id=source_path.stem,
         rule_text=_expect_str(data["rule_text"], "rule_text"),
@@ -168,6 +194,7 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
         intended_backend=_expect_str(data["intended_backend"], "intended_backend"),
         notes=notes_value,
         source_path=source_path,
+        rule_target_kind=rule_target_kind,
     )
 
 
@@ -196,7 +223,9 @@ def _entry_to_rule(entry: BenchEntry) -> Rule:
     ``rule_text`` is the rule, and the rest of the IR fields take fixed defaults
     (kind ``SEMANTIC_RUBRIC``, backend hint ``LLM_RUBRIC``, severity
     ``WARNING``). The ``source`` path is the entry filename so diagnostic
-    output remains traceable to a fixture file.
+    output remains traceable to a fixture file. The optional
+    ``rule_target_kind`` annotation (#169) is propagated so the rubric
+    backend renders the v3 artifact-kind block when set.
     """
     return Rule(
         id=entry.id,
@@ -208,6 +237,7 @@ def _entry_to_rule(entry: BenchEntry) -> Rule:
         backend_hint=Backend.LLM_RUBRIC,
         confidence=Confidence.LOW,
         params={},
+        target_kind=entry.rule_target_kind,
     )
 
 
@@ -333,14 +363,25 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
     model: str | None = None
     prompt_version: str | None = None
 
+    # Evidence kinds that carry the standard telemetry fields (#76, #133,
+    # #169, #172). Provider-error / provider_unconfigured are deliberately
+    # excluded — those paths do not carry telemetry by contract.
+    _TELEMETRY_BEARING_KINDS = (
+        "llm_judgment",
+        "target_kind_mismatch",
+        "llm_quote_fabrication",
+    )
+
     for _ in range(n):
         diag = _llm.check(rule, target_text)
 
-        # Telemetry is recorded on llm_judgment evidence; provider_error /
+        # Telemetry is recorded on every evidence kind that represents a
+        # successful provider call (judgment-bearing, target-kind-mismatch,
+        # or grounding-violation rejection). provider_error /
         # provider_unconfigured carry no telemetry.
         run_reason: str | None = None
         for ev in diag.evidence:
-            if ev.kind == "llm_judgment":
+            if ev.kind in _TELEMETRY_BEARING_KINDS:
                 tokens_in_total += int(ev.data.get("tokens_in", 0) or 0)
                 tokens_out_total += int(ev.data.get("tokens_out", 0) or 0)
                 latency_ms_total += int(ev.data.get("latency_ms", 0) or 0)
@@ -359,13 +400,44 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
             per_run_reasons.append(("fail", run_reason))
         else:
             # UNAVAILABLE / UNSUPPORTED / ERROR — fail-closed, report immediately.
+            #
+            # #169 special-case: when the rule carries ``target_kind`` and
+            # the model returns an ``unsupported`` verdict (mapped to
+            # ``Status.UNSUPPORTED`` with ``target_kind_mismatch`` evidence),
+            # that is an expected outcome for entries authored with
+            # ``expected_judgment == "unsupported"``. Treat such an entry
+            # as PASS and record the model-side primary_reason; we still
+            # short-circuit aggregation because reproducibility scoring
+            # for a third verdict is not modeled.
+            tk_mismatch_evidence: dict | None = None
             for ev in diag.evidence:
+                if ev.kind == "target_kind_mismatch":
+                    tk_mismatch_evidence = ev.data
                 if ev.kind == "provider_error":
                     failure_mode = str(ev.data.get("failure_mode", "provider_error"))
                     break
                 if ev.kind == "provider_unconfigured":
                     failure_mode = "provider_unconfigured"
                     break
+
+            if tk_mismatch_evidence is not None and entry.expected_judgment == "unsupported":
+                return PerRuleResult(
+                    id=entry.id,
+                    category=entry.category,
+                    intended_backend=entry.intended_backend,
+                    expected=entry.expected_judgment,
+                    actual="unsupported",
+                    status="PASS",
+                    reproducibility=1.0,
+                    primary_reason=tk_mismatch_evidence.get("primary_reason") or diag.message,
+                    failure_mode=None,
+                    tokens_in=tokens_in_total,
+                    tokens_out=tokens_out_total,
+                    latency_ms=latency_ms_total,
+                    model=model,
+                    prompt_version=prompt_version,
+                )
+
             actual = diag.status.value
             return PerRuleResult(
                 id=entry.id,

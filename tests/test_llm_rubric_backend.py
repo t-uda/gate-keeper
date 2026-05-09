@@ -1319,7 +1319,10 @@ class TestPromptVersion:
         assert hasattr(llm_backend, "PROMPT_VERSION")
         # #168 bumped v1 → v2 to mark the supporting_evidence_quotes
         # constraint tightening.
-        assert llm_backend.PROMPT_VERSION == "v2"
+        # #169 bumped v2 → v3 to add the optional artifact-kind block and
+        # authorise an ``unsupported`` verdict for the target-kind-mismatch
+        # case.
+        assert llm_backend.PROMPT_VERSION == "v3"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -1331,8 +1334,8 @@ class TestPromptVersion:
             "_call_anthropic",
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
-        diag = llm_backend.check(_semantic_rule(), tmp_path)
-        assert diag.evidence[0].data["prompt_version"] == "v2"
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].data["prompt_version"] == "v3"
 
 
 # ---------------------------------------------------------------------------
@@ -1377,9 +1380,10 @@ class TestPromptTemplateEvidenceConstraints:
     def test_prompt_requires_quotes_on_every_verdict(self):
         """The prompt must instruct that quotes are required on both pass and fail."""
         rendered = self._rendered()
-        # The v2 prompt explicitly names "every verdict" with both
-        # judgment values — the v1 prompt only required quotes on fail.
-        assert "every verdict" in rendered
+        # The v3 prompt names "every pass or fail verdict" — the v2 prompt
+        # said "every verdict — both pass and fail" without distinguishing
+        # ``unsupported`` (where quotes may legitimately be absent).
+        assert "every pass or fail verdict" in rendered
         assert '"pass"' in rendered
         assert '"fail"' in rendered
 
@@ -1421,6 +1425,202 @@ class TestPromptTemplateEvidenceConstraints:
         # Both verdicts must be named in the docstring so a reader cannot
         # infer the v1 "may be empty on pass" rule from the docstring alone.
         assert '"pass"' in doc and '"fail"' in doc
+
+
+# ---------------------------------------------------------------------------
+# Target-kind annotation (#169)
+# ---------------------------------------------------------------------------
+
+
+def _semantic_rule_with_target_kind(target_kind):
+    """Build a Rule with the given ``target_kind`` annotation."""
+    return Rule(
+        id="stub-llm-rule-tk",
+        title="Stub semantic rule (target_kind)",
+        source=SourceLocation(path="rules.md", line=5),
+        text="The PR description should name the user-visible change in the first sentence.",
+        kind=RuleKind.SEMANTIC_RUBRIC,
+        severity=Severity.WARNING,
+        backend_hint=Backend.LLM_RUBRIC,
+        confidence=Confidence.LOW,
+        params={},
+        target_kind=target_kind,
+    )
+
+
+class TestTargetKindPromptInjection:
+    """#169 — the prompt template includes / omits the artifact-kind block."""
+
+    def test_unspecified_target_kind_omits_artifact_kind_block(self):
+        """A rule without target_kind must render byte-identically to v2 plus version bump."""
+        from gate_keeper.models import TargetKind
+
+        rule = _semantic_rule_with_target_kind(TargetKind.UNSPECIFIED)
+        _system, user = llm_backend._build_prompt(rule, "an inline target string")
+        assert "## Artifact kind" not in user
+        # The "unsupported" verdict is still part of the schema text — it is
+        # always documented in the response-schema block — but the dedicated
+        # artifact-kind instruction block must not be rendered.
+        assert "If the rule's premise does not apply to this artifact kind" not in user
+
+    def test_pr_description_target_kind_renders_artifact_kind_block(self):
+        from gate_keeper.models import TargetKind
+
+        rule = _semantic_rule_with_target_kind(TargetKind.PR_DESCRIPTION)
+        _system, user = llm_backend._build_prompt(rule, "an inline target string")
+        assert "## Artifact kind" in user
+        assert "`pr_description`" in user
+        assert "If the rule's premise does not apply to this artifact kind" in user
+
+    def test_commit_message_target_kind_renders_artifact_kind_block(self):
+        from gate_keeper.models import TargetKind
+
+        rule = _semantic_rule_with_target_kind(TargetKind.COMMIT_MESSAGE)
+        _system, user = llm_backend._build_prompt(rule, "an inline target string")
+        assert "## Artifact kind" in user
+        assert "`commit_message`" in user
+
+    def test_schema_block_documents_unsupported_verdict(self):
+        """The response-schema block must always advertise ``unsupported`` (#169)."""
+        from gate_keeper.models import TargetKind
+
+        rule = _semantic_rule_with_target_kind(TargetKind.UNSPECIFIED)
+        _system, user = llm_backend._build_prompt(rule, "an inline target string")
+        assert '"unsupported"' in user
+
+
+class TestTargetKindParseAcceptsUnsupported:
+    """#169 — the parser accepts ``unsupported`` and waives quote-grounding."""
+
+    def test_unsupported_with_empty_quotes_is_valid(self):
+        payload = json.dumps(
+            {
+                "judgment": "unsupported",
+                "primary_reason": "The rule addresses PR descriptions but the artifact is a commit message.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgment)
+        assert result.judgment == "unsupported"
+        assert result.supporting_evidence_quotes == []
+        assert result.suggested_action is None
+
+    def test_pass_with_empty_quotes_still_rejected(self):
+        """Empty quote list remains invalid for pass / fail (regression guard for #168)."""
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Looks ok.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+
+    def test_fail_with_empty_quotes_still_rejected(self):
+        payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "Missing rationale.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": "Add a rationale paragraph.",
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "missing_field"
+
+    def test_invalid_judgment_value_message_lists_unsupported(self):
+        payload = json.dumps(
+            {
+                "judgment": "maybe",
+                "primary_reason": "x",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert "unsupported" in result.detail
+
+
+class TestUnsupportedDispatch:
+    """#169 — an ``unsupported`` verdict maps to ``Status.UNSUPPORTED``.
+
+    The diagnostic carries ``evidence.kind=target_kind_mismatch`` with the
+    rule's annotated kind. The substring-grounding check from #172 is
+    bypassed because an empty quote list is legitimate for this verdict.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+    }
+
+    _UNSUPPORTED_JSON = json.dumps(
+        {
+            "judgment": "unsupported",
+            "primary_reason": "The rule addresses PR descriptions but the artifact is a commit message.",
+            "supporting_evidence_quotes": [],
+            "suggested_action": None,
+        }
+    )
+
+    def test_unsupported_maps_to_status_unsupported(self, monkeypatch):
+        from gate_keeper.models import TargetKind
+
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._UNSUPPORTED_JSON),
+        )
+        rule = _semantic_rule_with_target_kind(TargetKind.PR_DESCRIPTION)
+        diag = llm_backend.check(rule, "fix(parser): handle CRLF in evidence blocks\n\nrelated to #foo")
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.backend is Backend.LLM_RUBRIC
+        assert diag.evidence[0].kind == "target_kind_mismatch"
+        assert diag.evidence[0].data["judgment"] == "unsupported"
+        assert diag.evidence[0].data["rule_target_kind"] == "pr_description"
+        assert diag.evidence[0].data["prompt_version"] == "v3"
+
+    def test_unsupported_remediation_explains_mismatch(self, monkeypatch):
+        from gate_keeper.models import TargetKind
+
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._UNSUPPORTED_JSON),
+        )
+        rule = _semantic_rule_with_target_kind(TargetKind.PR_DESCRIPTION)
+        diag = llm_backend.check(rule, "a commit message")
+        assert diag.remediation is not None
+        assert "pr_description" in diag.remediation
+
+    def test_unsupported_without_target_kind_degrades_to_unavailable(self, monkeypatch):
+        """#169 + Codex review — a stray ``"unsupported"`` from a flaky model on a
+        rule with ``target_kind=unspecified`` must NOT silently invent a
+        target-kind-mismatch. The artifact-kind block was never injected
+        into the prompt so the model has no basis for that verdict; the
+        backend treats it as a contract violation and returns
+        ``Status.UNAVAILABLE`` with ``provider_error`` /
+        ``unsupported_without_target_kind``.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._UNSUPPORTED_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), "any artifact")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_error"
+        assert diag.evidence[0].data["failure_mode"] == "unsupported_without_target_kind"
 
 
 # ---------------------------------------------------------------------------

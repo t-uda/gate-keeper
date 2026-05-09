@@ -1,0 +1,13 @@
+{
+  "rule_text": "The PR description should name the user-visible change in the first sentence.",
+  "rule_target_kind": "pr_description",
+  "target": {
+    "kind": "inline",
+    "value": "fix(parser): handle CRLF in evidence blocks\n\nThe evidence-block parser was reading raw bytes and treating CR as part of the\ntoken on Windows-authored docs, producing a heading_missing diagnostic on\nfiles that visibly contained the heading. Normalise line endings before the\nshape check so authors on either OS see consistent results.\n"
+  },
+  "expected_judgment": "unsupported",
+  "expected_rationale_keywords": ["PR description", "commit message", "artifact", "kind"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Issue #169 — a PR-description rule evaluated against a commit-message artifact must return `unsupported` rather than parroting the rule's wording onto the wrong artifact kind."
+}

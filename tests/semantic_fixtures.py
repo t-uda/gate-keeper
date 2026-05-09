@@ -35,11 +35,28 @@ class IntendedBackend(str, enum.Enum):
 class Judgment(str, enum.Enum):
     PASS = "pass"
     FAIL = "fail"
+    UNSUPPORTED = "unsupported"
 
 
 class TargetKind(str, enum.Enum):
     PATH = "path"
     INLINE = "inline"
+
+
+class RuleTargetKind(str, enum.Enum):
+    """Artifact-kind annotation on a benchmark rule (#169).
+
+    Mirrors :class:`gate_keeper.models.TargetKind`. Kept independent so the
+    test-only fixture loader does not import from the package's IR module —
+    it sits alongside the other test-only enums above.
+    """
+
+    UNSPECIFIED = "unspecified"
+    PR_DESCRIPTION = "pr_description"
+    COMMIT_MESSAGE = "commit_message"
+    ISSUE_BODY = "issue_body"
+    DOCUMENTATION = "documentation"
+    CODE_CHANGE = "code_change"
 
 
 @dataclass(frozen=True)
@@ -68,6 +85,7 @@ class FixtureEntry:
     intended_backend: IntendedBackend
     notes: str | None
     source_path: Path
+    rule_target_kind: RuleTargetKind = RuleTargetKind.UNSPECIFIED
 
 
 _REQUIRED = {
@@ -78,7 +96,7 @@ _REQUIRED = {
     "category",
     "intended_backend",
 }
-_OPTIONAL = {"notes"}
+_OPTIONAL = {"notes", "rule_target_kind"}
 _TARGET_REQUIRED = {"kind", "value"}
 
 
@@ -142,6 +160,11 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
             f"FixtureEntry({source_path.name}).notes: expected str or absent, "
             f"got {type(notes_value).__name__}"
         )
+    rule_target_kind_value = obj.get("rule_target_kind")
+    if rule_target_kind_value is None:
+        rule_target_kind = RuleTargetKind.UNSPECIFIED
+    else:
+        rule_target_kind = _coerce_enum(RuleTargetKind, rule_target_kind_value, "rule_target_kind")
     return FixtureEntry(
         id=source_path.stem,
         rule_text=_expect_str(obj["rule_text"], "rule_text"),
@@ -154,6 +177,7 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
         intended_backend=_coerce_enum(IntendedBackend, obj["intended_backend"], "intended_backend"),
         notes=notes_value,
         source_path=source_path,
+        rule_target_kind=rule_target_kind,
     )
 
 
@@ -179,6 +203,7 @@ __all__ = [
     "FixtureEntry",
     "IntendedBackend",
     "Judgment",
+    "RuleTargetKind",
     "Target",
     "TargetKind",
     "ENTRIES_DIR",

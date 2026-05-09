@@ -23,8 +23,9 @@ hard error (the loader fails loudly).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `rule_text` | string | yes | Verbatim rule wording (the Markdown bullet text the rule would appear as in a rules document). |
+| `rule_target_kind` | string | no | Optional :class:`TargetKind` annotation (`pr_description`, `commit_message`, `issue_body`, `documentation`, `code_change`, `unspecified`). When set, the bench harness propagates the value to the synthesised :class:`Rule` so the rubric backend renders the v3 artifact-kind block. Distinct from `target.kind` below — the latter is "how the target value is encoded", this one is "what kind of artifact the rule addresses". Introduced in #169. |
 | `target` | object | yes | What the rule is judged against. See **Target** below. |
-| `expected_judgment` | `"pass"` \| `"fail"` | yes | The judgment a correctly-functioning semantic rubric should return. |
+| `expected_judgment` | `"pass"` \| `"fail"` \| `"unsupported"` | yes | The judgment a correctly-functioning semantic rubric should return. The `"unsupported"` value (added in #169) is reserved for the target-kind-mismatch case: the rule's `rule_target_kind` does not match the artifact kind the target represents. |
 | `expected_rationale_keywords` | array of strings | yes | Soft signal: tokens that should appear in the model's rationale. Used as a fuzzy match by future tests; not an exact-match contract. |
 | `category` | enum | yes | One of `clarity`, `completeness`, `justification`, `naming`, `consistency`. |
 | `intended_backend` | enum | yes | Which backend *should* judge this rule under the E2.5 architecture. One of `llm-rubric`, `external+textlint`, `filesystem`, `github`. For #65's initial landing every entry is `llm-rubric`; the field is present so the schema stays stable when later trunks (#80 / #94) come online. |
