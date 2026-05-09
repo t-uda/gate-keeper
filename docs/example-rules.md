@@ -186,9 +186,24 @@ external/fail — prose-textlint: textlint reported 2 finding(s)
       rule_id=terminology, message=Incorrect term: "github", use "GitHub" instead, fixable=True)]
 ```
 
+**Running the IR file through `validate`:**
+
+```sh
+# After compile + edit (or hand-authoring the JSON directly):
+uv run gate-keeper validate --rules-format ir rules.json --target docs/draft.md
+```
+
+`--rules-format ir` parses the JSON with the strict `RuleSet` loader and
+**bypasses the classifier**, so the hand-authored `kind: external_check`,
+`backend_hint: external`, and `params.tool: textlint` reach the textlint
+adapter unchanged. The default (`--rules-format markdown`) re-parses and
+re-classifies a Markdown rule document on every call and is **not** the
+right path for hand-authored IR — custom `kind` / `backend_hint` / `params`
+overrides would be dropped.
+
 **Notes:**
 
-- The `gate-keeper validate` CLI re-parses and re-classifies the rule document on every call (`src/gate_keeper/cli.py` `_cmd_validate`), so a hand-edited compiled `rules.json` is not honoured. The JSON is read as text and the custom `kind` / `backend_hint` / `params` overrides are dropped. Use the IR shape above as a reference for the adapter contract; exercise the textlint adapter via the `gate_keeper.validator.validate` Python API or via the test fixtures in `tests/fixtures/external/` until a CLI flag for IR input lands.
 - Requires Node and `npm install` at the repository root to install textlint.
 - Run `npx --no textlint --fix <file>` to apply auto-fixable corrections.
-- See `docs/backend-external.md` for the full adapter contract.
+- See `docs/backend-external.md` for the full adapter contract and
+  `docs/cli-reference.md#validate` for the `--rules-format` flag reference.

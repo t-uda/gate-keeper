@@ -18,6 +18,9 @@ FAIL_DIR = LOCAL_FIXTURES / "fail"
 PASS_README = PASS_DIR / "README.md"
 # A minimal rules doc that produces exactly one file_exists rule.
 SIMPLE_RULES = Path(__file__).parent / "fixtures" / "validate" / "rules-file-exists.md"
+IR_FIXTURES = Path(__file__).parent / "fixtures" / "ir"
+IR_FILESYSTEM_RULES = IR_FIXTURES / "rule-filesystem-text-required.json"
+IR_TEXTLINT_RULES = IR_FIXTURES / "rule-external-textlint.json"
 
 
 # ---------------------------------------------------------------------------
@@ -671,3 +674,259 @@ class TestReproducibilityFlag:
                     assert 0.0 <= ev["data"]["score"] <= 1.0
         assert repro_count >= 1, "expected at least one reproducibility_score evidence in JSON output"
         assert rc == EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# --rules-format flag (issue #144)
+# ---------------------------------------------------------------------------
+
+
+class TestRulesFormatMarkdownDefault:
+    """Without ``--rules-format`` the existing Markdown path is preserved."""
+
+    def test_default_format_is_markdown(self, capsys):
+        """Omitting --rules-format runs the Markdown loader (regression check)."""
+        rc = main(
+            [
+                "validate",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        report = json.loads(captured.out)
+        assert report["diagnostics"], "markdown path should still produce diagnostics"
+
+    def test_explicit_markdown_format_matches_default(self, capsys):
+        """--rules-format markdown is accepted and equivalent to the default."""
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "markdown",
+                str(SIMPLE_RULES),
+                "--target",
+                str(PASS_README),
+                "--backend",
+                "filesystem",
+            ]
+        )
+        assert rc == EXIT_OK
+
+
+class TestRulesFormatIR:
+    """``--rules-format ir`` reads precompiled RuleSet JSON without re-classifying."""
+
+    def test_ir_filesystem_rule_validates_against_target(self, tmp_path, capsys):
+        """An IR file with a text_required filesystem rule validates end-to-end."""
+        # The IR fixture is a text_required rule with pattern "uv"; the
+        # filesystem backend expects --target to point at the file under
+        # test, so build a matching file under tmp_path.
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("Run `uv sync` to install.\n", encoding="utf-8")
+
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(IR_FILESYSTEM_RULES),
+                "--target",
+                str(agents),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        report = json.loads(captured.out)
+        diagnostics = report["diagnostics"]
+        assert len(diagnostics) == 1
+        diag = diagnostics[0]
+        # IR-supplied rule_id must survive untouched (no re-classification).
+        assert diag["rule_id"] == "agents-md-must-mention-uv"
+        assert diag["backend"] == "filesystem"
+        assert diag["status"] == "pass"
+
+    def test_ir_loading_preserves_kind_backend_hint_and_params(self, monkeypatch):
+        """Regression: IR loading must not re-classify rules.
+
+        Hand-authored ``kind``, ``backend_hint``, and ``params`` must reach
+        the validator unchanged. We capture the RuleSet that
+        ``validator.validate`` is called with and assert each field matches
+        the on-disk IR fixture exactly.
+        """
+        from unittest.mock import MagicMock
+
+        from gate_keeper.cli import _load_ir_ruleset
+        from gate_keeper.models import (
+            Backend,
+            DiagnosticReport,
+            RuleKind,
+            RuleSet,
+        )
+
+        captured_rulesets: list[RuleSet] = []
+
+        def fake_validate(ruleset, target, *, backend, reproducibility):
+            captured_rulesets.append(ruleset)
+            return DiagnosticReport(diagnostics=[])
+
+        monkeypatch.setattr("gate_keeper.validator.validate", MagicMock(side_effect=fake_validate))
+
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(IR_TEXTLINT_RULES),
+                "--target",
+                ".",
+                "--backend",
+                "auto",
+            ]
+        )
+        # With no diagnostics the exit code is OK regardless of backend.
+        assert rc == EXIT_OK
+        assert len(captured_rulesets) == 1
+        ruleset = captured_rulesets[0]
+        assert len(ruleset.rules) == 1
+        rule = ruleset.rules[0]
+        # Confirm the exact fields the IR file declares — proves the
+        # classifier was bypassed.
+        assert rule.id == "prose-textlint"
+        assert rule.kind == RuleKind.EXTERNAL_CHECK
+        assert rule.backend_hint == Backend.EXTERNAL
+        assert rule.params == {"tool": "textlint"}
+
+        # Loader-level smoke check: the helper returns an equivalent
+        # RuleSet directly (and never raises through the classifier).
+        loaded = _load_ir_ruleset(IR_TEXTLINT_RULES)
+        assert isinstance(loaded, RuleSet)
+        assert loaded.rules[0].kind == RuleKind.EXTERNAL_CHECK
+        assert loaded.rules[0].backend_hint == Backend.EXTERNAL
+        assert loaded.rules[0].params == {"tool": "textlint"}
+
+    def test_ir_missing_file_exits_2(self, capsys):
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                "/nonexistent/rules.json",
+                "--target",
+                str(PASS_DIR),
+                "--backend",
+                "auto",
+            ]
+        )
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "error:" in captured.err
+        assert "/nonexistent/rules.json" in captured.err
+
+    def test_ir_invalid_json_exits_2_with_path_and_reason(self, tmp_path, capsys):
+        bad = tmp_path / "rules.json"
+        bad.write_text("{ this is not json", encoding="utf-8")
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(bad),
+                "--target",
+                str(PASS_DIR),
+                "--backend",
+                "auto",
+            ]
+        )
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "error:" in captured.err
+        assert str(bad) in captured.err
+        assert "invalid JSON" in captured.err
+
+    def test_ir_invalid_shape_exits_2_with_path_and_reason(self, tmp_path, capsys):
+        """JSON that fails strict RuleSet parsing exits 2 with a clear error."""
+        bad = tmp_path / "rules.json"
+        # Missing required "rules" key.
+        bad.write_text(json.dumps({"oops": []}), encoding="utf-8")
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(bad),
+                "--target",
+                str(PASS_DIR),
+                "--backend",
+                "auto",
+            ]
+        )
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "error:" in captured.err
+        assert str(bad) in captured.err
+        assert "invalid rule IR" in captured.err
+
+    def test_ir_unknown_field_exits_2(self, tmp_path, capsys):
+        """Strict parser rejects unknown fields — must surface as exit 2."""
+        bad = tmp_path / "rules.json"
+        bad.write_text(
+            json.dumps(
+                {
+                    "rules": [
+                        {
+                            "id": "r1",
+                            "title": "t",
+                            "source": {"path": "x.md", "line": 1},
+                            "text": "t",
+                            "kind": "file_exists",
+                            "severity": "warning",
+                            "backend_hint": "filesystem",
+                            "confidence": "high",
+                            "params": {},
+                            "extra_unknown_field": "not allowed",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(bad),
+                "--target",
+                str(PASS_DIR),
+                "--backend",
+                "auto",
+            ]
+        )
+        assert rc == EXIT_USAGE
+        captured = capsys.readouterr()
+        assert "invalid rule IR" in captured.err
+
+    def test_ir_unknown_format_value_rejected_by_argparse(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "validate",
+                    "--rules-format",
+                    "yaml",
+                    str(SIMPLE_RULES),
+                    "--target",
+                    str(PASS_README),
+                ]
+            )
+        assert exc_info.value.code == 2

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from gate_keeper import __version__
 from gate_keeper.diagnostics import EXIT_OK, EXIT_USAGE
+from gate_keeper.models import RuleSet
 
 # Backend choices exposed by the registry (always includes auto).
 _BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric", "external"]
@@ -48,8 +50,26 @@ def build_parser() -> argparse.ArgumentParser:
         "validate",
         help="validate an artifact against a rule document",
     )
-    validate_parser.add_argument("rules", help="path to a rule document")
+    validate_parser.add_argument(
+        "rules",
+        help=(
+            "path to the rule input; interpreted as Markdown by default, or as "
+            "Rule IR JSON when --rules-format ir is given"
+        ),
+    )
     validate_parser.add_argument("--target", required=True, help="artifact or PR to validate")
+    validate_parser.add_argument(
+        "--rules-format",
+        dest="rules_format",
+        choices=["markdown", "ir"],
+        default="markdown",
+        help=(
+            "format of the rules argument (default: markdown). 'ir' loads a "
+            "precompiled RuleSet JSON file; the strict IR parser is used and the "
+            "classifier is bypassed so hand-authored kind/backend_hint/params are "
+            "preserved."
+        ),
+    )
     validate_parser.add_argument(
         "--backend",
         choices=_BACKEND_CHOICES,
@@ -123,8 +143,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_compile(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
     from gate_keeper import classifier, parser
 
     path = Path(args.document)
@@ -150,8 +168,6 @@ def _cmd_compile(args: argparse.Namespace) -> int:
 
 
 def _cmd_explain(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
     from gate_keeper import classifier, parser
     from gate_keeper.diagnostics import render_explain_text
 
@@ -179,10 +195,65 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _cmd_validate(args: argparse.Namespace) -> int:
-    from pathlib import Path
+def _load_markdown_ruleset(path: Path) -> RuleSet | int:
+    """Load a Markdown rule document and return a classified RuleSet.
 
-    from gate_keeper import classifier, parser, validator
+    Returns ``EXIT_USAGE`` (int) on read errors so the caller can propagate
+    the exit code without raising. Reads the file, parses it via
+    ``gate_keeper.parser.parse``, and runs the classifier — this is the
+    historical Markdown path.
+    """
+    from gate_keeper import classifier, parser
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: {path}: {exc.strerror}", file=sys.stderr)
+        return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {path}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
+        return EXIT_USAGE
+
+    ruleset = parser.parse(str(path), content)
+    ruleset = classifier.classify(ruleset)
+    return ruleset
+
+
+def _load_ir_ruleset(path: Path) -> RuleSet | int:
+    """Load a precompiled Rule IR JSON file via the strict RuleSet parser.
+
+    The classifier is intentionally **not** invoked: hand-authored ``kind``,
+    ``backend_hint``, and ``params`` fields must reach the validator
+    unchanged (see issue #144). Errors map to ``EXIT_USAGE`` with a
+    diagnostic that names the path and the parse/validation reason.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: {path}: {exc.strerror}", file=sys.stderr)
+        return EXIT_USAGE
+    except UnicodeDecodeError as exc:
+        print(f"error: {path}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"error: {path}: invalid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    try:
+        return RuleSet.from_dict(data)
+    except ValueError as exc:
+        print(f"error: {path}: invalid rule IR ({exc})", file=sys.stderr)
+        return EXIT_USAGE
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    from gate_keeper import validator
     from gate_keeper.backends import is_registered
     from gate_keeper.diagnostics import compute_exit_code, render_json, render_text
 
@@ -198,17 +269,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"error: {args.rules}: No such file or directory", file=sys.stderr)
         return EXIT_USAGE
 
-    try:
-        content = doc_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"error: {args.rules}: {exc.strerror}", file=sys.stderr)
-        return EXIT_USAGE
-    except UnicodeDecodeError as exc:
-        print(f"error: {args.rules}: not valid UTF-8 ({exc.reason})", file=sys.stderr)
-        return EXIT_USAGE
-
-    ruleset = parser.parse(str(doc_path), content)
-    ruleset = classifier.classify(ruleset)
+    rules_format = getattr(args, "rules_format", "markdown")
+    if rules_format == "ir":
+        loaded = _load_ir_ruleset(doc_path)
+    else:
+        loaded = _load_markdown_ruleset(doc_path)
+    if isinstance(loaded, int):
+        return loaded
+    ruleset = loaded
 
     # Validate reproducibility argument.
     if args.reproducibility < 1:
@@ -315,8 +383,6 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     stored baseline JSON document. The framework lands here in #130; the
     canonical baseline file is added by the follow-up issue (#132).
     """
-    from pathlib import Path
-
     from gate_keeper import bench as _bench
 
     entries_dir = Path(args.entries_dir)

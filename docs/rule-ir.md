@@ -7,6 +7,22 @@ This document describes the persisted JSON contract between
 The schema is intentionally minimal for the 3-day MVP. Plugin abstractions,
 provider configuration, and schema versioning are out of scope.
 
+## Consuming IR with `gate-keeper validate`
+
+`compile` emits the IR JSON shape; `validate` can consume it directly:
+
+```sh
+gate-keeper compile rules.md > rules.json
+gate-keeper validate --rules-format ir rules.json --target .
+```
+
+`--rules-format ir` parses the file with the strict `RuleSet.from_dict`
+loader and **bypasses the classifier**, so hand-authored `kind`,
+`backend_hint`, and `params` (notably `params.tool` for the `external`
+backend) survive into the validator. See
+[docs/cli-reference.md#validate](cli-reference.md#validate) for the full
+flag reference and the IR-specific error table.
+
 ## Top-level shapes
 
 `compile` emits a `RuleSet`:
