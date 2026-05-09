@@ -119,6 +119,51 @@ class TestGithubHighConfidence:
 
 
 # ---------------------------------------------------------------------------
+# Changed-file classifier — issue #147 (codex review regressions)
+# ---------------------------------------------------------------------------
+
+
+class TestChangedFilesClassifier:
+    def test_pr_must_not_change_routes_to_changed_files(self):
+        rule = _classify_text("PRs must not change generated workbook outputs.")
+        assert rule.backend_hint is Backend.GITHUB
+        assert rule.kind is RuleKind.GITHUB_CHANGED_FILES_ABSENT
+        assert rule.confidence is Confidence.HIGH
+
+    def test_pr_cannot_change_without_double_not(self):
+        # Regression for codex feedback: ``cannot`` is a standalone negation;
+        # the regex must not also require an explicit ``not`` after it.
+        rule = _classify_text("PRs cannot change generated outputs.")
+        assert rule.backend_hint is Backend.GITHUB
+        assert rule.kind is RuleKind.GITHUB_CHANGED_FILES_ABSENT
+        assert rule.confidence is Confidence.HIGH
+
+    def test_pr_can_not_change(self):
+        rule = _classify_text("PRs can not change generated outputs.")
+        assert rule.backend_hint is Backend.GITHUB
+        assert rule.kind is RuleKind.GITHUB_CHANGED_FILES_ABSENT
+
+    def test_pr_must_not_include_does_not_route_to_changed_files(self):
+        # Regression for codex feedback: ``include`` is a content verb, not a
+        # path-mutation verb. "PRs must not include TODO comments" is a
+        # text-content rule that needs ``params.patterns`` it cannot supply,
+        # so routing it to ``github_changed_files_absent`` would surface as
+        # ``unavailable`` with ``params_error`` — a user-visible regression.
+        rule = _classify_text("PRs must not include TODO comments.")
+        assert rule.kind is not RuleKind.GITHUB_CHANGED_FILES_ABSENT
+
+    def test_pr_must_not_introduce_does_not_route_to_changed_files(self):
+        rule = _classify_text("PRs must not introduce new global state.")
+        assert rule.kind is not RuleKind.GITHUB_CHANGED_FILES_ABSENT
+
+    def test_pr_must_not_commit_does_not_route_to_changed_files(self):
+        # ``commit`` is too broad: "PRs must not commit to outdated APIs" is
+        # not a path policy. Drop it from the verb list per codex feedback.
+        rule = _classify_text("PRs must not commit to outdated APIs.")
+        assert rule.kind is not RuleKind.GITHUB_CHANGED_FILES_ABSENT
+
+
+# ---------------------------------------------------------------------------
 # GitHub routing — medium confidence
 # ---------------------------------------------------------------------------
 
