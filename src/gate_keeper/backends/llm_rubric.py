@@ -190,8 +190,13 @@ def _render_target_kind_block(target_kind: TargetKind) -> str:
     """Return the optional artifact-kind block injected before ``## Instructions`` (#169, #175).
 
     Returns the empty string when *target_kind* is :data:`TargetKind.UNSPECIFIED`
-    so the v4 prompt is byte-identical to v2 for unannotated rules. When set,
-    returns a block that:
+    so the artifact-kind *block* is omitted for unannotated rules — only
+    annotated rules receive kind-specific guidance. The surrounding
+    template still differs from v2 in places that always render (the
+    schema names ``"unsupported"``, the constraints reference it), so v4
+    is not byte-identical to v2 globally; see ``_build_prompt`` for the
+    full byte-equivalence picture. When set, this function returns a
+    block that:
 
     1. Names the rule's annotated kind (``rule.target_kind``).
     2. Instructs the model to identify whether the artifact above is the
@@ -229,6 +234,62 @@ def _render_target_kind_block(target_kind: TargetKind) -> str:
     )
 
 
+# Optional unsupported-example block. Rendered only when ``rule.target_kind``
+# is annotated (#175). At v3, the canned example was always present and
+# hardcoded "PR descriptions ... commit message" wording that gpt-4o-mini
+# parroted verbatim regardless of the rule's annotation. v4 (a) replaces the
+# canned wording with kind-neutral placeholders and (b) gates the example on
+# annotation so an unannotated rule never sees an ``unsupported`` shape — at
+# v3 some unannotated rules (notably ``completeness-05-rule-doc-has-target-cue``)
+# saw the schema's ``unsupported`` option and emitted a stray ``unsupported``
+# verdict that the backend then degrades to ``provider_error /
+# unsupported_without_target_kind``. Gating the example removes that lure.
+_UNSUPPORTED_EXAMPLE_BLOCK = """\
+
+An unsupported verdict — the rule's premise does not apply to this artifact kind.
+Use this shape only when the "Artifact kind" block above declares the rule's
+target_kind and the target artifact is a different kind. In your response,
+replace `<RULE_KIND>` with the literal `target_kind` value the "Artifact kind"
+block names for this rule (quote the value verbatim), and replace
+`<ARTIFACT_KIND>` with what the target artifact actually is:
+
+{
+  "judgment": "unsupported",
+  "primary_reason": "The rule is annotated `<RULE_KIND>` but the artifact provided is a <ARTIFACT_KIND>.",
+  "supporting_evidence_quotes": [],
+  "suggested_action": null
+}
+"""
+
+
+def _render_unsupported_example_block(target_kind: TargetKind) -> str:
+    """Return the unsupported-example block iff *target_kind* is annotated (#175)."""
+    if target_kind is TargetKind.UNSPECIFIED:
+        return ""
+    return _UNSUPPORTED_EXAMPLE_BLOCK
+
+
+def _render_unsupported_instruction(target_kind: TargetKind) -> str:
+    """Return the artifact-kind-dispatch Instructions step iff *target_kind* is annotated (#175).
+
+    Without an annotation there is no Artifact kind block, so referencing
+    one in Instructions confuses the model. Skipping the step keeps the
+    unannotated-rule prompt focused on pass/fail. The step is rendered
+    as a bullet (no numeral) so the surrounding numbered list stays
+    contiguous regardless of whether this block is included — a numbered
+    "5." that disappears for unannotated rules would leave a 1, 2, 3, 4,
+    6 sequence the model might read as a typo.
+    """
+    if target_kind is TargetKind.UNSPECIFIED:
+        return ""
+    return (
+        "- Identify whether the target artifact matches the rule's annotated `target_kind`. "
+        'If it does not, return `"unsupported"` rather than rendering a verdict, and quote '
+        "the rule's annotated `target_kind` value verbatim in `primary_reason` — do not "
+        "substitute a different kind name (#175).\n"
+    )
+
+
 RUBRIC_PROMPT_TEMPLATE = """\
 You are a rubric evaluator. Your sole task is to judge whether the target \
 artifact satisfies the given rule.
@@ -249,12 +310,8 @@ artifact satisfies the given rule.
    sections (rationale paragraphs, body content, trailing details).
 3. Judge whether the target (identified by the reference above) satisfies it.
 4. If you cannot read the target's content directly, judge from the reference alone.
-5. If an "Artifact kind" block is present, first identify whether the target
-   artifact matches the rule's annotated `target_kind`. If it does not, return
-   `"unsupported"` rather than rendering a verdict, and quote the rule's
-   annotated `target_kind` value verbatim in `primary_reason` — do not
-   substitute a different kind name (#175).
-6. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
+{unsupported_instruction}\
+5. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
 
 ## Required response schema
 
@@ -267,6 +324,9 @@ artifact satisfies the given rule.
 
 Constraints:
 - `judgment` must be exactly `"pass"`, `"fail"`, or `"unsupported"`.
+- `"unsupported"` is reserved for the target-kind-mismatch case and is
+  ONLY valid when an `## Artifact kind` block is present above. If no
+  `## Artifact kind` block is rendered, return `"pass"` or `"fail"` only.
 - `primary_reason` must be a single sentence (no newlines).
 - `supporting_evidence_quotes` must contain **at least one entry** for
   **every pass or fail verdict**. An empty list is invalid for `"pass"`
@@ -312,21 +372,7 @@ A failing verdict, grounded in the artifact:
     "This commit fixes the bug. See the diff for details. Tests updated accordingly."
   ],
   "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
-}}
-
-An unsupported verdict — the rule's premise does not apply to this artifact kind.
-Use this shape only when an "Artifact kind" block is present and the artifact
-above is a different kind than the rule's annotated `target_kind`. In your
-own response, replace `<RULE_KIND>` with the literal `target_kind` value the
-"Artifact kind" block above names for this rule (quote the value verbatim),
-and replace `<ARTIFACT_KIND>` with what the target artifact actually is:
-
-{{
-  "judgment": "unsupported",
-  "primary_reason": "The rule is annotated `<RULE_KIND>` but the artifact provided is a <ARTIFACT_KIND>.",
-  "supporting_evidence_quotes": [],
-  "suggested_action": null
-}}
+}}{unsupported_example_block}\
 """
 
 RUBRIC_SYSTEM_PROMPT = (
@@ -413,19 +459,34 @@ def _build_rubric_input(rule: Rule, target: str | Path) -> dict[str, Any]:
 
 
 def _build_prompt(rule: Rule, target: str | Path) -> tuple[str, str]:
-    """Render the system + user messages for *rule* against *target* (#169).
+    """Render the system + user messages for *rule* against *target* (#169 / #175).
 
-    When ``rule.target_kind`` is :data:`TargetKind.UNSPECIFIED` the
-    ``target_kind_block`` substitution renders to the empty string and the
-    user message is byte-identical to the v2 prompt — preserving v3
-    backwards-compatibility for existing rule docs that have not yet been
-    annotated.
+    When ``rule.target_kind`` is :data:`TargetKind.UNSPECIFIED` three
+    target-kind-related blocks render to the empty string:
+
+    - the ``## Artifact kind`` block (added in v3),
+    - the ``unsupported``-handling Instructions step 5 (v4),
+    - the ``unsupported`` example response under
+      ``## Examples of valid responses`` (v4).
+
+    The remaining template still differs from v2 (the schema's
+    ``"judgment"`` line names ``"unsupported"`` and the
+    ``supporting_evidence_quotes`` constraint mentions the ``unsupported``
+    case), so v4 is **not** byte-identical to v2 even for unannotated
+    rules — but the unannotated prompt has no kind-specific guidance,
+    matching the v3 design intent and avoiding the v4-regression where
+    an unannotated rule (e.g. ``completeness-05-rule-doc-has-target-cue``)
+    saw the canned ``unsupported`` example and emitted a stray
+    ``unsupported`` verdict that the backend then degraded to
+    ``provider_error / unsupported_without_target_kind``.
     """
     system = RUBRIC_SYSTEM_PROMPT
     user = RUBRIC_PROMPT_TEMPLATE.format(
         rule_text=rule.text,
         target=str(target),
         target_kind_block=_render_target_kind_block(rule.target_kind),
+        unsupported_instruction=_render_unsupported_instruction(rule.target_kind),
+        unsupported_example_block=_render_unsupported_example_block(rule.target_kind),
     )
     return system, user
 

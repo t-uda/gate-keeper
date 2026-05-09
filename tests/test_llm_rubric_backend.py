@@ -1457,17 +1457,18 @@ class TestTargetKindPromptInjection:
     """#169 / #175 — the prompt template includes / omits the artifact-kind block."""
 
     def test_unspecified_target_kind_omits_artifact_kind_block(self):
-        """A rule without target_kind must render byte-identically to v2 plus version bump."""
+        """A rule without target_kind must omit the artifact-kind block."""
         from gate_keeper.models import TargetKind
 
         rule = _semantic_rule_with_target_kind(TargetKind.UNSPECIFIED)
         _system, user = llm_backend._build_prompt(rule, "an inline target string")
-        assert "## Artifact kind" not in user
-        # The dedicated artifact-kind instruction block must not be
-        # rendered. The unsupported-verdict shape documented in the
-        # ``Examples of valid responses`` block is gated below in
-        # ``test_unsupported_example_uses_neutral_placeholders`` — it is
-        # acceptable for that example to mention the schema variant.
+        # The artifact-kind block heading appears as a level-2 Markdown
+        # heading at the start of a line ("\n## Artifact kind\n"). The
+        # constraints text now references the block in prose form
+        # (``... when an `## Artifact kind` block is present ...``), so a
+        # bare-substring check would false-positive on the constraint
+        # reference. Match the heading at line start instead.
+        assert "\n## Artifact kind\n" not in user
         assert "This rule is annotated `target_kind:" not in user
 
     def test_pr_description_target_kind_renders_artifact_kind_block(self):
@@ -1574,17 +1575,61 @@ class TestTargetKindGroundingV4:
             )
 
     def test_unsupported_example_uses_kind_neutral_template_tokens(self):
-        """The kind-neutral example placeholders must be present (#175)."""
+        """The kind-neutral example placeholders must be present for annotated rules (#175)."""
         from gate_keeper.models import TargetKind
 
-        # Pick any target_kind — the example block is the same across all
-        # of them by design (the kind-specific guidance is in the
-        # artifact-kind block, not the example).
+        # Pick any annotated target_kind — the example block is the same
+        # across all of them by design (the kind-specific guidance is in
+        # the artifact-kind block, not the example).
         rendered = self._render(TargetKind.PR_DESCRIPTION)
         # Both placeholders must appear so the model sees the substitution
         # contract instead of a copy-pasteable canned phrase.
         assert "<RULE_KIND>" in rendered
         assert "<ARTIFACT_KIND>" in rendered
+
+    def test_unsupported_example_block_omitted_for_unspecified_target_kind(self):
+        """Unannotated rules must NOT see the unsupported-example block (#175 follow-up).
+
+        The Copilot review on PR #176 / a re-bench surfaced a v4 regression
+        on ``completeness-05-rule-doc-has-target-cue`` (an unannotated
+        rule): the model saw the canned ``unsupported`` example, picked
+        up the schema option, and emitted a stray ``"unsupported"``
+        verdict on a rule that carried no ``target_kind`` annotation. The
+        backend then degraded that to ``provider_error /
+        unsupported_without_target_kind`` (correct fail-closed behaviour
+        but a wasted provider call). v4 fixes this by gating the example
+        block on annotation: an unannotated rule never sees the lure.
+        """
+        from gate_keeper.models import TargetKind
+
+        rendered = self._render(TargetKind.UNSPECIFIED)
+        assert "<RULE_KIND>" not in rendered
+        assert "<ARTIFACT_KIND>" not in rendered
+        # The "unsupported" example heading must also be absent so the
+        # only schema document the model sees is pass/fail.
+        assert "An unsupported verdict —" not in rendered
+
+    def test_unsupported_constraint_clarifies_when_unsupported_is_valid(self):
+        """The constraints block must reserve ``unsupported`` to the artifact-kind case (#175 follow-up).
+
+        Even with the example block gated, the schema's ``"judgment"``
+        line still names ``"unsupported"`` (callers / parsers must accept
+        all three values), so the constraints text must spell out that
+        ``"unsupported"`` is valid only when an `## Artifact kind` block
+        is rendered above. Otherwise the model on an unannotated rule
+        could still invent an ``unsupported`` verdict from the schema
+        alone.
+        """
+        from gate_keeper.models import TargetKind
+
+        rendered = self._render(TargetKind.UNSPECIFIED)
+        # The schema must still list "unsupported" — the parser accepts it.
+        assert '"unsupported"' in rendered
+        # But the constraint must say it is reserved for the
+        # target-kind-mismatch case and gate it on the artifact-kind
+        # block being rendered.
+        assert "reserved for the target-kind-mismatch case" in rendered
+        assert "ONLY valid when an `## Artifact kind` block is present" in rendered
 
     def test_instruction_step_5_names_target_kind_grounding_contract(self):
         """Instructions step 5 must require quoting the rule's target_kind verbatim (#175)."""

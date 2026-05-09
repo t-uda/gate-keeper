@@ -430,13 +430,13 @@ section above):
 | Metric | Value |
 | --- | --- |
 | Entries | 28 |
-| Correct | 14 |
-| Accuracy | 50.0% |
+| Correct | 16 |
+| Accuracy | 57.1% |
 | Reproducibility (avg) | 100.0% |
 | Reproducibility N | 3 |
-| Tokens in | 79,875 |
-| Tokens out | 6,658 |
-| Latency (total) | 138,781 ms |
+| Tokens in | 65,288 |
+| Tokens out | 6,289 |
+| Latency (total) | 112,186 ms |
 | Model | `gpt-4o-mini` |
 | Prompt version | `v4` |
 
@@ -450,22 +450,24 @@ Reference history:
 - v3 (26 entries): 14 correct / 53.8%. The v2 → v3 transition added the
   optional `target_kind` annotation, the artifact-kind prompt block, and
   the `target-kind-mismatch-01` fixture; see PR #174 / #169.
-- v4 (28 entries): 14 correct / 50.0%. The v3 → v4 transition (#175)
+- v4 (28 entries): 16 correct / 57.1%. The v3 → v4 transition (#175)
   rewrites the artifact-kind block to name the rule's annotated
-  `target_kind` value and replaces the canned ``unsupported`` example
-  with kind-neutral placeholders, fixing the v3 regression where every
-  `target_kind_mismatch` verdict reported "rule addresses PR
-  descriptions" verbatim regardless of the rule's actual annotation. v4
-  also adds two regression fixtures (`target-kind-mismatch-02-commit-rule-on-pr`
-  and `target-kind-mismatch-03-commit-rule-on-commit-no-mismatch`) so
-  the corpus exercises both directions of the dispatch and the
-  positive grounding case. The accuracy delta vs v3 is one entry
-  (`justification-01-changelog-explains-why` flips PASS → FAIL): a
-  stochastic gpt-4o-mini judgment, not a target_kind regression. The
-  qualitative win — primary_reason now grounds the rule's annotated
-  kind verbatim ("The rule is annotated `commit_message` but the
-  artifact provided is a pull request description.") — is the
-  observable goal.
+  `target_kind` value, replaces the canned ``unsupported`` example with
+  kind-neutral placeholders, and **gates the unsupported-example block
+  and the artifact-kind dispatch instruction on annotation** so an
+  unannotated rule never sees the lure of an `"unsupported"` schema
+  option. (Pre-gating, an unannotated rule like
+  `completeness-05-rule-doc-has-target-cue` would emit a stray
+  `"unsupported"` verdict that the backend then degrades to
+  `provider_error / unsupported_without_target_kind` — surfaced by
+  Copilot review on PR #176.) v4 also adds two regression fixtures
+  (`target-kind-mismatch-02-commit-rule-on-pr` and
+  `target-kind-mismatch-03-commit-rule-on-commit-no-mismatch`) so the
+  corpus exercises both directions of the dispatch and the positive
+  grounding case. The qualitative win — primary_reason now grounds the
+  rule's annotated kind verbatim ("The rule is annotated
+  `commit_message` but the artifact provided is a pull request
+  description.") — is the observable goal.
 
 ### Per-model dispatch accuracy (#175)
 
