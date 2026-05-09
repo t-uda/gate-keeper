@@ -1,0 +1,13 @@
+{
+  "rule_text": "The commit message body explains why the change was made, naming the failure mode and the rationale.",
+  "rule_target_kind": "commit_message",
+  "target": {
+    "kind": "inline",
+    "value": "fix(classifier): switch to longest-match dispatch\n\nGreedy first-match was selecting `github_pr_open` over `github_non_author_approval`\nbecause the former's pattern was registered first. Reproduced in #211 against a\ndraft PR; longest-match resolves it without breaking existing rule fixtures.\n"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["greedy", "first-match", "#211"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Issue #175 — positive grounding case. A commit_message-annotated rule evaluated against a commit-message artifact must NOT trigger target_kind_mismatch (the artifact kind matches the rule's annotation); the model should evaluate the rule normally and pass."
+}

@@ -1,0 +1,13 @@
+{
+  "rule_text": "The commit message body explains why the change was made, naming the failure mode and the rationale.",
+  "rule_target_kind": "commit_message",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_strong.md"
+  },
+  "expected_judgment": "unsupported",
+  "expected_rationale_keywords": ["commit_message", "PR description", "annotated"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Issue #175 — inverse of target-kind-mismatch-01. A commit-message rule evaluated against a PR-description artifact must return `unsupported` AND its primary_reason must reference `commit_message` (the rule's annotated kind), not 'PR descriptions'. v3 regressed: gpt-4o-mini parroted 'The rule addresses PR descriptions' verbatim regardless of the rule's annotation; v4 grounds the kind name."
+}

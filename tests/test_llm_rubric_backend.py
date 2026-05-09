@@ -1322,7 +1322,12 @@ class TestPromptVersion:
         # #169 bumped v2 → v3 to add the optional artifact-kind block and
         # authorise an ``unsupported`` verdict for the target-kind-mismatch
         # case.
-        assert llm_backend.PROMPT_VERSION == "v3"
+        # #175 bumped v3 → v4 to ground rule.target_kind more strongly in
+        # the prompt (kind name echoed in the artifact-kind block, canned
+        # ``unsupported`` example replaced with a kind-neutral schema
+        # illustration so gpt-4o-mini stops parroting "PR descriptions"
+        # regardless of the rule's actual annotation).
+        assert llm_backend.PROMPT_VERSION == "v4"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -1335,7 +1340,7 @@ class TestPromptVersion:
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
-        assert diag.evidence[0].data["prompt_version"] == "v3"
+        assert diag.evidence[0].data["prompt_version"] == "v4"
 
 
 # ---------------------------------------------------------------------------
@@ -1449,7 +1454,7 @@ def _semantic_rule_with_target_kind(target_kind):
 
 
 class TestTargetKindPromptInjection:
-    """#169 — the prompt template includes / omits the artifact-kind block."""
+    """#169 / #175 — the prompt template includes / omits the artifact-kind block."""
 
     def test_unspecified_target_kind_omits_artifact_kind_block(self):
         """A rule without target_kind must render byte-identically to v2 plus version bump."""
@@ -1458,10 +1463,12 @@ class TestTargetKindPromptInjection:
         rule = _semantic_rule_with_target_kind(TargetKind.UNSPECIFIED)
         _system, user = llm_backend._build_prompt(rule, "an inline target string")
         assert "## Artifact kind" not in user
-        # The "unsupported" verdict is still part of the schema text — it is
-        # always documented in the response-schema block — but the dedicated
-        # artifact-kind instruction block must not be rendered.
-        assert "If the rule's premise does not apply to this artifact kind" not in user
+        # The dedicated artifact-kind instruction block must not be
+        # rendered. The unsupported-verdict shape documented in the
+        # ``Examples of valid responses`` block is gated below in
+        # ``test_unsupported_example_uses_neutral_placeholders`` — it is
+        # acceptable for that example to mention the schema variant.
+        assert "This rule is annotated `target_kind:" not in user
 
     def test_pr_description_target_kind_renders_artifact_kind_block(self):
         from gate_keeper.models import TargetKind
@@ -1470,7 +1477,9 @@ class TestTargetKindPromptInjection:
         _system, user = llm_backend._build_prompt(rule, "an inline target string")
         assert "## Artifact kind" in user
         assert "`pr_description`" in user
-        assert "If the rule's premise does not apply to this artifact kind" in user
+        # #175 — the block must explicitly name the rule's annotated kind
+        # rather than relying on a generic "the rule's premise" phrase.
+        assert "This rule is annotated `target_kind: pr_description`" in user
 
     def test_commit_message_target_kind_renders_artifact_kind_block(self):
         from gate_keeper.models import TargetKind
@@ -1479,6 +1488,8 @@ class TestTargetKindPromptInjection:
         _system, user = llm_backend._build_prompt(rule, "an inline target string")
         assert "## Artifact kind" in user
         assert "`commit_message`" in user
+        # #175 — the block must explicitly name the rule's annotated kind.
+        assert "This rule is annotated `target_kind: commit_message`" in user
 
     def test_schema_block_documents_unsupported_verdict(self):
         """The response-schema block must always advertise ``unsupported`` (#169)."""
@@ -1487,6 +1498,120 @@ class TestTargetKindPromptInjection:
         rule = _semantic_rule_with_target_kind(TargetKind.UNSPECIFIED)
         _system, user = llm_backend._build_prompt(rule, "an inline target string")
         assert '"unsupported"' in user
+
+
+class TestTargetKindGroundingV4:
+    """#175 — v4 prompt must ground the rule's ``target_kind`` value.
+
+    These assertions guard the regression that motivated the v3 → v4 bump:
+    at v3, every ``target_kind_mismatch`` verdict from gpt-4o-mini reported
+    "The rule addresses PR descriptions" verbatim — even when the rule was
+    annotated ``commit_message`` — because (a) the canned ``unsupported``
+    example response hardcoded "PR descriptions ... commit message" as the
+    primary_reason and (b) the artifact-kind block illustrated the mismatch
+    case using the same hardcoded "PR description / commit message" pair.
+
+    The v4 prompt instead names the rule's annotated kind in the
+    artifact-kind block and uses kind-neutral placeholders in the example
+    so the model has nothing to parrot.
+    """
+
+    def _render(self, target_kind):
+        rule = _semantic_rule_with_target_kind(target_kind)
+        _system, user = llm_backend._build_prompt(rule, "an inline target string")
+        return user
+
+    def test_artifact_kind_block_quotes_rules_target_kind_value(self):
+        """Each known target_kind value must appear literally in its block."""
+        from gate_keeper.models import TargetKind
+
+        for tk in (
+            TargetKind.PR_DESCRIPTION,
+            TargetKind.COMMIT_MESSAGE,
+            TargetKind.ISSUE_BODY,
+            TargetKind.DOCUMENTATION,
+            TargetKind.CODE_CHANGE,
+        ):
+            rendered = self._render(tk)
+            # The rule's annotated kind must appear in the artifact-kind
+            # block as a backticked literal so the model sees the exact
+            # string it must echo back.
+            assert f"`{tk.value}`" in rendered, f"missing backticked `{tk.value}` for {tk!r}"
+            # And again as a quoted-target-kind anchor so the instruction
+            # forms a closed loop ("annotated X — premise applies to X").
+            assert f"target_kind: {tk.value}" in rendered, (
+                f"missing 'target_kind: {tk.value}' anchor for {tk!r}"
+            )
+
+    def test_unsupported_example_uses_neutral_placeholders(self):
+        """The canned ``unsupported`` example must NOT hardcode 'PR descriptions'.
+
+        Regression guard for the v3 bug (#175). The example response in
+        v3 said: ``"primary_reason": "The rule addresses PR descriptions
+        but the artifact provided is a commit message."`` — gpt-4o-mini
+        copied this verbatim regardless of the rule's actual target_kind.
+        v4 replaces the example with kind-neutral placeholders.
+        """
+        from gate_keeper.models import TargetKind
+
+        # Render every target_kind variant — none of them may contain the
+        # canned v3 example string.
+        for tk in (
+            TargetKind.UNSPECIFIED,
+            TargetKind.PR_DESCRIPTION,
+            TargetKind.COMMIT_MESSAGE,
+            TargetKind.ISSUE_BODY,
+            TargetKind.DOCUMENTATION,
+            TargetKind.CODE_CHANGE,
+        ):
+            rendered = self._render(tk)
+            assert "The rule addresses PR descriptions" not in rendered, (
+                f"v3 hardcoded example primary_reason still appears for {tk!r}; "
+                "this is exactly the parroted phrase #175 reports"
+            )
+            assert "but the artifact provided is a commit message" not in rendered, (
+                f"v3 hardcoded example continuation still appears for {tk!r}"
+            )
+
+    def test_unsupported_example_uses_kind_neutral_template_tokens(self):
+        """The kind-neutral example placeholders must be present (#175)."""
+        from gate_keeper.models import TargetKind
+
+        # Pick any target_kind — the example block is the same across all
+        # of them by design (the kind-specific guidance is in the
+        # artifact-kind block, not the example).
+        rendered = self._render(TargetKind.PR_DESCRIPTION)
+        # Both placeholders must appear so the model sees the substitution
+        # contract instead of a copy-pasteable canned phrase.
+        assert "<RULE_KIND>" in rendered
+        assert "<ARTIFACT_KIND>" in rendered
+
+    def test_instruction_step_5_names_target_kind_grounding_contract(self):
+        """Instructions step 5 must require quoting the rule's target_kind verbatim (#175)."""
+        from gate_keeper.models import TargetKind
+
+        rendered = self._render(TargetKind.COMMIT_MESSAGE)
+        # The step must reference the annotated target_kind concept and
+        # the verbatim-quoting requirement (the two pieces gpt-4o-mini
+        # was missing at v3).
+        assert "annotated `target_kind`" in rendered
+        assert "verbatim" in rendered
+
+    def test_artifact_kind_block_requires_echoing_rule_kind_in_primary_reason(self):
+        """The artifact-kind block must instruct the model to echo target_kind on decline (#175)."""
+        from gate_keeper.models import TargetKind
+
+        rendered = self._render(TargetKind.COMMIT_MESSAGE)
+        # The instruction "MUST quote the rule's annotated kind" is the
+        # core behavioural fix for the v3 regression. With the rendered
+        # rule_kind_value = ``commit_message``, the example phrase must
+        # quote that value verbatim, not "PR descriptions".
+        assert "MUST quote the rule's annotated kind" in rendered
+        assert "`commit_message`" in rendered
+        # And — the smoking-gun regression check from the issue: the
+        # rendered prompt for a ``commit_message`` rule must NOT say
+        # "rule addresses PR descriptions" anywhere.
+        assert "rule addresses PR descriptions" not in rendered
 
 
 class TestTargetKindParseAcceptsUnsupported:
@@ -1586,7 +1711,7 @@ class TestUnsupportedDispatch:
         assert diag.evidence[0].kind == "target_kind_mismatch"
         assert diag.evidence[0].data["judgment"] == "unsupported"
         assert diag.evidence[0].data["rule_target_kind"] == "pr_description"
-        assert diag.evidence[0].data["prompt_version"] == "v3"
+        assert diag.evidence[0].data["prompt_version"] == "v4"
 
     def test_unsupported_remediation_explains_mismatch(self, monkeypatch):
         from gate_keeper.models import TargetKind

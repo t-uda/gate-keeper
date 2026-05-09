@@ -43,7 +43,17 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   kind sentence into the prompt and authorise an ``"unsupported"`` verdict
 #   for the target-kind-mismatch case so the model can decline rather than
 #   parrot the rule's wording onto the wrong artifact.
-PROMPT_VERSION = "v3"
+# - v4 (#175): ground ``target_kind`` more strongly in the prompt. v3 leaked
+#   "PR descriptions"/"commit message" into both the artifact-kind block's
+#   illustrative example and the canned ``unsupported`` response example,
+#   which gpt-4o-mini parroted verbatim regardless of the rule's actual
+#   ``target_kind`` annotation. v4 (a) names the rule's annotated kind in
+#   the artifact-kind block and instructs the model to echo it back when
+#   declining, (b) replaces the hardcoded "PR descriptions / commit
+#   message" example with a kind-neutral schema illustration, and (c) adds
+#   a checklist step requiring the model to identify which artifact kind
+#   the rule's predicate actually targets before deciding.
+PROMPT_VERSION = "v4"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -177,12 +187,21 @@ _TARGET_KIND_DESCRIPTIONS: dict[TargetKind, str] = {
 
 
 def _render_target_kind_block(target_kind: TargetKind) -> str:
-    """Return the optional artifact-kind block injected before ``## Instructions`` (#169).
+    """Return the optional artifact-kind block injected before ``## Instructions`` (#169, #175).
 
     Returns the empty string when *target_kind* is :data:`TargetKind.UNSPECIFIED`
-    so the v3 prompt is byte-identical to v2 for unannotated rules. When set,
-    returns a short block naming the artifact kind and authorising an
-    ``"unsupported"`` verdict for the target-kind-mismatch case.
+    so the v4 prompt is byte-identical to v2 for unannotated rules. When set,
+    returns a block that:
+
+    1. Names the rule's annotated kind (``rule.target_kind``).
+    2. Instructs the model to identify whether the artifact above is the
+       same kind the rule targets.
+    3. Requires the model, when declining as ``"unsupported"``, to echo
+       the rule's annotated kind back in ``primary_reason`` so the verdict
+       is grounded in the rule's annotation rather than a parroted
+       canned phrase (#175 — gpt-4o-mini regression at v3 where every
+       mismatch claimed "rule addresses PR descriptions" regardless of
+       the rule's actual annotation).
     """
     if target_kind is TargetKind.UNSPECIFIED:
         return ""
@@ -190,14 +209,23 @@ def _render_target_kind_block(target_kind: TargetKind) -> str:
     descriptor = f"`{target_kind.value}`"
     if description:
         descriptor = f"{descriptor} ({description})"
+    rule_kind_value = target_kind.value
     return (
         "\n## Artifact kind\n\n"
-        f"The artifact provided is a {descriptor}. "
-        "If the rule's premise does not apply to this artifact kind — for "
-        "example, the rule talks about a PR description but the artifact "
-        'above is a commit message — return `"unsupported"` (not a verdict) '
-        "and explain the mismatch in `primary_reason`. Do not parrot the "
-        "rule's wording onto an artifact the rule does not address.\n"
+        f"This rule is annotated `target_kind: {rule_kind_value}` — its "
+        f"premise is intended to apply to {descriptor}.\n\n"
+        "Decide first whether the **target artifact above** is itself a "
+        f"`{rule_kind_value}`. If it is, evaluate the rule normally and "
+        'return `"pass"` or `"fail"`. If the artifact is some other kind '
+        "(for example, the rule's annotation says it applies to one "
+        "artifact kind but the artifact above is a different kind), "
+        'return `"unsupported"` instead of rendering a verdict. When you '
+        'return `"unsupported"`, your `primary_reason` MUST quote the '
+        f"rule's annotated kind (`{rule_kind_value}`) verbatim — for "
+        f'example: "The rule is annotated `{rule_kind_value}` but the '
+        'artifact provided is a <kind-of-artifact-above>." Do not parrot '
+        "the rule's wording onto an artifact the rule does not address, "
+        "and do not invent a target_kind value the rule does not claim.\n"
     )
 
 
@@ -221,9 +249,11 @@ artifact satisfies the given rule.
    sections (rationale paragraphs, body content, trailing details).
 3. Judge whether the target (identified by the reference above) satisfies it.
 4. If you cannot read the target's content directly, judge from the reference alone.
-5. If an "Artifact kind" block is present and the rule's premise does not
-   apply to that artifact kind, return `"unsupported"` rather than rendering
-   a verdict.
+5. If an "Artifact kind" block is present, first identify whether the target
+   artifact matches the rule's annotated `target_kind`. If it does not, return
+   `"unsupported"` rather than rendering a verdict, and quote the rule's
+   annotated `target_kind` value verbatim in `primary_reason` — do not
+   substitute a different kind name (#175).
 6. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
 
 ## Required response schema
@@ -284,11 +314,16 @@ A failing verdict, grounded in the artifact:
   "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
 }}
 
-An unsupported verdict — the rule's premise does not apply to this artifact kind:
+An unsupported verdict — the rule's premise does not apply to this artifact kind.
+Use this shape only when an "Artifact kind" block is present and the artifact
+above is a different kind than the rule's annotated `target_kind`. In your
+own response, replace `<RULE_KIND>` with the literal `target_kind` value the
+"Artifact kind" block above names for this rule (quote the value verbatim),
+and replace `<ARTIFACT_KIND>` with what the target artifact actually is:
 
 {{
   "judgment": "unsupported",
-  "primary_reason": "The rule addresses PR descriptions but the artifact provided is a commit message.",
+  "primary_reason": "The rule is annotated `<RULE_KIND>` but the artifact provided is a <ARTIFACT_KIND>.",
   "supporting_evidence_quotes": [],
   "suggested_action": null
 }}
