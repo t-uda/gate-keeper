@@ -277,6 +277,31 @@ class TestFindFirstFencedBlockAfterHeading:
         assert body == "real: yes"
         assert info == "yaml"
 
+    def test_heading_inside_tilde_fence_with_backticks_in_info_is_ignored(self):
+        # CommonMark allows a tilde fence's info string to contain backticks
+        # (only backtick fences forbid them). Previously the fence detector
+        # rejected an opening tilde fence whose info contained backticks, so
+        # ``_iter_non_fence_lines`` never entered fence state and a
+        # ``## heading`` inside the sample was treated as a real section
+        # heading. Codex P2 follow-up.
+        text = (
+            "# Title\n\n"
+            "Sample with backtick-bearing tilde info:\n\n"
+            "~~~ ```markdown\n"
+            "## Policy evidence\n"
+            "decoy: in-sample\n"
+            "~~~\n\n"
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "real: yes\n"
+            "```\n"
+        )
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "real: yes"
+        assert info == "yaml"
+
     def test_heading_with_terminal_hash_preserves_hash(self):
         # ``## C#`` must match heading "C#", not "C". A naive ``\\s*#*\\s*$``
         # regex would strip the trailing ``#`` and produce ``"C"``, breaking

@@ -30,10 +30,12 @@ TASK_UNCHECKED_RE = re.compile(r"^[ \t]*[-*+]\s+\[ \]", re.MULTILINE)
 FENCE_START_RE = re.compile(
     r"^ {0,3}"  # at most 3 leading spaces
     r"(?P<marker>`{3,}|~{3,})"  # the fence run
-    r"(?P<info>[^`\n]*)?"  # info string (no backticks for backtick fences;
-    # tilde fences are slightly more permissive but
-    # this is good enough for MVP)
-    r"\s*$"  # only whitespace allowed after info string
+    r"(?P<info>[^\n]*)?"  # info string — any non-newline character; the
+    # backtick-fence-specific "no backticks in info"
+    # rule is enforced separately by callers because
+    # the regex cannot tell which fence character
+    # opened the run.
+    r"$"
 )
 
 
