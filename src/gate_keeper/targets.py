@@ -53,8 +53,8 @@ class TargetExpansionError(ValueError):
     - File-count cap exceeded.
     - (Reserved) other unrecoverable expansion errors.
 
-    The validator translates this into a per-rule ``UNAVAILABLE`` diagnostic so
-    the overall report stays well-formed.
+    The CLI translates this into a usage error (``EXIT_USAGE``); programmatic
+    callers may catch it directly when invoking :func:`resolve_targets`.
     """
 
 
@@ -158,18 +158,57 @@ def _is_text_readable(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _expand_one(token: str, base: Path) -> list[Path]:
-    """Expand a single ``--target`` token into a list of regular files.
+def _check_cap(seen: set[str], file_limit: int) -> None:
+    """Raise :class:`TargetExpansionError` once the unique-path count exceeds *file_limit*.
 
-    - Globs (tokens with ``*``, ``?``, ``[``) are expanded via :mod:`glob` with
-      ``recursive=True``; matched directories are walked into.
+    Used by the incremental expansion path so a broad target cannot consume
+    unbounded I/O before failing closed.
+    """
+    if len(seen) > file_limit:
+        raise TargetExpansionError(
+            f"target expansion produced more than {file_limit} files; "
+            f"exceeds limit of {file_limit}. "
+            f"Narrow the target set or raise the cap (default {DEFAULT_FILE_LIMIT})."
+        )
+
+
+def _walk_directory_into(
+    directory: Path,
+    seen: set[str],
+    accumulator: list[Path],
+    file_limit: int,
+) -> None:
+    """Append text-readable regular files under *directory* to *accumulator*.
+
+    Stops as soon as *seen* exceeds *file_limit* (raises
+    :class:`TargetExpansionError`) so traversal of large trees does not
+    continue past the cap.  Sorted by ``os.fspath`` for deterministic order.
+    """
+    for entry in sorted(directory.rglob("*"), key=os.fspath):
+        if not entry.is_file() or not _is_text_readable(entry):
+            continue
+        key = os.fspath(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        accumulator.append(entry)
+        _check_cap(seen, file_limit)
+
+
+def _expand_token_into(
+    token: str,
+    base: Path,
+    seen: set[str],
+    accumulator: list[Path],
+    file_limit: int,
+) -> None:
+    """Expand *token* into *accumulator*, enforcing *file_limit* incrementally.
+
+    - Globs (tokens with ``*``, ``?``, ``[``) are expanded via :mod:`glob`
+      with ``recursive=True``; matched directories are walked into.
     - Directories are walked recursively for text-readable files.
-    - Single files are returned as-is regardless of decodability — when a
-      caller names a file directly we take that as a deliberate choice.
-    - Non-existent literal paths are returned as a single-entry list pointing
-      at the missing path; the filesystem backend already classifies that as
-      ``UNAVAILABLE`` and we want the caller-supplied path to appear in the
-      evidence record.
+    - Existing or missing literal files are appended as-is — the filesystem
+      backend handles the unavailable case.
     """
     if looks_like_glob(token):
         # Resolve relative globs against ``base`` for stability across cwd
@@ -179,36 +218,36 @@ def _expand_one(token: str, base: Path) -> list[Path]:
         else:
             search = token
         matches = sorted(glob.glob(search, recursive=True))
-        results: list[Path] = []
         for match in matches:
             p = Path(match)
             if p.is_dir():
-                results.extend(_walk_directory(p))
+                _walk_directory_into(p, seen, accumulator, file_limit)
             elif p.is_file():
                 # Globs may match binary blobs (e.g. ``*`` against a build
-                # output dir).  We trust the caller's pattern but still apply
-                # the text-readable filter so a single accidental binary
-                # match does not poison the entire run.
-                if _is_text_readable(p):
-                    results.append(p)
-        return results
+                # output dir).  We trust the caller's pattern but still
+                # apply the text-readable filter so a single accidental
+                # binary match does not poison the entire run.
+                if not _is_text_readable(p):
+                    continue
+                key = os.fspath(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                accumulator.append(p)
+                _check_cap(seen, file_limit)
+        return
 
     path = Path(token)
     if path.is_dir():
-        return _walk_directory(path)
+        _walk_directory_into(path, seen, accumulator, file_limit)
+        return
     # Either an existing file or a missing path — let the backend decide.
-    return [path]
-
-
-def _walk_directory(directory: Path) -> list[Path]:
-    """Return text-readable regular files under *directory* (recursive)."""
-    results: list[Path] = []
-    # ``Path.rglob('*')`` is deterministic on a given filesystem but we sort
-    # explicitly to avoid surprises across platforms.
-    for entry in sorted(directory.rglob("*"), key=os.fspath):
-        if entry.is_file() and _is_text_readable(entry):
-            results.append(entry)
-    return results
+    key = os.fspath(path)
+    if key in seen:
+        return
+    seen.add(key)
+    accumulator.append(path)
+    _check_cap(seen, file_limit)
 
 
 def resolve_targets(
@@ -228,7 +267,8 @@ def resolve_targets(
         Base directory for relative globs.  Defaults to the process cwd.
     file_limit:
         Hard cap on the number of resolved files; exceeding it raises
-        :class:`TargetExpansionError`.  Defaults to the module-level
+        :class:`TargetExpansionError` *during* expansion, before the full
+        tree is walked.  Defaults to the module-level
         :data:`DEFAULT_FILE_LIMIT` (looked up at call time so tests can
         monkeypatch the constant).
 
@@ -243,7 +283,9 @@ def resolve_targets(
     ValueError
         When *raw_targets* is empty.
     TargetExpansionError
-        When the resolved file set exceeds *file_limit*.
+        When the resolved file set exceeds *file_limit*.  Detection is
+        incremental: traversal stops as soon as the cap is exceeded so a
+        broad target cannot consume unbounded I/O.
     """
     if not raw_targets:
         raise ValueError("resolve_targets: at least one target is required")
@@ -261,32 +303,16 @@ def resolve_targets(
         if looks_like_glob(token) or Path(token).is_dir():
             is_multi = True
 
-    expanded: list[Path] = []
-    for token in raw_targets:
-        expanded.extend(_expand_one(token, base))
-
-    # Deduplicate while preserving the lexicographic order required by the
-    # design document.  We use ``os.fspath`` (string form) for the sort key so
-    # ``Path`` instances on case-sensitive filesystems sort identically to a
-    # ``sorted([str(p), ...])`` call.
     seen: set[str] = set()
-    unique: list[Path] = []
-    for p in expanded:
-        key = os.fspath(p)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(p)
-    unique.sort(key=os.fspath)
+    accumulator: list[Path] = []
+    for token in raw_targets:
+        _expand_token_into(token, base, seen, accumulator, file_limit)
 
-    if len(unique) > file_limit:
-        raise TargetExpansionError(
-            f"target expansion produced {len(unique)} files; "
-            f"exceeds limit of {file_limit}. "
-            f"Narrow the target set or raise the cap (default {DEFAULT_FILE_LIMIT})."
-        )
+    # Lexicographic sort is deterministic regardless of caller-supplied
+    # input order (deduplication already happened during expansion).
+    accumulator.sort(key=os.fspath)
 
-    return TargetSpec(paths=unique, raw_targets=list(raw_targets), is_multi=is_multi)
+    return TargetSpec(paths=accumulator, raw_targets=list(raw_targets), is_multi=is_multi)
 
 
 __all__ = [

@@ -182,6 +182,8 @@ class TestFileCountCap:
         cap = 5
         for i in range(cap + 2):
             _write(tmp_path / f"f{i:03d}.txt")
+        # New wording matches the incremental enforcement (Codex P2):
+        # "more than N files; exceeds limit of N".
         with pytest.raises(TargetExpansionError, match="exceeds limit of 5"):
             resolve_targets([str(tmp_path)], file_limit=cap)
 
@@ -220,3 +222,30 @@ class TestTargetSpecInvariants:
         b = _write(tmp_path / "b.txt")
         with pytest.raises(ValueError, match="sorted lexicographically"):
             TargetSpec(paths=[b, a], raw_targets=[], is_multi=True)
+
+
+# ---------------------------------------------------------------------------
+# Codex review follow-ups
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalCap:
+    """The file-count cap fires *during* expansion, not after a full walk."""
+
+    def test_cap_short_circuits_walk(self, tmp_path, monkeypatch):
+        # Build a tree well above the cap. Even though there are 50 files,
+        # the cap=3 should fire long before all of them are visited.
+        for i in range(50):
+            _write(tmp_path / f"f{i:03d}.txt")
+        with pytest.raises(TargetExpansionError, match="exceeds limit of 3"):
+            resolve_targets([str(tmp_path)], file_limit=3)
+
+    def test_cap_message_does_not_lie_about_total(self, tmp_path):
+        # The error message says "more than N" rather than a precise count
+        # because we stopped early — make sure the wording is consistent.
+        for i in range(5):
+            _write(tmp_path / f"f{i:03d}.txt")
+        with pytest.raises(TargetExpansionError) as ei:
+            resolve_targets([str(tmp_path)], file_limit=2)
+        assert "more than 2 files" in str(ei.value)
+        assert "exceeds limit of 2" in str(ei.value)

@@ -517,22 +517,45 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # Compatibility rule (issue #146): when exactly one --target is supplied
     # and it is a plain literal (not a directory, not a glob), forward the raw
     # string. This preserves every pre-#146 behaviour, including GitHub PR
-    # references like ``owner/repo#1`` that would otherwise fail filesystem
-    # expansion. Multi-target invocations and directory/glob single-targets
-    # are resolved into a TargetSpec; the chosen backend then either
-    # aggregates (filesystem) or fails closed (github / llm-rubric / external).
+    # references like ``owner/repo#1`` and PR URLs that contain ``?``/``#``
+    # (which the GitHub backend's parser tolerates). Multi-target invocations
+    # and directory/glob single-targets are resolved into a TargetSpec; the
+    # chosen backend then either aggregates (filesystem) or fails closed
+    # (github / llm-rubric / external).
     raw_targets: list[str] = list(args.target)
     target: object
     if len(raw_targets) == 1:
+        from gate_keeper.backends._target import parse_target
         from gate_keeper.targets import looks_like_glob
 
         sole = raw_targets[0]
-        if looks_like_glob(sole) or Path(sole).is_dir():
+        sole_path = Path(sole)
+
+        # Order matters: a literal directory or an existing literal file
+        # always wins over glob detection so a real filename like
+        # ``a[b].txt`` does not get mis-expanded as a pattern.
+        if sole_path.is_dir():
             try:
                 target = resolve_targets(raw_targets)
             except TargetExpansionError as exc:
                 print(f"error: --target: {exc}", file=sys.stderr)
                 return EXIT_USAGE
+        elif sole_path.is_file():
+            target = sole
+        elif looks_like_glob(sole):
+            # Token has glob metacharacters but the literal path doesn't
+            # exist. A GitHub PR URL with a query string (``?diff=split``)
+            # falls into this bucket — recognise that case explicitly so
+            # the github backend still receives the raw URL it needs.
+            pr, _ = parse_target(sole)
+            if pr is not None:
+                target = sole
+            else:
+                try:
+                    target = resolve_targets(raw_targets)
+                except TargetExpansionError as exc:
+                    print(f"error: --target: {exc}", file=sys.stderr)
+                    return EXIT_USAGE
         else:
             target = sole
     else:

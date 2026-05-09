@@ -1238,6 +1238,63 @@ class TestMultiTarget:
         assert diag["status"] == "unsupported"
         assert any(e["kind"] == "multi_target_unsupported" for e in diag["evidence"])
 
+    def test_existing_file_with_glob_chars_passes_through(self, tmp_path, capsys):
+        # Codex/Copilot follow-up: a literal filename containing ``[`` is
+        # not a glob — preserve single-target compatibility when the file
+        # actually exists on disk.
+        rules = self._write_rules(tmp_path)
+        f = tmp_path / "a[b].txt"
+        f.write_text("hello\n")
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                str(f),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        # No multi-target aggregation; the literal file went through the
+        # legacy single-path code path.
+        ev_kinds = {e["kind"] for e in diag["evidence"]}
+        assert "multi_target_summary" not in ev_kinds
+
+    def test_github_pr_url_with_query_routed_to_github(self, tmp_path, capsys):
+        # Codex P1: a PR URL with a ``?`` query string contains a glob
+        # metacharacter but must still reach the github backend as a raw
+        # string. Without the fix, the CLI converted it to an empty
+        # TargetSpec and the github backend returned ``unsupported``.
+        rules = self._write_rules(tmp_path)
+        rc = main(
+            [
+                "validate",
+                str(rules),
+                "--target",
+                "https://github.com/t-uda/gate-keeper/pull/1?diff=split",
+                "--backend",
+                "github",
+                "--format",
+                "json",
+            ]
+        )
+        # Will be UNAVAILABLE (real gh call against an unrelated repo) or
+        # PASS — the contract under test is "URL was not silently dropped".
+        del rc
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        ev_kinds = {e["kind"] for e in diag["evidence"]}
+        # multi_target_unsupported would indicate the URL was wrongly
+        # routed through TargetSpec.
+        assert "multi_target_unsupported" not in ev_kinds
+
     def test_repeated_target_with_llm_rubric_backend_unsupported(self, tmp_path, capsys):
         # llm-rubric backend rejects multi-target in this slice.
         rules = self._write_rules(tmp_path)

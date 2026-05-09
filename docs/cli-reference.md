@@ -350,7 +350,7 @@ aggregated diagnostic per rule.
 | Single file | `--target README.md` | Unchanged from earlier releases — the path is forwarded verbatim. |
 | Repeated flag | `--target a.md --target b.md` | Both files are evaluated; one diagnostic per rule. |
 | Directory | `--target docs/` | Recursively walks the directory; only text-readable files are included. |
-| Quoted glob | `--target 'docs/**/*.md'` | Expanded by the CLI with `recursive=True`; matched directories are walked. Quote the pattern to bypass shell expansion when desired. |
+| Quoted glob | `--target 'docs/**/*.md'` | Expanded by the CLI with `recursive=True`; matched directories are walked. **Quote the pattern** so your shell does not expand it before `gate-keeper` sees it — `argparse` only accepts a single value per `--target`, so an unquoted glob expanded by the shell will produce an "unexpected positional arguments" error. |
 
 ```sh
 # All three filesystem rules, evaluated against every text-readable file
