@@ -262,6 +262,16 @@ def build_parser() -> argparse.ArgumentParser:
             "ignore this flag)"
         ),
     )
+    validate_parser.add_argument(
+        "--allow-command-adapter",
+        action="store_true",
+        default=False,
+        help=(
+            "enable the project-local 'command' external adapter for this run. "
+            "WARNING: this lets the rule document execute arbitrary local commands "
+            "(via params.argv). Pass this ONLY for rule documents you fully trust."
+        ),
+    )
 
     subparsers.add_parser(
         "diagnose",
@@ -565,8 +575,18 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             print(f"error: --target: {exc}", file=sys.stderr)
             return EXIT_USAGE
 
-    # Run validation.
-    report = validator.validate(ruleset, target, backend=backend, reproducibility=args.reproducibility)
+    # Toggle the project-local command adapter for this process only. The flag
+    # is intentionally not propagated through the validator API — the adapter
+    # owns its own enable state to keep the trust boundary obvious.
+    from gate_keeper.adapters import command as command_adapter
+
+    previous_enabled = command_adapter.is_enabled()
+    command_adapter.set_enabled(bool(args.allow_command_adapter))
+    try:
+        # Run validation.
+        report = validator.validate(ruleset, target, backend=backend, reproducibility=args.reproducibility)
+    finally:
+        command_adapter.set_enabled(previous_enabled)
 
     # Render output.
     if args.format == "json":
@@ -718,15 +738,22 @@ def _register_default_adapters() -> None:
     Registration happens lazily at CLI entry rather than at module-import time
     of ``gate_keeper.adapters`` so test isolation in ``tests/test_external_backend.py``
     is preserved (those tests snapshot/restore an empty registry per test).
+
+    The ``command`` adapter is registered here, but is gated behind the
+    process-local enable flag in ``gate_keeper.adapters.command``. Without
+    ``--allow-command-adapter`` it returns ``unavailable`` and never spawns
+    a subprocess; see ``docs/cli-reference.md`` for the trust model.
     """
+    from gate_keeper.adapters.command import CommandAdapter
     from gate_keeper.adapters.textlint import TextlintAdapter
     from gate_keeper.backends import external
 
-    try:
-        external.register(TextlintAdapter())
-    except ValueError:
-        # Already registered (e.g. main called twice in the same process).
-        pass
+    for adapter in (TextlintAdapter(), CommandAdapter()):
+        try:
+            external.register(adapter)
+        except ValueError:
+            # Already registered (e.g. main called twice in the same process).
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:

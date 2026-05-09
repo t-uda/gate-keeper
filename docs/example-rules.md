@@ -364,3 +364,79 @@ overrides would be dropped.
 - Run `npx --no textlint --fix <file>` to apply auto-fixable corrections.
 - See `docs/backend-external.md` for the full adapter contract and
   `docs/cli-reference.md#validate` for the `--rules-format` flag reference.
+
+---
+
+## 8. Project-local validator script — `external / external_check` (`tool=command`)
+
+The `command` external adapter delegates a check to a project-local
+executable. The rule document supplies `params.argv`; the adapter spawns
+that command directly (no shell), passes a JSON `{rule, target}` object on
+stdin, and parses a Diagnostic from stdout.
+
+> **Security:** disabled by default. Pass `--allow-command-adapter` ONLY
+> for rule documents you fully trust — the rule document supplies the
+> argv. See the trust-model callout in `docs/cli-reference.md`.
+
+**Compiled rule (JSON excerpt):**
+
+```json
+{
+  "rules": [{
+    "id": "policy-path-allowlist",
+    "text": "Repository paths must satisfy the project's path-allowlist policy.",
+    "kind": "external_check",
+    "severity": "error",
+    "backend_hint": "external",
+    "params": {
+      "tool": "command",
+      "argv": ["python", "tools/policy/validate_path_policy.py"],
+      "timeout_seconds": 30
+    }
+  }]
+}
+```
+
+**Sample command (`tools/policy/validate_path_policy.py`):**
+
+```python
+#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+target = payload["target"]
+# project-specific check ...
+ok = True
+print(json.dumps({
+    "status": "pass" if ok else "fail",
+    "message": f"path policy {'satisfied' if ok else 'violated'} for {target}",
+    "evidence": [{"kind": "policy_check", "data": {"target": target}}],
+}))
+sys.exit(0)  # exit 0 on both pass and fail
+```
+
+**Sample run (disabled by default):**
+
+```
+$ gate-keeper validate rules.md --target .
+rules.md:3: error: [external/unavailable] policy-path-allowlist: command adapter is disabled by default for security; pass --allow-command-adapter to enable it for trusted rule documents
+```
+
+**Sample run (explicitly enabled):**
+
+```
+$ gate-keeper validate rules.md --target . --allow-command-adapter
+rules.md:3: error: [external/pass] policy-path-allowlist: path policy satisfied for .
+```
+
+**Notes:**
+
+- `argv` is required and must be a non-empty list of strings. Shell strings
+  (e.g. `"python tools/check.py"`) are rejected.
+- `timeout_seconds` defaults to `30`, hard maximum `300`. Timeouts produce
+  `error` / `cli_timeout`.
+- The command must print exactly one Diagnostic JSON to stdout and exit `0`
+  for both pass and fail. Any non-zero exit collapses to
+  `unavailable` / `command_failure` regardless of stdout content — that
+  channel is reserved for adapter-detected faults.
+- See `docs/backend-external.md` and `docs/cli-reference.md` for the full
+  contract.

@@ -182,6 +182,7 @@ gate-keeper validate [--rules-format {markdown,ir}]
                      [--backend {auto,filesystem,github,llm-rubric,external}]
                      [--format {text,json}] [--verbose]
                      [--reproducibility N]
+                     [--allow-command-adapter]
                      --target <TARGET> [--target <TARGET> ...]
                      (<rules> | --include GLOB [--include GLOB ...])
 ```
@@ -201,6 +202,7 @@ Provide either a single positional `rules` document **or** one or more
 | `--format {text,json}` | option | `text` | Output format. |
 | `--verbose, -v` | flag | off | Expand structured LLM-rubric rationale (judgment, reason, evidence quotes, suggested action, model) as indented lines below each diagnostic. Has no effect for non-LLM backends. |
 | `--reproducibility N` | option | `1` | Run each LLM-rubric rule N times and record an agreement-rate `reproducibility_score` evidence entry. **No-op for non-LLM backends** (filesystem, GitHub, external ignore this flag). |
+| `--allow-command-adapter` | flag | off | Enable the project-local `command` external adapter for this run only. **Security: pass this only for rule documents you fully trust** — the adapter executes whatever `params.argv` the rule document defines. Without this flag, every `external_check` rule whose `params.tool == "command"` returns `unavailable` / `command_adapter_disabled` and no subprocess runs. See [Project-local `command` adapter (#149)](#project-local-command-adapter-149) below. |
 | `-h, --help` | flag | — | Show help and exit. |
 
 ### When to use `--rules-format ir`
@@ -390,6 +392,64 @@ of the resolved paths.
 
 See [docs/design/multi-target.md](design/multi-target.md) for the design
 background; this section documents the first implemented slice.
+
+### Project-local `command` adapter (#149)
+
+The `command` external adapter lets a trusted local rule document delegate a
+check to a project-local executable. It runs only when `--allow-command-adapter`
+is passed; otherwise every `external_check` rule with `params.tool == "command"`
+returns `unavailable` and no subprocess is spawned.
+
+> **Trust model — read this before passing the flag.**
+>
+> The rule document supplies `params.argv` (a list of strings). The adapter
+> spawns that command directly (no shell), so passing
+> `--allow-command-adapter` against a rule document you do not fully trust is
+> a remote-code-execution vector equivalent to running the document's argv
+> by hand. Never pass this flag against rule documents fetched from the
+> network or authored by an untrusted party.
+
+**Required IR shape (rule excerpt):**
+
+```json
+{
+  "kind": "external_check",
+  "backend_hint": "external",
+  "params": {
+    "tool": "command",
+    "argv": ["python", "tools/policy/validate_path_policy.py"],
+    "timeout_seconds": 30
+  }
+}
+```
+
+**Behaviour:**
+
+- `argv` must be a non-empty list of strings; shell strings are rejected.
+- `subprocess.run` is invoked with `shell=False` — no shell expansion,
+  globbing, or environment-variable interpolation into argv.
+- The adapter writes a JSON object to the command's stdin:
+
+  ```json
+  {
+    "rule": { "id": "...", "text": "...", "params": { "tool": "command", "argv": [...] } },
+    "target": "..."
+  }
+  ```
+
+- The command must print a single Diagnostic JSON object (or a
+  `DiagnosticReport` with exactly one diagnostic) to stdout and exit `0`
+  for both pass and fail outcomes. Any non-zero exit is treated as a
+  fail-closed `unavailable` / `command_failure` diagnostic.
+- `timeout_seconds` defaults to `30`, hard maximum `300`. Timeouts
+  produce `error` / `cli_timeout`. Missing executables produce
+  `unavailable` / `cli_missing`.
+- The adapter is the source of truth for `rule_id`, `source`, `severity`,
+  and `backend` on the returned Diagnostic — a misbehaving command cannot
+  rebrand another rule's result.
+
+See [`docs/backend-external.md`](backend-external.md) for the full adapter
+contract and full set of evidence kinds.
 
 ---
 

@@ -131,6 +131,8 @@ backend rather than minting new `Backend` enum values; see
 | `markdown_evidence_block` | `format` | _(required)_ | Format of the fenced block. Currently only `"yaml"` is supported. Other values → `unsupported`. |
 | `markdown_evidence_block` | `required_keys` | _(required)_ | Non-empty list of dotted-key strings (e.g. `"policy.bundle"`). Each must resolve through nested mappings. Missing or empty → `unavailable`. |
 | `markdown_evidence_block` | `allowed_sentinel_values` | `[]` | Optional list of allowed lowercase-token sentinel values (e.g. `["not_applicable", "missing_blocker"]`). When non-empty, any string leaf at a required key that matches the sentinel-token shape `^[a-z][a-z0-9_]*$` must appear in this list; free-form strings (with spaces, hyphens, mixed case, slashes) are not validated. |
+| `external_check` (`tool=command`) | `argv` | _(required)_ | Non-empty list of strings. The first element is the executable; remaining elements are arguments. Shell strings (a single string with spaces) are rejected. The adapter never invokes a shell. |
+| `external_check` (`tool=command`) | `timeout_seconds` | `30` | Subprocess timeout in seconds. Must satisfy `0 < timeout_seconds <= 300`. Timeouts produce `error` / `cli_timeout` diagnostics. |
 
 ## `markdown_evidence_block` — structured policy evidence
 
