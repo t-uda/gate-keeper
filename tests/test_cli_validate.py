@@ -640,7 +640,8 @@ class TestReproducibilityFlag:
                     {
                         "judgment": "pass",
                         "primary_reason": "looks good",
-                        "supporting_evidence_quotes": [],
+                        # #168: pass also requires non-empty supporting quotes.
+                        "supporting_evidence_quotes": ["a representative substring"],
                         "suggested_action": None,
                     }
                 ),
