@@ -108,9 +108,10 @@ Behavior:
 - The actual model used is recorded in `llm_judgment.evidence[0].data.model`
   on every successful run.
 - If the override names a model that is not in the static `_MODEL_PRICING`
-  snapshot above, `cost_estimate_usd` will be `null` (fail-closed: cost is
-  never guessed). Telemetry fields (`latency_ms`, `tokens_in`, `tokens_out`)
-  are still recorded.
+  snapshot/table (see "Per-rule observability fields" below),
+  `cost_estimate_usd` will be `null` (fail-closed: cost is never guessed).
+  Telemetry fields (`latency_ms`, `tokens_in`, `tokens_out`) are still
+  recorded.
 
 `gate-keeper diagnose` surfaces the resolved model and whether it came
 from an override or the default.
