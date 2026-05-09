@@ -1,0 +1,27 @@
+{
+  "rules": [
+    {
+      "id": "cli-reference-tracks-cli-implementation",
+      "title": "docs/cli-reference.md must track src/gate_keeper/cli.py",
+      "source": {
+        "path": "docs/dependency-gate-rules.json",
+        "line": 1,
+        "heading": "cli-reference tracks cli-implementation"
+      },
+      "text": "When src/gate_keeper/cli.py changes in a PR, docs/cli-reference.md must change too — or a reviewer ack at .gate-keeper/acks/<edge-id>.yml must cover the current source sha.",
+      "kind": "external_check",
+      "severity": "warning",
+      "backend_hint": "external",
+      "confidence": "high",
+      "params": {
+        "tool": "command",
+        "argv": [
+          "python",
+          "scripts/dependency_gates/check_cli_reference.py"
+        ],
+        "manifest": ".gate-keeper/dependency-manifest.yml",
+        "timeout_seconds": 30
+      }
+    }
+  ]
+}
