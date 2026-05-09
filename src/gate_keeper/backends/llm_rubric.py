@@ -204,6 +204,23 @@ def _is_configured() -> bool:
     return bool(env.get(key_var))
 
 
+def _resolve_model(provider: str, env: dict[str, str]) -> str:
+    """Return the model identifier to use for *provider*.
+
+    Reads ``GATE_KEEPER_<PROVIDER>_MODEL`` from the dotenv snapshot when set
+    and non-empty (after stripping); otherwise falls back to the source
+    default constant. Empty / whitespace-only overrides are ignored so a
+    blank line in the dotenv does not silently produce an invalid model id.
+    """
+    if provider == "anthropic":
+        override = env.get("GATE_KEEPER_ANTHROPIC_MODEL", "").strip()
+        return override or ANTHROPIC_DEFAULT_MODEL
+    if provider == "openai":
+        override = env.get("GATE_KEEPER_OPENAI_MODEL", "").strip()
+        return override or OPENAI_DEFAULT_MODEL
+    raise ValueError(f"unsupported provider: {provider!r}")
+
+
 # ---------------------------------------------------------------------------
 # Rubric input builder
 # ---------------------------------------------------------------------------
@@ -574,12 +591,11 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     provider = env["GATE_KEEPER_LLM_PROVIDER"]
     system, user = _build_prompt(rule, target)
 
+    model = _resolve_model(provider, env)
     try:
         if provider == "anthropic":
-            model = ANTHROPIC_DEFAULT_MODEL
             response_text, telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
         else:
-            model = OPENAI_DEFAULT_MODEL
             response_text, telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
     except Exception as exc:  # noqa: BLE001 — fail-closed: any provider error → unavailable
         return _unavailable_provider_error(rule, rubric_input, provider, type(exc).__name__, str(exc))
