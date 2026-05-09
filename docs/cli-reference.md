@@ -145,7 +145,8 @@ document and report pass/fail with evidence.
 ### Synopsis
 
 ```
-gate-keeper validate [--backend {auto,filesystem,github,llm-rubric,external}]
+gate-keeper validate [--rules-format {markdown,ir}]
+                     [--backend {auto,filesystem,github,llm-rubric,external}]
                      [--format {text,json}] [--verbose]
                      [--reproducibility N]
                      --target <TARGET> <rules>
@@ -155,19 +156,37 @@ gate-keeper validate [--backend {auto,filesystem,github,llm-rubric,external}]
 
 | Argument / option | Type | Default | Description |
 |---|---|---|---|
-| `rules` | positional | — | Path to a Markdown rule document. |
+| `rules` | positional | — | Path to a Markdown rule document, or to a precompiled Rule IR JSON file when `--rules-format ir` is given. |
 | `--target TARGET` | option | **required** | Artifact or PR to validate. Pass a local path for filesystem rules; a GitHub PR URL or `owner/repo#N` for GitHub rules. |
-| `--backend {auto,filesystem,github,llm-rubric,external}` | option | `auto` | Validation backend. `auto` delegates each rule to the backend the classifier selected. |
+| `--rules-format {markdown,ir}` | option | `markdown` | How to interpret `rules`. `markdown` (default) parses and classifies a Markdown rule document — the historical behaviour. `ir` loads a precompiled `RuleSet` JSON file (the same shape `compile` emits) using the strict IR parser and **bypasses the classifier**, so hand-authored `kind`, `backend_hint`, and `params` fields reach the validator unchanged. |
+| `--backend {auto,filesystem,github,llm-rubric,external}` | option | `auto` | Validation backend. `auto` delegates each rule to the backend the classifier (or the IR file) selected. |
 | `--format {text,json}` | option | `text` | Output format. |
 | `--verbose, -v` | flag | off | Expand structured LLM-rubric rationale (judgment, reason, evidence quotes, suggested action, model) as indented lines below each diagnostic. Has no effect for non-LLM backends. |
 | `--reproducibility N` | option | `1` | Run each LLM-rubric rule N times and record an agreement-rate `reproducibility_score` evidence entry. **No-op for non-LLM backends** (filesystem, GitHub, external ignore this flag). |
 | `-h, --help` | flag | — | Show help and exit. |
 
+### When to use `--rules-format ir`
+
+- You hand-author or generate a `RuleSet` JSON file directly (e.g. for the
+  `external` backend with `params.tool: textlint`) and need `kind`,
+  `backend_hint`, and `params` to survive verbatim.
+- You want to validate a snapshot produced by `gate-keeper compile`
+  (`compile rules.md > rules.json`) without re-parsing the source document.
+- You are wiring `validate` into a pipeline where the classifier has already
+  been run upstream and re-classification would erase intent.
+
+The default Markdown path remains the right choice when authoring rules from
+natural-language documents — the classifier turns prose into routed rules.
+
 ### Sample invocation
 
 ```sh
-# text output (default)
+# Markdown rules (default; --rules-format markdown is implicit)
 uv run gate-keeper validate docs/dogfooding-rules.md --target .
+
+# Precompiled IR JSON
+uv run gate-keeper compile docs/dogfooding-rules.md > rules.json
+uv run gate-keeper validate --rules-format ir rules.json --target .
 
 # JSON output
 uv run gate-keeper validate docs/dogfooding-rules.md --target . --format json
@@ -179,6 +198,18 @@ uv run gate-keeper validate docs/dogfooding-rules.md --target . --verbose
 uv run gate-keeper validate docs/dogfooding-rules.md --target . \
     --backend llm-rubric --reproducibility 3
 ```
+
+### Errors specific to `--rules-format ir`
+
+| Condition | Exit code | Message shape |
+|---|---|---|
+| Missing IR file | `2` | `error: <path>: No such file or directory` |
+| Not valid UTF-8 | `2` | `error: <path>: not valid UTF-8 (...)` |
+| Invalid JSON | `2` | `error: <path>: invalid JSON (<reason> at line N column M)` |
+| JSON shape fails strict `RuleSet` parsing | `2` | `error: <path>: invalid rule IR (<reason>)` |
+
+The IR parser is strict: unknown fields and enum values outside the schema are
+errors, not warnings. See [docs/rule-ir.md](rule-ir.md) for the contract.
 
 ### Sample output — `--format text`
 

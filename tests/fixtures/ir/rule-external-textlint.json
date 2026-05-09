@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "id": "prose-textlint",
+      "title": "Repository prose should be free of textlint findings.",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 152,
+        "heading": "textlint prose quality"
+      },
+      "text": "Repository prose should be free of textlint findings.",
+      "kind": "external_check",
+      "severity": "warning",
+      "backend_hint": "external",
+      "confidence": "high",
+      "params": {
+        "tool": "textlint"
+      }
+    }
+  ]
+}
