@@ -384,8 +384,25 @@ def _markdown_evidence_block(rule: Rule, target: Path) -> Diagnostic:
         )
     block_body, fence_line, info_string = found
 
-    # Parse the block per the requested format.
-    import yaml  # local import keeps PyYAML out of the import path until needed
+    # Parse the block per the requested format. PyYAML is a runtime dependency
+    # but if it is missing/misinstalled we surface a deterministic
+    # ``unavailable`` (with ``dependency_missing`` evidence) instead of letting
+    # ``ModuleNotFoundError`` bubble up to the generic ``Status.ERROR`` branch.
+    try:
+        import yaml  # local import keeps PyYAML out of the import path until needed
+    except ImportError as exc:
+        return _diag(
+            rule,
+            Status.UNAVAILABLE,
+            f"{path_str}: cannot parse evidence block at line {fence_line}: "
+            f"PyYAML is required for format='yaml' but is not importable ({exc})",
+            [
+                Evidence(
+                    kind="dependency_missing",
+                    data={"package": "pyyaml", "format": fmt, "error": str(exc)},
+                )
+            ],
+        )
 
     try:
         parsed = yaml.safe_load(block_body) if block_body.strip() else None

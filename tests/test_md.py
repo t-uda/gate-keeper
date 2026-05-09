@@ -250,3 +250,58 @@ class TestFindFirstFencedBlockAfterHeading:
         body, _, info = out
         assert body == "foo: 1"
         assert info == "yaml"
+
+    def test_heading_inside_earlier_fence_is_ignored(self):
+        # The ``## Policy evidence`` line inside an earlier fenced sample
+        # block must NOT be treated as the section heading. Otherwise the
+        # backend would parse the fenced sample as the YAML body or report
+        # ``block_missing`` against the wrong section.
+        text = (
+            "# Title\n\n"
+            "Sample document showing the rule:\n\n"
+            "````markdown\n"
+            "## Policy evidence\n"
+            "\n"
+            "```yaml\n"
+            "decoy: in-sample\n"
+            "```\n"
+            "````\n\n"
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "real: yes\n"
+            "```\n"
+        )
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "real: yes"
+        assert info == "yaml"
+
+    def test_heading_with_terminal_hash_preserves_hash(self):
+        # ``## C#`` must match heading "C#", not "C". A naive ``\\s*#*\\s*$``
+        # regex would strip the trailing ``#`` and produce ``"C"``, breaking
+        # exact-match semantics.
+        text = "## C#\n\n```yaml\nlanguage: csharp\n```\n"
+        out = find_first_fenced_block_after_heading(text, "C#")
+        assert out is not None
+        # The wrong-title lookup does NOT match this section.
+        assert find_first_fenced_block_after_heading(text, "C") is None
+
+    def test_heading_closing_sequence_still_normalized(self):
+        # Proper CommonMark closing sequence (whitespace + #+) is still
+        # stripped, so ``## Policy evidence ##`` matches title "Policy
+        # evidence".
+        text = "## Policy evidence ##\n\n```yaml\nx: 1\n```\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+
+
+class TestHeadingPresentInsideFence:
+    def test_heading_inside_fence_is_ignored(self):
+        text = "# Title\n\n```markdown\n## Policy evidence\n```\n"
+        # No real section heading exists outside the fence.
+        assert heading_present(text, "Policy evidence") is False
+
+    def test_heading_with_terminal_hash(self):
+        assert heading_present("## C#\n", "C#") is True
+        assert heading_present("## C#\n", "C") is False

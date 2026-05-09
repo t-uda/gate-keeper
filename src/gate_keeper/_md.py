@@ -82,17 +82,71 @@ def strip_fenced_blocks(text: str) -> str:
     return "".join(out)
 
 
-_ATX_HEADING_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
+# ATX heading regex (CommonMark §4.2):
+#   - 0–3 leading spaces of indentation;
+#   - 1–6 ``#`` characters as the opening sequence;
+#   - one or more spaces/tabs separating opening sequence from title;
+#   - title (lazy match);
+#   - optional CommonMark *closing sequence*: at least one whitespace
+#     character followed by one-or-more ``#`` characters, then optional
+#     trailing whitespace. The whitespace requirement before the closing
+#     sequence is critical so a heading like ``## C#`` keeps its terminal
+#     ``#`` rather than treating it as a closing marker.
+_ATX_HEADING_RE = re.compile(
+    r"^ {0,3}"
+    r"(?P<hashes>#{1,6})"
+    r"[ \t]+"
+    r"(?P<title>.*?)"
+    r"(?:[ \t]+#+[ \t]*)?"
+    r"$"
+)
+
+
+def _iter_non_fence_lines(text: str):
+    """Yield ``(index, line)`` for each line of *text* that is NOT inside a fenced
+    code block.
+
+    Tracks the same fence state as :func:`strip_fenced_blocks` so callers that
+    want to scan headings (or other block-level elements) consistently ignore
+    code-block contents — preventing a ``## heading`` line embedded in a
+    sample code block from being treated as a real ATX heading.
+    """
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    for i, line in enumerate(text.splitlines()):
+        stripped = line.rstrip("\r\n")
+        m = FENCE_START_RE.match(stripped)
+        if m:
+            marker = m.group("marker")
+            info = m.group("info") or ""
+            if not in_fence:
+                if marker[0] == "`" and "`" in info:
+                    yield i, line
+                    continue
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+                continue
+            if marker[0] == fence_char and len(marker) >= fence_len and not info.strip():
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+                continue
+            # mismatched marker inside an open fence — still inside the fence
+            continue
+        if not in_fence:
+            yield i, line
 
 
 def heading_present(text: str, heading: str) -> bool:
     """Return True if *text* contains an ATX heading whose trimmed title is *heading*.
 
     Matching is exact (case-sensitive, no Unicode normalisation) and ignores
-    heading level. Helper for backends that want to distinguish "missing
-    heading" from "heading present but no fenced block follows".
+    heading level. Heading-like lines that appear inside fenced code blocks
+    are ignored (consistent with :func:`find_first_fenced_block_after_heading`).
     """
-    for line in text.splitlines():
+    for _, line in _iter_non_fence_lines(text):
         m = _ATX_HEADING_RE.match(line)
         if m is not None and m.group("title").strip() == heading:
             return True
@@ -125,9 +179,12 @@ def find_first_fenced_block_after_heading(text: str, heading: str) -> tuple[str,
     consistent across helpers.
     """
     lines = text.splitlines()
+    # Locate the heading by scanning only *non-fence* lines so a heading-like
+    # line inside an earlier fenced sample block can never be mistaken for the
+    # real section heading.
     heading_idx: int | None = None
     heading_level: int | None = None
-    for i, line in enumerate(lines):
+    for i, line in _iter_non_fence_lines(text):
         m = _ATX_HEADING_RE.match(line)
         if not m:
             continue
@@ -148,7 +205,8 @@ def find_first_fenced_block_after_heading(text: str, heading: str) -> tuple[str,
     for j in range(heading_idx + 1, len(lines)):
         raw = lines[j]
         if not in_fence:
-            # Stop at the next heading at the same or shallower level.
+            # Stop at the next heading at the same or shallower level. We are
+            # outside any fence here, so a raw ATX-heading line is real.
             mh = _ATX_HEADING_RE.match(raw)
             if mh and len(mh.group("hashes")) <= heading_level:
                 return None

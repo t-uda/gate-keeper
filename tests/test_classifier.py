@@ -506,6 +506,15 @@ class TestEvidenceBlockRouting:
         rule = _classify_text("The target must contain a markdown evidence block.")
         assert rule.kind is RuleKind.MARKDOWN_EVIDENCE_BLOCK
 
+    def test_bare_evidence_block_phrase_does_not_route(self):
+        # Bare "evidence block" without policy/markdown qualifier is too
+        # broad (e.g. "the LLM judgment evidence block") and must NOT route
+        # to ``markdown_evidence_block``. The "must contain" predicate
+        # should fall through to ``text_required`` instead.
+        rule = _classify_text("The PR must contain an evidence block.")
+        assert rule.kind is not RuleKind.MARKDOWN_EVIDENCE_BLOCK
+        assert rule.kind is RuleKind.TEXT_REQUIRED
+
 
 # ---------------------------------------------------------------------------
 # Codex P2 fix: draft matching requires PR context

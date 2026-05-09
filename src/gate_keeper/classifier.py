@@ -129,15 +129,16 @@ _TEXT_REQUIRED_HIGH_RE = re.compile(
 
 _PATH_MEDIUM_RE = re.compile(r"\b(?:path|glob|filename|directory|folder)\b", re.IGNORECASE)
 
-# High-confidence cue for ``markdown_evidence_block``. Match phrases that
-# explicitly reference a structured policy/evidence block embedded in a
-# Markdown target (heading + fenced YAML, etc.). Kept conservative so
-# bare task-checkbox or generic "evidence" wording does not accidentally
-# route here — params (``heading``, ``format``, ``required_keys``) cannot
-# be inferred from natural-language text and must be supplied via direct
-# IR construction.
+# Cue for ``markdown_evidence_block``. Requires an explicit Markdown- or
+# policy-qualified phrase ("policy evidence block" / "markdown evidence
+# block") so generic mentions of "evidence" do not route here. The bare
+# phrase "evidence block" is intentionally NOT matched: it is too broad
+# and can refer to non-Markdown contexts (e.g. an LLM judgment evidence
+# block). Params (``heading``, ``format``, ``required_keys``) cannot be
+# inferred from natural-language text and must be supplied via direct
+# IR construction; routing is a hint, not a complete rule.
 _EVIDENCE_BLOCK_HIGH_RE = re.compile(
-    r"\b(?:policy[-\s]+evidence\s+block|evidence\s+block|markdown\s+evidence\s+block)\b",
+    r"\b(?:policy[-\s]+evidence\s+block|markdown\s+evidence\s+block)\b",
     re.IGNORECASE,
 )
 
