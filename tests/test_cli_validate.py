@@ -1524,11 +1524,17 @@ class TestGlobMetacharLiteralFallthrough:
         assert rc == EXIT_FAIL
 
     def test_filesystem_rule_with_empty_glob_still_fails_closed(self, tmp_path, capsys):
-        # Negative regression: when the ruleset *does* contain a filesystem
-        # rule, the legacy "empty glob → UNAVAILABLE" contract must survive.
-        # Without this guard the #165 fall-through would silently rewrite
-        # ``--target docs/*.zzz`` to a literal string and mask a real
-        # missing-file diagnostic.
+        # Negative regression on the new fall-through *decision boundary*:
+        # the guard at ``_cmd_validate`` must not rewrite a glob-shaped
+        # ``--target`` when the ruleset routes to filesystem.  The legacy
+        # ``test_empty_glob_fails_closed`` covers the same shape but only
+        # asserts the diagnostic ``status`` — this case fails when the
+        # #165 fall-through fires too eagerly, so we additionally pin the
+        # ``backend == "filesystem"`` and ``multi_target_summary`` shape
+        # (the explicit signal that the filesystem multi-target branch
+        # ran, not the literal-text fall-through).  Without this pin a
+        # future change that silently swapped the branches could keep the
+        # status="unavailable" surface intact while breaking the contract.
         rules = tmp_path / "rules.md"
         rules.write_text(
             "# Rules\n\n## Required Files\n\n- `README.md` must exist.\n",
@@ -1551,3 +1557,74 @@ class TestGlobMetacharLiteralFallthrough:
         data = json.loads(captured.out)
         diag = data["diagnostics"][0]
         assert diag["status"] == "unavailable"
+        # The diagnostic must come from the filesystem backend (proves
+        # the empty-glob branch ran; literal-text fall-through would
+        # have routed elsewhere).
+        assert diag["backend"] == "filesystem", (
+            f"expected filesystem backend (legacy empty-glob branch), got {diag['backend']}"
+        )
+        # ``multi_target_summary`` with ``file_count == 0`` is the
+        # specific evidence shape emitted by the multi-target filesystem
+        # path on empty resolution.  Asserting both kind and zero count
+        # distinguishes this from a successful match or a rewrite to
+        # literal text.
+        summary = next(
+            (ev for ev in diag["evidence"] if ev["kind"] == "multi_target_summary"),
+            None,
+        )
+        assert summary is not None, (
+            f"expected multi_target_summary evidence (empty filesystem glob), "
+            f"got {[ev['kind'] for ev in diag['evidence']]}"
+        )
+        assert summary["data"]["file_count"] == 0
+
+    def test_backend_filesystem_override_with_nonfilesystem_ruleset_still_resolves_targets(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # New decision-boundary regression: the ruleset has no filesystem
+        # rule, but the user explicitly forces ``--backend filesystem``.
+        # The #165 fall-through must NOT fire here — the user's explicit
+        # backend choice means filesystem-style target resolution
+        # applies, so an empty glob still surfaces
+        # ``multi_target_summary`` with ``file_count == 0`` rather than
+        # silently being rewritten to literal text and routed to the
+        # rubric backend.  This guards the gap raised by Copilot's
+        # review on PR #171.
+        from gate_keeper.backends import llm_rubric
+
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+
+        # A semantic-only ruleset (rubric kind) with no filesystem rule.
+        rc = main(
+            [
+                "validate",
+                str(DOGFOODING_RULES_DOC),
+                "--target",
+                str(tmp_path / "no_match_*.zzz"),
+                "--backend",
+                "filesystem",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == EXIT_FAIL
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Every diagnostic must come from the filesystem backend with a
+        # zero-count multi_target_summary — proof the ``--backend
+        # filesystem`` override drove target resolution down the
+        # filesystem branch instead of taking the #165 literal
+        # fall-through.
+        for diag in data["diagnostics"]:
+            assert diag["backend"] == "filesystem", (
+                f"--backend filesystem override should keep filesystem backend; got {diag['backend']}"
+            )
+            summary = next(
+                (ev for ev in diag["evidence"] if ev["kind"] == "multi_target_summary"),
+                None,
+            )
+            assert summary is not None, (
+                f"--backend filesystem override must keep multi-target filesystem "
+                f"resolution; got evidence {[ev['kind'] for ev in diag['evidence']]}"
+            )
+            assert summary["data"]["file_count"] == 0

@@ -602,20 +602,26 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 # through ``resolve_targets`` even when the rules in this
                 # ruleset have no filesystem backend.  When the expansion
                 # produced zero filesystem matches AND no rule routes to
-                # the filesystem backend, the only sensible interpretation
-                # is "literal text"; fall through to the raw string so the
-                # llm-rubric / github / external backend receives the
-                # author-supplied content instead of an empty TargetSpec.
+                # the filesystem backend AND the user did not force a
+                # filesystem backend via ``--backend filesystem``, the
+                # only sensible interpretation is "literal text"; fall
+                # through to the raw string so the llm-rubric / github /
+                # external backend receives the author-supplied content
+                # instead of an empty TargetSpec.
                 #
-                # The check is intentionally narrow: a filesystem rule with
-                # an empty glob still produces ``UNAVAILABLE`` (the legacy
-                # fail-closed behaviour exercised by
-                # ``test_empty_glob_fails_closed``), and a non-filesystem
+                # The check is intentionally narrow: a filesystem rule
+                # with an empty glob still produces ``UNAVAILABLE`` (the
+                # legacy fail-closed behaviour exercised by
+                # ``test_empty_glob_fails_closed``), a non-filesystem
                 # rule with a glob that actually matched files still
                 # surfaces as ``multi_target_unsupported`` (the user
                 # explicitly asked for multiple files; #74's job to lift
-                # that restriction).
-                if not resolved.paths and not _ruleset_has_filesystem_rule(ruleset):
+                # that restriction), and an explicit
+                # ``--backend filesystem`` override still expects
+                # filesystem-style target resolution regardless of the
+                # ruleset's backend hints.
+                forced_filesystem = backend == "filesystem"
+                if not resolved.paths and not _ruleset_has_filesystem_rule(ruleset) and not forced_filesystem:
                     target = sole
                 else:
                     target = resolved
