@@ -218,10 +218,14 @@ The backend therefore enforces the substring contract in `check()` after
   punctuation pairs (curly single/double quotes, en/em dashes) is folded
   to their ASCII counterparts, so the model may copy with cosmetic
   differences. **Paraphrase or rewording is not tolerated.**
-- The artifact text is resolved from the `target` reference: if `target`
-  is a path that resolves to a file, the file contents are read; otherwise
-  the literal `str(target)` is used (this is the `--target "<PR body>"`
-  inline case).
+- The check runs against `str(target)` — exactly the string the prompt
+  template renders into the `Target reference` block via `_build_prompt`.
+  This matches what the model actually sees: the provider helpers do
+  not give the model a file-read tool, so for path / PR-reference
+  targets the model only ever has access to the reference string. The
+  bench harness pre-resolves path targets to file contents before
+  calling `check`, so for bench callers the target string is already the
+  inline content.
 - On any violation the verdict is **rejected**: the diagnostic returns
   `status=unsupported` with `evidence[0]` of kind
   `llm_quote_fabrication`. The evidence preserves the model's claimed

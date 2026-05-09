@@ -569,38 +569,33 @@ def _normalise_for_substring(text: str) -> str:
 def _resolve_artifact_text(target: str | Path) -> str:
     """Return the artifact text used for substring validation.
 
-    The backend's ``target`` is a reference (a filesystem path, a PR URL, or
-    a literal artifact body passed via ``--target "<text>"``). For
-    fabrication detection we want the **content** the model was supposed to
-    quote from. Resolution order:
+    Returns ``str(target)`` — the same string the prompt template renders
+    into the ``Target reference`` block via ``_build_prompt``. This is
+    deliberate: the substring check must be performed against what the
+    **model actually saw**, not against any out-of-band file contents.
 
-    1. If *target* is a ``Path`` (or ``str`` that resolves to an existing
-       readable file), return the file contents decoded as UTF-8.
-    2. Otherwise, return ``str(target)`` verbatim — the literal string was
-       what the model received as the artifact (this is the dogfood case
-       where ``--target "<PR body>"`` passes the body inline).
+    Concretely:
 
-    Failure to read a path falls back to the verbatim string so a transient
-    filesystem issue does not turn every judgment into a fabrication report.
+    - For inline-string targets (the dogfood case ``--target "<PR body>"``)
+      the model receives the body inline; quotes must be substrings of it.
+    - For path / PR-reference targets (the ``validate --target <file>``
+      flow) the model receives only the reference string and is instructed
+      to "judge from the reference alone" when it cannot read the
+      content. The substring check accepts only quotes drawn from that
+      reference. Generic placeholder strings invented by the model still
+      fail containment and are flagged as ``llm_quote_fabrication`` — the
+      desired behaviour.
+    - The bench harness pre-resolves path targets to file contents before
+      invoking ``check`` (``bench.run_entry`` ⇒ ``Target.resolve``), so for
+      bench callers the target string is already the inline content; no
+      special-casing is required here.
+
+    Reading file contents off-band would diverge from what the model has
+    access to and would force every legitimate verdict on a path target
+    into a false ``llm_quote_fabrication`` rejection (Codex review on
+    PR #173).
     """
-    s = str(target)
-    if isinstance(target, Path):
-        try:
-            return target.read_text(encoding="utf-8")
-        except OSError:
-            return s
-    # Heuristic file-path detection: don't probe arbitrarily long inputs (a PR
-    # body can be tens of kilobytes and is never a valid path on Linux). Path
-    # components on most filesystems max out at 255 bytes; PATH_MAX is 4096
-    # bytes. Above that, skip the filesystem probe entirely.
-    if len(s) <= 4096:
-        try:
-            p = Path(s)
-            if p.is_file():
-                return p.read_text(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
-    return s
+    return str(target)
 
 
 def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
