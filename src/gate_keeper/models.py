@@ -46,6 +46,7 @@ class RuleKind(str, enum.Enum):
     TEXT_REQUIRED = "text_required"
     TEXT_FORBIDDEN = "text_forbidden"
     MARKDOWN_TASKS_COMPLETE = "markdown_tasks_complete"
+    MARKDOWN_EVIDENCE_BLOCK = "markdown_evidence_block"
     GITHUB_PR_OPEN = "github_pr_open"
     GITHUB_NOT_DRAFT = "github_not_draft"
     GITHUB_LABELS_ABSENT = "github_labels_absent"

@@ -52,6 +52,7 @@ def test_rule_kind_members():
         "text_required",
         "text_forbidden",
         "markdown_tasks_complete",
+        "markdown_evidence_block",
         "github_pr_open",
         "github_not_draft",
         "github_labels_absent",

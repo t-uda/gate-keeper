@@ -129,6 +129,19 @@ _TEXT_REQUIRED_HIGH_RE = re.compile(
 
 _PATH_MEDIUM_RE = re.compile(r"\b(?:path|glob|filename|directory|folder)\b", re.IGNORECASE)
 
+# Cue for ``markdown_evidence_block``. Requires an explicit Markdown- or
+# policy-qualified phrase ("policy evidence block" / "markdown evidence
+# block") so generic mentions of "evidence" do not route here. The bare
+# phrase "evidence block" is intentionally NOT matched: it is too broad
+# and can refer to non-Markdown contexts (e.g. an LLM judgment evidence
+# block). Params (``heading``, ``format``, ``required_keys``) cannot be
+# inferred from natural-language text and must be supplied via direct
+# IR construction; routing is a hint, not a complete rule.
+_EVIDENCE_BLOCK_HIGH_RE = re.compile(
+    r"\b(?:policy[-\s]+evidence\s+block|markdown\s+evidence\s+block)\b",
+    re.IGNORECASE,
+)
+
 # Mirrors the parser's normative-keyword set; absence of a normative keyword
 # means the rule came from a bare task-checkbox line (bullets and paragraphs
 # require a normative keyword to be extracted).
@@ -282,6 +295,19 @@ def _classify_rule(rule: Rule) -> Rule:
             Backend.FILESYSTEM,
             Confidence.HIGH,
             "explicit must-not-contain or forbidden-text wording",
+        )
+
+    # Run evidence-block detection BEFORE the generic text_required pattern so
+    # phrases like "must include a policy evidence block" route here rather
+    # than to ``text_required`` (which would otherwise match "must include").
+    if _EVIDENCE_BLOCK_HIGH_RE.search(text):
+        return _make(
+            rule,
+            RuleKind.MARKDOWN_EVIDENCE_BLOCK,
+            Backend.FILESYSTEM,
+            Confidence.MEDIUM,
+            "explicit policy/evidence-block keyword "
+            "(params heading/format/required_keys must be supplied separately)",
         )
 
     if _TEXT_REQUIRED_HIGH_RE.search(text):

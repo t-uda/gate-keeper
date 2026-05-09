@@ -12,6 +12,8 @@ import pytest
 from gate_keeper._md import (
     TASK_CHECKED_RE,
     TASK_UNCHECKED_RE,
+    find_first_fenced_block_after_heading,
+    heading_present,
     strip_fenced_blocks,
 )
 
@@ -175,3 +177,156 @@ class TestStripFencedBlocksCommonMark:
         assert "first" not in result
         assert "still inside" not in result
         assert "after" in result
+
+
+class TestHeadingPresent:
+    def test_exact_match(self):
+        assert heading_present("# Policy evidence\n\nbody\n", "Policy evidence") is True
+
+    def test_subheading_level(self):
+        assert heading_present("## Policy evidence\n\nbody\n", "Policy evidence") is True
+
+    def test_no_match(self):
+        assert heading_present("# Other\n", "Policy evidence") is False
+
+    def test_case_sensitive(self):
+        assert heading_present("# policy evidence\n", "Policy evidence") is False
+
+    def test_trailing_hashes_stripped(self):
+        assert heading_present("## Policy evidence ##\n", "Policy evidence") is True
+
+
+class TestFindFirstFencedBlockAfterHeading:
+    def test_returns_block_body_and_line(self):
+        text = "# Title\n\n## Policy evidence\n\n```yaml\nfoo: 1\n```\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, fence_line, info = out
+        assert body == "foo: 1"
+        assert fence_line == 5
+        assert info == "yaml"
+
+    def test_missing_heading_returns_none(self):
+        text = "# Title\n\n## Other\n\n```yaml\nfoo: 1\n```\n"
+        assert find_first_fenced_block_after_heading(text, "Policy evidence") is None
+
+    def test_missing_block_returns_none(self):
+        text = "## Policy evidence\n\nprose only\n\n## Next\n\n```yaml\nfoo: 1\n```\n"
+        assert find_first_fenced_block_after_heading(text, "Policy evidence") is None
+
+    def test_block_before_heading_does_not_count(self):
+        text = "```yaml\nbefore: 1\n```\n\n## Policy evidence\n\nprose\n"
+        assert find_first_fenced_block_after_heading(text, "Policy evidence") is None
+
+    def test_block_under_subheading_is_picked_up(self):
+        # A deeper heading does NOT terminate the search; the next fenced block
+        # encountered before a sibling/parent heading wins.
+        text = "## Policy evidence\n\n### Detail\n\n```yaml\nfoo: 1\n```\n\n## Next\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "foo: 1"
+        assert info == "yaml"
+
+    def test_unterminated_fence_returns_partial_body(self):
+        text = "## Policy evidence\n\n```yaml\nfoo: 1\nbar: 2\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, _ = out
+        assert "foo: 1" in body
+        assert "bar: 2" in body
+
+    def test_empty_info_string_yields_none_info(self):
+        text = "## Policy evidence\n\n```\nfoo: 1\n```\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        _, _, info = out
+        assert info is None
+
+    def test_tilde_fence_supported(self):
+        text = "## Policy evidence\n\n~~~yaml\nfoo: 1\n~~~\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "foo: 1"
+        assert info == "yaml"
+
+    def test_heading_inside_earlier_fence_is_ignored(self):
+        # The ``## Policy evidence`` line inside an earlier fenced sample
+        # block must NOT be treated as the section heading. Otherwise the
+        # backend would parse the fenced sample as the YAML body or report
+        # ``block_missing`` against the wrong section.
+        text = (
+            "# Title\n\n"
+            "Sample document showing the rule:\n\n"
+            "````markdown\n"
+            "## Policy evidence\n"
+            "\n"
+            "```yaml\n"
+            "decoy: in-sample\n"
+            "```\n"
+            "````\n\n"
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "real: yes\n"
+            "```\n"
+        )
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "real: yes"
+        assert info == "yaml"
+
+    def test_heading_inside_tilde_fence_with_backticks_in_info_is_ignored(self):
+        # CommonMark allows a tilde fence's info string to contain backticks
+        # (only backtick fences forbid them). Previously the fence detector
+        # rejected an opening tilde fence whose info contained backticks, so
+        # ``_iter_non_fence_lines`` never entered fence state and a
+        # ``## heading`` inside the sample was treated as a real section
+        # heading. Codex P2 follow-up.
+        text = (
+            "# Title\n\n"
+            "Sample with backtick-bearing tilde info:\n\n"
+            "~~~ ```markdown\n"
+            "## Policy evidence\n"
+            "decoy: in-sample\n"
+            "~~~\n\n"
+            "## Policy evidence\n\n"
+            "```yaml\n"
+            "real: yes\n"
+            "```\n"
+        )
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+        body, _, info = out
+        assert body == "real: yes"
+        assert info == "yaml"
+
+    def test_heading_with_terminal_hash_preserves_hash(self):
+        # ``## C#`` must match heading "C#", not "C". A naive ``\\s*#*\\s*$``
+        # regex would strip the trailing ``#`` and produce ``"C"``, breaking
+        # exact-match semantics.
+        text = "## C#\n\n```yaml\nlanguage: csharp\n```\n"
+        out = find_first_fenced_block_after_heading(text, "C#")
+        assert out is not None
+        # The wrong-title lookup does NOT match this section.
+        assert find_first_fenced_block_after_heading(text, "C") is None
+
+    def test_heading_closing_sequence_still_normalized(self):
+        # Proper CommonMark closing sequence (whitespace + #+) is still
+        # stripped, so ``## Policy evidence ##`` matches title "Policy
+        # evidence".
+        text = "## Policy evidence ##\n\n```yaml\nx: 1\n```\n"
+        out = find_first_fenced_block_after_heading(text, "Policy evidence")
+        assert out is not None
+
+
+class TestHeadingPresentInsideFence:
+    def test_heading_inside_fence_is_ignored(self):
+        text = "# Title\n\n```markdown\n## Policy evidence\n```\n"
+        # No real section heading exists outside the fence.
+        assert heading_present(text, "Policy evidence") is False
+
+    def test_heading_with_terminal_hash(self):
+        assert heading_present("## C#\n", "C#") is True
+        assert heading_present("## C#\n", "C") is False
