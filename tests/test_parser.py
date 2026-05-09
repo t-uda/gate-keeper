@@ -456,6 +456,23 @@ class TestTargetKindAnnotation:
         assert "target_kind_parse_warning" in rules[0].params
         assert "bogus_kind" in rules[0].params["target_kind_parse_warning"]
 
+    def test_hyphen_typo_value_recorded_as_warning(self):
+        """Codex review on PR #174 — a common typo like ``commit-message`` (hyphen
+        instead of underscore) must be recognised as an annotation attempt
+        and routed through the warning channel rather than silently left
+        in the rule text. This protects the contract documented in the
+        module docstring ("unknown values are tolerated with warning").
+        """
+        md = "- The commit message must explain why. [target_kind: commit-message]\n"
+        rules = _parse(md)
+        assert len(rules) == 1
+        assert rules[0].target_kind is TargetKind.UNSPECIFIED
+        # Annotation token is stripped from the rule text.
+        assert rules[0].text == "The commit message must explain why."
+        # The warning surfaces the offending value verbatim.
+        assert "target_kind_parse_warning" in rules[0].params
+        assert "commit-message" in rules[0].params["target_kind_parse_warning"]
+
     def test_no_annotation_yields_unspecified(self):
         md = "- The thing must be valid.\n"
         rules = _parse(md)

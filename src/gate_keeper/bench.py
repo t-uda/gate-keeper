@@ -363,14 +363,25 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
     model: str | None = None
     prompt_version: str | None = None
 
+    # Evidence kinds that carry the standard telemetry fields (#76, #133,
+    # #169, #172). Provider-error / provider_unconfigured are deliberately
+    # excluded — those paths do not carry telemetry by contract.
+    _TELEMETRY_BEARING_KINDS = (
+        "llm_judgment",
+        "target_kind_mismatch",
+        "llm_quote_fabrication",
+    )
+
     for _ in range(n):
         diag = _llm.check(rule, target_text)
 
-        # Telemetry is recorded on llm_judgment evidence; provider_error /
+        # Telemetry is recorded on every evidence kind that represents a
+        # successful provider call (judgment-bearing, target-kind-mismatch,
+        # or grounding-violation rejection). provider_error /
         # provider_unconfigured carry no telemetry.
         run_reason: str | None = None
         for ev in diag.evidence:
-            if ev.kind == "llm_judgment":
+            if ev.kind in _TELEMETRY_BEARING_KINDS:
                 tokens_in_total += int(ev.data.get("tokens_in", 0) or 0)
                 tokens_out_total += int(ev.data.get("tokens_out", 0) or 0)
                 latency_ms_total += int(ev.data.get("latency_ms", 0) or 0)

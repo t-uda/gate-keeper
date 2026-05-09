@@ -887,7 +887,28 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     # ``target_kind_mismatch`` evidence rather than running the
     # substring-grounding check (an unsupported verdict legitimately carries
     # an empty quote list — see ``LlmJudgment.supporting_evidence_quotes``).
+    #
+    # We only honour the verdict when the rule actually carries a
+    # ``target_kind`` annotation. Otherwise the prompt's "## Artifact kind"
+    # block was never rendered and the model has no basis to claim a
+    # mismatch — a stray ``"unsupported"`` from a flaky model on an
+    # unannotated rule is treated as a contract violation (`provider_error`
+    # / `unsupported_without_target_kind`) and degrades the verdict to
+    # UNAVAILABLE rather than silently inventing a mismatch.
     if parsed.judgment == "unsupported":
+        if rule.target_kind is TargetKind.UNSPECIFIED:
+            return _unavailable_provider_error(
+                rule,
+                rubric_input,
+                provider,
+                "unsupported_without_target_kind",
+                (
+                    "Model returned 'unsupported' but the rule carries no "
+                    "target_kind annotation; the artifact-kind block was "
+                    "never injected into the prompt, so the verdict has "
+                    "no grounding. Treat as provider error."
+                ),
+            )
         cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
         return Diagnostic(
             rule_id=rule.id,

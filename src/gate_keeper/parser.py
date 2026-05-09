@@ -48,10 +48,13 @@ _BULLET_RE = re.compile(r"^[ \t]*[-*+]\s+(.*)")
 _ORDERED_RE = re.compile(r"^[ \t]*\d+[.)]\s+(.*)")
 _CODE_FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})")
 
-# Trailing ``[target_kind: <value>]`` annotation (#169). Optional whitespace
-# inside the brackets keeps authoring forgiving (``[target_kind:foo]`` and
-# ``[target_kind:  foo ]`` both match).
-_TARGET_KIND_RE = re.compile(r"\s*\[\s*target_kind\s*:\s*([A-Za-z0-9_]+)\s*\]\s*$")
+# Trailing ``[target_kind: <value>]`` annotation (#169). The value capture
+# is intentionally permissive (``[^\]]+``) so common typos — hyphens
+# (``commit-message``), case variants, trailing whitespace — are recognised
+# as annotation attempts and routed through the fallback warning path
+# rather than silently left in the rule text. The value is then validated
+# in Python against the :class:`TargetKind` enum.
+_TARGET_KIND_RE = re.compile(r"\s*\[\s*target_kind\s*:\s*([^\]]+?)\s*\]\s*$")
 
 
 def _extract_target_kind(text: str) -> tuple[str, TargetKind, str | None]:
@@ -64,6 +67,13 @@ def _extract_target_kind(text: str) -> tuple[str, TargetKind, str | None]:
       when no annotation is present **or** the value is unknown.
     - ``warning``: ``None`` on a clean parse, otherwise a short string
       describing why the value was rejected (typo, unknown enum value).
+
+    The annotation is recognised whenever the trailing bracketed token
+    starts with ``target_kind:``; the value capture is permissive
+    (anything up to the closing bracket) so common typos —
+    ``commit-message`` (hyphen vs underscore), case variants, etc. — are
+    reported via the warning channel rather than silently left in the
+    rule text.
     """
     m = _TARGET_KIND_RE.search(text)
     if not m:

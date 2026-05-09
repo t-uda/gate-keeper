@@ -250,6 +250,63 @@ class TestRunBenchSmoke:
         assert row.status == "FAIL"  # mismatch counts as fail
         assert result.summary.unavailable == 1
 
+    def test_run_bench_target_kind_mismatch_aggregates_telemetry(self, monkeypatch, tmp_path):
+        """Codex review on PR #174 — telemetry on ``target_kind_mismatch`` evidence
+        must be aggregated into the per-rule row and the summary, not silently
+        dropped just because the verdict is ``unsupported``.
+        """
+        _patch_env(monkeypatch, _OPENAI_ENV)
+
+        def _stub_unsupported(*_args, **_kwargs):
+            body = json.dumps(
+                {
+                    "judgment": "unsupported",
+                    "primary_reason": "Rule addresses PR descriptions; artifact is a commit message.",
+                    "supporting_evidence_quotes": [],
+                    "suggested_action": None,
+                }
+            )
+            return body, {"latency_ms": 33, "tokens_in": 70, "tokens_out": 9}
+
+        monkeypatch.setattr(_llm, "_call_openai", _stub_unsupported)
+
+        entries = tmp_path / "entries"
+        entries.mkdir()
+        (entries / "tk-mismatch.json").write_text(
+            json.dumps(
+                {
+                    "rule_text": (
+                        "The PR description should name the user-visible change in the first sentence."
+                    ),
+                    "rule_target_kind": "pr_description",
+                    "target": {
+                        "kind": "inline",
+                        "value": "fix(parser): handle CRLF\n\nThe parser was reading raw bytes.",
+                    },
+                    "expected_judgment": "unsupported",
+                    "expected_rationale_keywords": ["PR description", "commit message"],
+                    "category": "consistency",
+                    "intended_backend": "llm-rubric",
+                }
+            )
+        )
+
+        result = _bench.run_bench(entries, reproducibility=1)
+        row = result.per_rule[0]
+        assert row.status == "PASS"
+        assert row.actual == "unsupported"
+        assert row.expected == "unsupported"
+        # Telemetry from the ``target_kind_mismatch`` evidence must roll up.
+        assert row.tokens_in == 70
+        assert row.tokens_out == 9
+        assert row.latency_ms == 33
+        assert row.model == _llm.OPENAI_DEFAULT_MODEL
+        assert row.prompt_version == _llm.PROMPT_VERSION
+        # Summary tracks the same totals.
+        assert result.summary.tokens_in == 70
+        assert result.summary.tokens_out == 9
+        assert result.summary.latency_ms == 33
+
 
 # ---------------------------------------------------------------------------
 # CLI surface

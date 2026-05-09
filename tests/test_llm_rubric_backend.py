@@ -1602,6 +1602,26 @@ class TestUnsupportedDispatch:
         assert diag.remediation is not None
         assert "pr_description" in diag.remediation
 
+    def test_unsupported_without_target_kind_degrades_to_unavailable(self, monkeypatch):
+        """#169 + Codex review — a stray ``"unsupported"`` from a flaky model on a
+        rule with ``target_kind=unspecified`` must NOT silently invent a
+        target-kind-mismatch. The artifact-kind block was never injected
+        into the prompt so the model has no basis for that verdict; the
+        backend treats it as a contract violation and returns
+        ``Status.UNAVAILABLE`` with ``provider_error`` /
+        ``unsupported_without_target_kind``.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._UNSUPPORTED_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), "any artifact")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_error"
+        assert diag.evidence[0].data["failure_mode"] == "unsupported_without_target_kind"
+
 
 # ---------------------------------------------------------------------------
 # Reproducibility metric (#68): run_n
