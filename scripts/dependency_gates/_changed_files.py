@@ -52,13 +52,7 @@ def compute_changed_files(
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
-        raise ChangedFilesError(
-            f"git diff exited {result.returncode}: {stderr or '(no stderr)'}"
-        )
+        raise ChangedFilesError(f"git diff exited {result.returncode}: {stderr or '(no stderr)'}")
 
-    changed = {
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.strip()
-    }
+    changed = {line.strip() for line in result.stdout.splitlines() if line.strip()}
     return frozenset(changed)

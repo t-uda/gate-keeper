@@ -29,10 +29,7 @@ from dependency_gates import _changed_files as cf_mod  # noqa: E402
 from dependency_gates import check_cli_reference as validator  # noqa: E402
 
 VALIDATOR_SCRIPT = (
-    Path(__file__).resolve().parent.parent
-    / "scripts"
-    / "dependency_gates"
-    / "check_cli_reference.py"
+    Path(__file__).resolve().parent.parent / "scripts" / "dependency_gates" / "check_cli_reference.py"
 )
 
 
@@ -90,9 +87,7 @@ def _run(repo_root: Path, target: str) -> validator.Outcome:
     )
 
 
-def test_clean_tree_emits_unaffected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_clean_tree_emits_unaffected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
     _patch_changed(monkeypatch, set())
     out = _run(tmp_path, "docs/cli-reference.md")
@@ -100,9 +95,7 @@ def test_clean_tree_emits_unaffected(
     assert out.evidence_kind == "dependent_artifact_unaffected"
 
 
-def test_co_change_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_co_change_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
     _patch_changed(
         monkeypatch,
@@ -113,9 +106,7 @@ def test_co_change_passes(
     assert out.evidence_kind == "dependent_artifact_co_changed"
 
 
-def test_unack_change_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_unack_change_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
     _patch_changed(monkeypatch, {"src/gate_keeper/cli.py"})
     out = _run(tmp_path, "docs/cli-reference.md")
@@ -126,9 +117,7 @@ def test_unack_change_fails(
     assert ".gate-keeper/acks/" in out.remediation
 
 
-def test_matching_ack_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_matching_ack_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     src, _doc = _seed_repo(tmp_path, source_text="changed body\n")
     sha = hashlib.sha256(src.read_bytes()).hexdigest()
     acks_dir = tmp_path / ".gate-keeper" / "acks"
@@ -153,9 +142,7 @@ def test_matching_ack_passes(
     assert out.evidence_data["ack_by"] == "reviewer"
 
 
-def test_stale_ack_does_not_satisfy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_stale_ack_does_not_satisfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
     acks_dir = tmp_path / ".gate-keeper" / "acks"
     acks_dir.mkdir()
@@ -177,9 +164,7 @@ def test_stale_ack_does_not_satisfy(
     assert out.evidence_kind == "dependent_artifact_changed_without_target_update"
 
 
-def test_target_outside_edges_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_target_outside_edges_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
     _patch_changed(monkeypatch, set())
     out = _run(tmp_path, "README.md")
@@ -198,9 +183,7 @@ def test_manifest_invalid_fails(tmp_path: Path):
     assert out.evidence_kind == "manifest_invalid"
 
 
-def test_manifest_target_missing_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_manifest_target_missing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Manifest references files that don't exist on disk.
     (tmp_path / ".gate-keeper").mkdir()
     (tmp_path / ".gate-keeper" / "dependency-manifest.yml").write_text(
@@ -229,9 +212,7 @@ def test_manifest_target_missing_fails(
     assert "src/missing.py" in out.evidence_data["missing_paths"]
 
 
-def test_changed_file_source_unresolved_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_changed_file_source_unresolved_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
 
     def _raise(*_a: Any, **_kw: Any) -> Any:
@@ -258,9 +239,7 @@ def test_validator_emit_shape(
 
     payload = json.dumps(
         {
-            "rule": {
-                "params": {"manifest": ".gate-keeper/dependency-manifest.yml"}
-            },
+            "rule": {"params": {"manifest": ".gate-keeper/dependency-manifest.yml"}},
             "target": "docs/cli-reference.md",
         }
     )
@@ -290,9 +269,7 @@ class _StringIO:
 
 
 @pytest.mark.integration
-def test_end_to_end_through_command_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_end_to_end_through_command_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Run the validator script via ``CommandAdapter`` against a fake repo."""
     from gate_keeper.adapters.command import CommandAdapter, set_enabled
     from gate_keeper.models import (
@@ -307,21 +284,15 @@ def test_end_to_end_through_command_adapter(
 
     _seed_repo(tmp_path)
 
-    subprocess.run(
-        ["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=tmp_path,
         check=True,
     )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", "base"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=tmp_path, check=True)
 
     # The temp repo has no `origin`; point the validator at HEAD so the
     # diff (HEAD...HEAD) is empty — i.e. simulate a clean PR base.

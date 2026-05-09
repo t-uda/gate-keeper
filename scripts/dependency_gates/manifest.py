@@ -81,9 +81,7 @@ def _parse_manifest(text: str, *, source_path: Path | None) -> Manifest:
     if data is None:
         data = {}
     if not isinstance(data, dict):
-        raise ManifestError(
-            f"manifest top-level must be a mapping, got {type(data).__name__}"
-        )
+        raise ManifestError(f"manifest top-level must be a mapping, got {type(data).__name__}")
 
     _check_keys(data, set(), _TOP_OPTIONAL, "manifest")
 
@@ -96,13 +94,9 @@ def _parse_manifest(text: str, *, source_path: Path | None) -> Manifest:
 
     for edge in edges:
         if edge.from_id not in nodes_by_id:
-            raise ManifestError(
-                f"edge references unknown node id {edge.from_id!r} in 'from'"
-            )
+            raise ManifestError(f"edge references unknown node id {edge.from_id!r} in 'from'")
         if edge.to_id not in nodes_by_id:
-            raise ManifestError(
-                f"edge references unknown node id {edge.to_id!r} in 'to'"
-            )
+            raise ManifestError(f"edge references unknown node id {edge.to_id!r} in 'to'")
 
     return Manifest(
         nodes=tuple(nodes),
@@ -227,7 +221,5 @@ def _expect_mode(value: Any, ctx: str) -> str:
     if value is None:
         return _DEFAULT_MODE
     if value not in _VALID_MODES:
-        raise ManifestError(
-            f"{ctx}: expected one of {sorted(_VALID_MODES)}, got {value!r}"
-        )
+        raise ManifestError(f"{ctx}: expected one of {sorted(_VALID_MODES)}, got {value!r}")
     return value

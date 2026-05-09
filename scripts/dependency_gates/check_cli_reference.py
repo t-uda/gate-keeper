@@ -92,10 +92,7 @@ def _run(*, repo_root: Path, manifest_path: Path, target: str) -> Outcome:
             message=f"manifest invalid: {exc}",
             evidence_kind="manifest_invalid",
             evidence_data={"manifest_path": str(manifest_path), "error": str(exc)},
-            remediation=(
-                "Fix the manifest at "
-                f"{manifest_path} to match docs/design/dependency-gates.md §3."
-            ),
+            remediation=(f"Fix the manifest at {manifest_path} to match docs/design/dependency-gates.md §3."),
         )
 
     target_rel = _to_repo_relative(target, repo_root)
@@ -103,27 +100,19 @@ def _run(*, repo_root: Path, manifest_path: Path, target: str) -> Outcome:
     if not edges:
         return Outcome(
             status="pass",
-            message=(
-                f"target {target_rel!r} is not the 'to' side of any manifest edge"
-            ),
+            message=(f"target {target_rel!r} is not the 'to' side of any manifest edge"),
             evidence_kind="edge_not_applicable",
             evidence_data={"target": target_rel},
         )
 
-    missing = [
-        node.path
-        for node in manifest.nodes
-        if not (repo_root / node.path).exists()
-    ]
+    missing = [node.path for node in manifest.nodes if not (repo_root / node.path).exists()]
     if missing:
         return Outcome(
             status="fail",
             message=f"manifest references missing path(s): {missing}",
             evidence_kind="manifest_target_missing",
             evidence_data={"missing_paths": missing},
-            remediation=(
-                "Update the manifest entries or restore the referenced files."
-            ),
+            remediation=("Update the manifest entries or restore the referenced files."),
         )
 
     base_ref = resolve_base_ref()
@@ -136,8 +125,7 @@ def _run(*, repo_root: Path, manifest_path: Path, target: str) -> Outcome:
             evidence_kind="changed_file_source_unresolved",
             evidence_data={"base_ref": base_ref, "error": str(exc)},
             remediation=(
-                "Set GATE_KEEPER_BASE_REF to a resolvable git ref, "
-                "or run inside a git working tree."
+                "Set GATE_KEEPER_BASE_REF to a resolvable git ref, or run inside a git working tree."
             ),
         )
 
@@ -167,8 +155,7 @@ def _evaluate_edges(
             return Outcome(
                 status="pass",
                 message=(
-                    f"edge {edge_id}: source {source_path} unchanged; "
-                    f"target {target_path} is up to date"
+                    f"edge {edge_id}: source {source_path} unchanged; target {target_path} is up to date"
                 ),
                 evidence_kind="dependent_artifact_unaffected",
                 evidence_data={
@@ -181,9 +168,7 @@ def _evaluate_edges(
         if target_path in changed:
             return Outcome(
                 status="pass",
-                message=(
-                    f"edge {edge_id}: source and target co-changed"
-                ),
+                message=(f"edge {edge_id}: source and target co-changed"),
                 evidence_kind="dependent_artifact_co_changed",
                 evidence_data={
                     "edge_id": edge_id,
@@ -197,10 +182,7 @@ def _evaluate_edges(
         if ack is not None and ack.get("source_sha") == source_sha:
             return Outcome(
                 status="pass",
-                message=(
-                    f"edge {edge_id}: source changed; reviewer ack covers "
-                    f"current source sha"
-                ),
+                message=(f"edge {edge_id}: source changed; reviewer ack covers current source sha"),
                 evidence_kind="dependent_artifact_acked",
                 evidence_data={
                     "edge_id": edge_id,
@@ -331,9 +313,7 @@ def _emit(outcome: Outcome) -> None:
     diagnostic: dict[str, Any] = {
         "status": outcome.status,
         "message": outcome.message,
-        "evidence": [
-            {"kind": outcome.evidence_kind, "data": outcome.evidence_data}
-        ],
+        "evidence": [{"kind": outcome.evidence_kind, "data": outcome.evidence_data}],
     }
     if outcome.remediation is not None:
         diagnostic["remediation"] = outcome.remediation
