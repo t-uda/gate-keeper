@@ -93,9 +93,11 @@ Slice-1 vocabulary:
 - `dependent_artifact_co_changed` — source changed and target also changed in the same set.
 - `dependent_artifact_acked` — source changed, target unchanged, valid ack file present.
 - `dependent_artifact_changed_without_target_update` — source changed, target unchanged, no valid ack.
-- `dependent_artifact_stale_by_hash` — Mode B: target's `tracks:` sha does not match the source's current sha.
+- `dependent_artifact_stale_by_hash` — Mode B: target's `tracks:` sha does not match the source's current sha. (Reserved; emitted only once Mode B is implemented in slice 2.)
+- `ack_invalid` — ack file exists but cannot be parsed as a YAML mapping; emitted as FAIL so the author is not left wondering why a file they committed was silently ignored.
 - `edge_not_applicable` — the validator was invoked on a target that does not appear in any edge; emitted as PASS so the rule is safe to enable on multiple targets.
 - `changed_file_source_unresolved` — Mode A: git unavailable or base ref unresolvable; emitted as `unavailable`.
+- `stamped_mode_not_implemented` — an edge declares `mode: stamped` but slice-1 only implements Mode A; emitted as `unavailable` so the deferred mode is surfaced explicitly rather than silently miscategorised.
 
 New subtypes are added as needed. `Status` enum values are unchanged; only the evidence vocabulary grows.
 

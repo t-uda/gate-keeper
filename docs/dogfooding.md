@@ -69,8 +69,8 @@ edges does not require a new rule. The contract is documented in
 
 - External repos consuming `gate-keeper` set their own promotion policy.
 - This document does not list specific rules. Rule-level state lives next to
-  the rule definitions (see [`dogfooding-rules.md`](dogfooding-rules.md) for
+  the rule definitions: see [`dogfooding-rules.md`](dogfooding-rules.md) for
   the semantic advisory pool, [`example-rules.md`](example-rules.md) for
   the deterministic examples, and
   [`dependency-gate-rules.json`](dependency-gate-rules.json) for the
-  declarative artifact-dependency gate).
+  declarative artifact-dependency gates.

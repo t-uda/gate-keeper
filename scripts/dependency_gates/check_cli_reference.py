@@ -144,83 +144,139 @@ def _evaluate_edges(
     changed: frozenset[str],
     repo_root: Path,
 ) -> Outcome:
+    """Evaluate every applicable edge and aggregate.
+
+    Returns the first FAIL or UNAVAILABLE outcome encountered (so that any
+    one bad edge is surfaced even when its sibling edges pass). When all
+    edges pass, returns the outcome from the strongest signal in the order
+    co-changed > acked > unaffected.
+    """
+    pass_outcomes: list[Outcome] = []
     for edge in edges:
-        source_node = manifest.node(edge.from_id)
-        target_node = manifest.node(edge.to_id)
-        source_path = source_node.path
-        target_path = target_node.path
-        edge_id = _edge_id(edge, source_node, target_node)
+        outcome = _evaluate_edge(
+            edge=edge,
+            manifest=manifest,
+            changed=changed,
+            repo_root=repo_root,
+        )
+        if outcome.status != "pass":
+            return outcome
+        pass_outcomes.append(outcome)
 
-        if source_path not in changed:
-            return Outcome(
-                status="pass",
-                message=(
-                    f"edge {edge_id}: source {source_path} unchanged; target {target_path} is up to date"
-                ),
-                evidence_kind="dependent_artifact_unaffected",
-                evidence_data={
-                    "edge_id": edge_id,
-                    "source_path": source_path,
-                    "target_path": target_path,
-                },
-            )
+    # All edges passed; pick the most informative evidence kind.
+    priority = {
+        "dependent_artifact_co_changed": 3,
+        "dependent_artifact_acked": 2,
+        "dependent_artifact_unaffected": 1,
+    }
+    pass_outcomes.sort(key=lambda o: priority.get(o.evidence_kind, 0), reverse=True)
+    return pass_outcomes[0]
 
-        if target_path in changed:
-            return Outcome(
-                status="pass",
-                message=(f"edge {edge_id}: source and target co-changed"),
-                evidence_kind="dependent_artifact_co_changed",
-                evidence_data={
-                    "edge_id": edge_id,
-                    "source_path": source_path,
-                    "target_path": target_path,
-                },
-            )
 
-        ack = _load_ack(repo_root, edge_id)
-        source_sha = _file_sha256(repo_root / source_path)
-        if ack is not None and ack.get("source_sha") == source_sha:
-            return Outcome(
-                status="pass",
-                message=(f"edge {edge_id}: source changed; reviewer ack covers current source sha"),
-                evidence_kind="dependent_artifact_acked",
-                evidence_data={
-                    "edge_id": edge_id,
-                    "source_path": source_path,
-                    "target_path": target_path,
-                    "source_sha": source_sha,
-                    "ack_by": ack.get("ack_by"),
-                    "ack_at": ack.get("ack_at"),
-                    "reason": ack.get("reason"),
-                },
-            )
+def _evaluate_edge(
+    *,
+    edge: Edge,
+    manifest: Manifest,
+    changed: frozenset[str],
+    repo_root: Path,
+) -> Outcome:
+    source_node = manifest.node(edge.from_id)
+    target_node = manifest.node(edge.to_id)
+    source_path = source_node.path
+    target_path = target_node.path
+    edge_id = _edge_id(edge, source_node, target_node)
 
+    if edge.mode != "affected_set":
         return Outcome(
-            status="fail",
-            message=(
-                f"edge {edge_id}: {source_path} changed but {target_path} "
-                f"was not updated and no matching ack exists"
+            status="unavailable",
+            message=(f"edge {edge_id}: mode {edge.mode!r} is not implemented in slice 1 (affected_set only)"),
+            evidence_kind="stamped_mode_not_implemented",
+            evidence_data={
+                "edge_id": edge_id,
+                "mode": edge.mode,
+            },
+            remediation=(
+                "Slice 1 implements Mode A (affected_set) only. "
+                "Mode B (stamped) is reserved for a future slice; see "
+                "docs/design/dependency-gates.md §6."
             ),
-            evidence_kind="dependent_artifact_changed_without_target_update",
+        )
+
+    if source_path not in changed:
+        return Outcome(
+            status="pass",
+            message=(f"edge {edge_id}: source {source_path} unchanged; target {target_path} is up to date"),
+            evidence_kind="dependent_artifact_unaffected",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+            },
+        )
+
+    if target_path in changed:
+        return Outcome(
+            status="pass",
+            message=f"edge {edge_id}: source and target co-changed",
+            evidence_kind="dependent_artifact_co_changed",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+            },
+        )
+
+    ack_outcome = _load_ack(repo_root, edge_id)
+    source_sha = _file_sha256(repo_root / source_path)
+    if isinstance(ack_outcome, Outcome):
+        # Malformed ack file — surface as fail rather than silently ignoring.
+        return ack_outcome
+    ack = ack_outcome
+    if ack is not None and _ack_matches(ack, edge_id, source_sha):
+        return Outcome(
+            status="pass",
+            message=(f"edge {edge_id}: source changed; reviewer ack covers current source sha"),
+            evidence_kind="dependent_artifact_acked",
             evidence_data={
                 "edge_id": edge_id,
                 "source_path": source_path,
                 "target_path": target_path,
                 "source_sha": source_sha,
-                "ack_path": str(_ack_path_for(edge_id)),
+                "ack_by": ack.get("ack_by"),
+                "ack_at": ack.get("ack_at"),
+                "reason": ack.get("reason"),
             },
-            remediation=(
-                f"Update {target_path} to reflect the change in {source_path}, "
-                f"or commit a reviewer ack at "
-                f".gate-keeper/acks/{edge_id}.yml with source_sha={source_sha}."
-            ),
         )
 
-    return Outcome(  # pragma: no cover -- _edges_for_target guarantees non-empty
-        status="pass",
-        message="no applicable edges",
-        evidence_kind="edge_not_applicable",
-        evidence_data={},
+    return Outcome(
+        status="fail",
+        message=(
+            f"edge {edge_id}: {source_path} changed but {target_path} "
+            f"was not updated and no matching ack exists"
+        ),
+        evidence_kind="dependent_artifact_changed_without_target_update",
+        evidence_data={
+            "edge_id": edge_id,
+            "source_path": source_path,
+            "target_path": target_path,
+            "source_sha": source_sha,
+            "ack_path": str(_ack_path_for(edge_id)),
+        },
+        remediation=(
+            f"Update {target_path} to reflect the change in {source_path}, "
+            f"or commit a reviewer ack at "
+            f".gate-keeper/acks/{edge_id}.yml with source_sha={source_sha}."
+        ),
+    )
+
+
+def _ack_matches(ack: dict[str, Any], edge_id: str, source_sha: str) -> bool:
+    """Return True only when the ack's edge_id and source_sha both match."""
+    return (
+        isinstance(ack.get("edge_id"), str)
+        and ack["edge_id"] == edge_id
+        and isinstance(ack.get("source_sha"), str)
+        and ack["source_sha"] == source_sha
     )
 
 
@@ -288,16 +344,51 @@ def _ack_path_for(edge_id: str) -> Path:
     return Path(DEFAULT_ACKS_DIR) / f"{edge_id}.yml"
 
 
-def _load_ack(repo_root: Path, edge_id: str) -> dict[str, Any] | None:
+def _load_ack(repo_root: Path, edge_id: str) -> dict[str, Any] | None | Outcome:
+    """Load and shallow-validate the ack file for *edge_id*.
+
+    Returns:
+    - ``None`` when no ack file exists (caller proceeds to FAIL or PASS).
+    - ``dict`` when the file parses to a YAML mapping.
+    - ``Outcome`` when the file exists but is malformed (parse error or
+      non-mapping body); caller surfaces this directly as a FAIL so the
+      author isn't left wondering why their ack was silently ignored.
+    """
     ack_path = repo_root / _ack_path_for(edge_id)
     if not ack_path.is_file():
         return None
     try:
         data = yaml.safe_load(ack_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
+    except (OSError, yaml.YAMLError) as exc:
+        return Outcome(
+            status="fail",
+            message=f"ack file at {ack_path} could not be parsed: {exc}",
+            evidence_kind="ack_invalid",
+            evidence_data={
+                "edge_id": edge_id,
+                "ack_path": str(_ack_path_for(edge_id)),
+                "error": str(exc),
+            },
+            remediation=(
+                f"Fix or remove {ack_path}; YAML must parse to a mapping "
+                "with edge_id, source_sha, ack_by, ack_at, reason."
+            ),
+        )
     if not isinstance(data, dict):
-        return None
+        return Outcome(
+            status="fail",
+            message=(f"ack file at {ack_path} must be a YAML mapping, got {type(data).__name__}"),
+            evidence_kind="ack_invalid",
+            evidence_data={
+                "edge_id": edge_id,
+                "ack_path": str(_ack_path_for(edge_id)),
+                "actual_type": type(data).__name__,
+            },
+            remediation=(
+                f"Fix {ack_path}; YAML must parse to a mapping with "
+                "edge_id, source_sha, ack_by, ack_at, reason."
+            ),
+        )
     return data
 
 

@@ -142,6 +142,138 @@ def test_matching_ack_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert out.evidence_data["ack_by"] == "reviewer"
 
 
+def test_ack_with_wrong_edge_id_does_not_satisfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    src, _doc = _seed_repo(tmp_path)
+    sha = hashlib.sha256(src.read_bytes()).hexdigest()
+    acks_dir = tmp_path / ".gate-keeper" / "acks"
+    acks_dir.mkdir()
+    # Filename matches the edge id, but the body's edge_id field does not.
+    (acks_dir / "cli-implementation-documents-cli-reference.yml").write_text(
+        dedent(
+            f"""
+            edge_id: some-other-edge
+            source_sha: {sha}
+            ack_by: reviewer
+            ack_at: 2026-05-10T00:00:00Z
+            reason: copy-pasted ack body from elsewhere
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    _patch_changed(monkeypatch, {"src/gate_keeper/cli.py"})
+    out = _run(tmp_path, "docs/cli-reference.md")
+    assert out.status == "fail"
+    assert out.evidence_kind == "dependent_artifact_changed_without_target_update"
+
+
+def test_ack_yaml_parse_error_surfaced_as_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _seed_repo(tmp_path)
+    acks_dir = tmp_path / ".gate-keeper" / "acks"
+    acks_dir.mkdir()
+    (acks_dir / "cli-implementation-documents-cli-reference.yml").write_text(
+        ":\n  - this is not a valid mapping\n: also not\n",
+        encoding="utf-8",
+    )
+    _patch_changed(monkeypatch, {"src/gate_keeper/cli.py"})
+    out = _run(tmp_path, "docs/cli-reference.md")
+    assert out.status == "fail"
+    assert out.evidence_kind == "ack_invalid"
+
+
+def test_ack_non_mapping_body_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _seed_repo(tmp_path)
+    acks_dir = tmp_path / ".gate-keeper" / "acks"
+    acks_dir.mkdir()
+    (acks_dir / "cli-implementation-documents-cli-reference.yml").write_text(
+        "- just\n- a\n- list\n",
+        encoding="utf-8",
+    )
+    _patch_changed(monkeypatch, {"src/gate_keeper/cli.py"})
+    out = _run(tmp_path, "docs/cli-reference.md")
+    assert out.status == "fail"
+    assert out.evidence_kind == "ack_invalid"
+
+
+def test_stamped_mode_not_implemented(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Manifest declares an edge with mode: stamped — slice 1 only implements A.
+    src = tmp_path / "src" / "gate_keeper" / "cli.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("body\n", encoding="utf-8")
+    doc = tmp_path / "docs" / "cli-reference.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("doc\n", encoding="utf-8")
+    (tmp_path / ".gate-keeper").mkdir()
+    (tmp_path / ".gate-keeper" / "dependency-manifest.yml").write_text(
+        dedent(
+            """
+            nodes:
+              - id: src
+                path: src/gate_keeper/cli.py
+              - id: tgt
+                path: docs/cli-reference.md
+            edges:
+              - from: src
+                to: tgt
+                relation: documents
+                mode: stamped
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    _patch_changed(monkeypatch, set())
+    out = _run(tmp_path, "docs/cli-reference.md")
+    assert out.status == "unavailable"
+    assert out.evidence_kind == "stamped_mode_not_implemented"
+
+
+def test_multiple_edges_to_same_target_aggregated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two edges both pointing at the same target are both evaluated."""
+    src1 = tmp_path / "src" / "a.py"
+    src1.parent.mkdir(parents=True)
+    src1.write_text("a\n", encoding="utf-8")
+    src2 = tmp_path / "src" / "b.py"
+    src2.write_text("b\n", encoding="utf-8")
+    doc = tmp_path / "docs" / "cli-reference.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("doc\n", encoding="utf-8")
+    (tmp_path / ".gate-keeper").mkdir()
+    (tmp_path / ".gate-keeper" / "dependency-manifest.yml").write_text(
+        dedent(
+            """
+            nodes:
+              - id: a
+                path: src/a.py
+              - id: b
+                path: src/b.py
+              - id: tgt
+                path: docs/cli-reference.md
+            edges:
+              - from: a
+                to: tgt
+                relation: documents
+              - from: b
+                to: tgt
+                relation: documents
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    # Only `b.py` changed; `a` edge passes (unaffected) but `b` edge fails.
+    _patch_changed(monkeypatch, {"src/b.py"})
+    out = _run(tmp_path, "docs/cli-reference.md")
+    assert out.status == "fail"
+    assert out.evidence_kind == "dependent_artifact_changed_without_target_update"
+    assert out.evidence_data["source_path"] == "src/b.py"
+
+
+def test_invalid_nodes_top_level_type_rejected():
+    """Manifest with `nodes: {}` (a mapping, not a list) is rejected explicitly."""
+    from dependency_gates.manifest import ManifestError, parse_manifest
+
+    with pytest.raises(ManifestError, match="must be a list"):
+        parse_manifest("nodes: {}\n")
+
+
 def test_stale_ack_does_not_satisfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _seed_repo(tmp_path)
     acks_dir = tmp_path / ".gate-keeper" / "acks"

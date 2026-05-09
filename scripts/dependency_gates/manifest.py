@@ -85,9 +85,12 @@ def _parse_manifest(text: str, *, source_path: Path | None) -> Manifest:
 
     _check_keys(data, set(), _TOP_OPTIONAL, "manifest")
 
-    nodes = _parse_nodes(data.get("nodes") or [])
-    edges_raw = _parse_edges(data.get("edges") or [], nodes)
-    pairs_raw = _parse_pairs(data.get("pairs") or [], nodes)
+    # Distinguish "key absent / null" from "key present with a wrong type".
+    # `data.get("nodes") or []` would silently treat e.g. ``nodes: {}`` as a
+    # missing field; we want the type check inside `_parse_nodes` to fire.
+    nodes = _parse_nodes(data["nodes"] if data.get("nodes") is not None else [])
+    edges_raw = _parse_edges(data["edges"] if data.get("edges") is not None else [], nodes)
+    pairs_raw = _parse_pairs(data["pairs"] if data.get("pairs") is not None else [], nodes)
 
     edges = (*edges_raw, *pairs_raw)
     nodes_by_id = {n.id: n for n in nodes}
