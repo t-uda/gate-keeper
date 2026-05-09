@@ -4,6 +4,18 @@ Parses ATX headings, bullet/ordered lists, task checkboxes, and normative
 paragraphs into candidate Rule IR entries.  Classification (kind /
 backend_hint) is deferred to issue #3; all extracted rules carry the neutral
 defaults (semantic_rubric / llm-rubric / low confidence).
+
+Inline rule annotations (#169)
+------------------------------
+
+A trailing ``[target_kind: <value>]`` token at the end of a normative bullet
+or paragraph is recognised as an artifact-kind annotation. The token is
+stripped from the rule text and the parsed ``target_kind`` is attached to
+the resulting :class:`Rule`. Unknown values are tolerated: they are stripped
+from the text and a parse-time warning record is recorded on the rule
+(``params['target_kind_parse_warning']``); the rule's ``target_kind`` falls
+back to :data:`TargetKind.UNSPECIFIED` rather than failing the parse. This
+keeps rule-doc authoring forgiving while still surfacing typos.
 """
 
 from __future__ import annotations
@@ -20,6 +32,7 @@ from gate_keeper.models import (
     RuleSet,
     Severity,
     SourceLocation,
+    TargetKind,
 )
 
 # Multi-word phrases must appear before their single-word prefixes.
@@ -34,6 +47,39 @@ _TASK_BOX_RE = re.compile(r"^[ \t]*[-*+]\s+\[[ xX]\]\s+(.*)")
 _BULLET_RE = re.compile(r"^[ \t]*[-*+]\s+(.*)")
 _ORDERED_RE = re.compile(r"^[ \t]*\d+[.)]\s+(.*)")
 _CODE_FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})")
+
+# Trailing ``[target_kind: <value>]`` annotation (#169). Optional whitespace
+# inside the brackets keeps authoring forgiving (``[target_kind:foo]`` and
+# ``[target_kind:  foo ]`` both match).
+_TARGET_KIND_RE = re.compile(r"\s*\[\s*target_kind\s*:\s*([A-Za-z0-9_]+)\s*\]\s*$")
+
+
+def _extract_target_kind(text: str) -> tuple[str, TargetKind, str | None]:
+    """Strip a trailing ``[target_kind: ...]`` token from *text*.
+
+    Returns ``(stripped_text, target_kind, warning)``:
+
+    - ``stripped_text``: *text* with the annotation token removed (if any).
+    - ``target_kind``: the parsed :class:`TargetKind`, or ``UNSPECIFIED``
+      when no annotation is present **or** the value is unknown.
+    - ``warning``: ``None`` on a clean parse, otherwise a short string
+      describing why the value was rejected (typo, unknown enum value).
+    """
+    m = _TARGET_KIND_RE.search(text)
+    if not m:
+        return text, TargetKind.UNSPECIFIED, None
+    raw = m.group(1).strip()
+    stripped = text[: m.start()].rstrip()
+    try:
+        kind = TargetKind(raw)
+    except ValueError:
+        return (
+            stripped,
+            TargetKind.UNSPECIFIED,
+            f"unknown target_kind value {raw!r}; expected one of "
+            f"{sorted(member.value for member in TargetKind)}",
+        )
+    return stripped, kind, None
 
 
 def _has_normative(text: str) -> bool:
@@ -56,6 +102,8 @@ class _Candidate:
     text: str
     line_start: int
     heading: str | None
+    target_kind: TargetKind = TargetKind.UNSPECIFIED
+    target_kind_warning: str | None = None
 
 
 def _is_block_start(line: str) -> bool:
@@ -119,11 +167,15 @@ def parse(path: str, content: str) -> RuleSet:
         # Task checkbox — always a candidate regardless of normative keywords.
         task_m = _TASK_BOX_RE.match(raw)
         if task_m:
+            text = task_m.group(1).strip()
+            stripped, kind, warning = _extract_target_kind(text)
             candidates.append(
                 _Candidate(
-                    text=task_m.group(1).strip(),
+                    text=stripped,
                     line_start=line_no,
                     heading=heading,
+                    target_kind=kind,
+                    target_kind_warning=warning,
                 )
             )
             i += 1
@@ -134,7 +186,16 @@ def parse(path: str, content: str) -> RuleSet:
         if bullet_m:
             text = bullet_m.group(1).strip()
             if _has_normative(text):
-                candidates.append(_Candidate(text=text, line_start=line_no, heading=heading))
+                stripped, kind, warning = _extract_target_kind(text)
+                candidates.append(
+                    _Candidate(
+                        text=stripped,
+                        line_start=line_no,
+                        heading=heading,
+                        target_kind=kind,
+                        target_kind_warning=warning,
+                    )
+                )
             i += 1
             continue
 
@@ -143,15 +204,24 @@ def parse(path: str, content: str) -> RuleSet:
         if ordered_m:
             text = ordered_m.group(1).strip()
             if _has_normative(text):
-                candidates.append(_Candidate(text=text, line_start=line_no, heading=heading))
+                stripped, kind, warning = _extract_target_kind(text)
+                candidates.append(
+                    _Candidate(
+                        text=stripped,
+                        line_start=line_no,
+                        heading=heading,
+                        target_kind=kind,
+                        target_kind_warning=warning,
+                    )
+                )
             i += 1
             continue
 
         # Paragraph — collect continuation lines, then filter on normative keywords.
-        stripped = raw.strip()
-        if stripped:
+        stripped_raw = raw.strip()
+        if stripped_raw:
             para_start = line_no
-            parts = [stripped]
+            parts = [stripped_raw]
             i += 1
             while i < len(lines) and not _is_block_start(lines[i]):
                 nxt = lines[i].strip()
@@ -160,31 +230,39 @@ def parse(path: str, content: str) -> RuleSet:
                 i += 1
             para_text = " ".join(parts)
             if _has_normative(para_text):
+                stripped, kind, warning = _extract_target_kind(para_text)
                 candidates.append(
                     _Candidate(
-                        text=para_text,
+                        text=stripped,
                         line_start=para_start,
                         heading=heading,
+                        target_kind=kind,
+                        target_kind_warning=warning,
                     )
                 )
             continue
 
         i += 1
 
-    rules = [
-        Rule(
-            id=_make_id(path, c.line_start),
-            title=c.text[:80],
-            source=SourceLocation(path=path, line=c.line_start, heading=c.heading),
-            text=c.text,
-            kind=RuleKind.SEMANTIC_RUBRIC,
-            severity=Severity.WARNING,
-            backend_hint=Backend.LLM_RUBRIC,
-            confidence=Confidence.LOW,
-            params={},
+    rules: list[Rule] = []
+    for c in candidates:
+        params: dict[str, object] = {}
+        if c.target_kind_warning is not None:
+            params["target_kind_parse_warning"] = c.target_kind_warning
+        rules.append(
+            Rule(
+                id=_make_id(path, c.line_start),
+                title=c.text[:80],
+                source=SourceLocation(path=path, line=c.line_start, heading=c.heading),
+                text=c.text,
+                kind=RuleKind.SEMANTIC_RUBRIC,
+                severity=Severity.WARNING,
+                backend_hint=Backend.LLM_RUBRIC,
+                confidence=Confidence.LOW,
+                params=params,
+                target_kind=c.target_kind,
+            )
         )
-        for c in candidates
-    ]
     return RuleSet(rules=rules)
 
 

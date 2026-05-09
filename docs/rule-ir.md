@@ -56,6 +56,7 @@ Every rule includes all of the following fields:
 | `backend_hint` | `Backend` | The backend the classifier picked. See enum table below. |
 | `confidence` | `Confidence` | Classifier confidence; `low` must remain visible in `compile` and `explain` output. |
 | `params` | object | Kind-specific parameters. The exact key set per kind is defined by the backend issue that owns the kind (#3, #6, #10–#13). |
+| `target_kind` | `TargetKind` (optional) | Optional annotation declaring the artifact kind the rule addresses (PR description, commit message, …). Defaults to `unspecified` and is omitted from the persisted output when unset. Consumed by the `llm-rubric` backend so a rule whose premise does not apply to the artifact returns `unsupported` rather than parroting the rule's wording. See enum table below. |
 
 ## `Diagnostic`
 
@@ -118,6 +119,22 @@ backend rather than minting new `Backend` enum values; see
 
 ### `Confidence`
 `high`, `medium`, `low`
+
+### `TargetKind`
+`unspecified`, `pr_description`, `commit_message`, `issue_body`,
+`documentation`, `code_change`
+
+Optional rule annotation introduced in #169. The Markdown rule extractor
+(`src/gate_keeper/parser.py`) recognises a trailing `[target_kind: <value>]`
+token on a normative bullet, ordered-list item, task checkbox, or
+paragraph; the token is stripped from the rule text and the parsed
+`TargetKind` is attached to the resulting `Rule`. Unknown values are
+tolerated: the token is stripped, `target_kind` falls back to
+`unspecified`, and a parse-time warning is recorded under
+`params.target_kind_parse_warning`. The `llm-rubric` backend uses the
+field to inject an artifact-kind sentence into the prompt and authorise
+an `unsupported` verdict when the rule's premise does not apply to the
+artifact.
 
 ## Per-kind params
 

@@ -12,11 +12,13 @@ from gate_keeper.models import (
     Diagnostic,
     DiagnosticReport,
     Evidence,
+    Rule,
     RuleKind,
     RuleSet,
     Severity,
     SourceLocation,
     Status,
+    TargetKind,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ir"
@@ -213,3 +215,70 @@ def test_unavailable_status_distinct_from_pass_fail():
     assert report.diagnostics[0].status is Status.UNAVAILABLE
     assert report.diagnostics[0].status is not Status.PASS
     assert report.diagnostics[0].status is not Status.FAIL
+
+
+# ---------------------------------------------------------------------------
+# TargetKind (#169)
+# ---------------------------------------------------------------------------
+
+
+def test_target_kind_members():
+    assert {m.value for m in TargetKind} == {
+        "unspecified",
+        "pr_description",
+        "commit_message",
+        "issue_body",
+        "documentation",
+        "code_change",
+    }
+
+
+def test_rule_target_kind_defaults_to_unspecified():
+    """Constructing a Rule without target_kind must remain backward-compatible."""
+    rule = Rule(
+        id="r1",
+        title="t1",
+        source=SourceLocation(path="doc.md", line=3),
+        text="must do x",
+        kind=RuleKind.SEMANTIC_RUBRIC,
+        severity=Severity.WARNING,
+        backend_hint=Backend.LLM_RUBRIC,
+        confidence=Confidence.LOW,
+        params={},
+    )
+    assert rule.target_kind is TargetKind.UNSPECIFIED
+
+
+def test_rule_to_dict_omits_unspecified_target_kind():
+    """Persisted output must remain byte-identical for unannotated rules."""
+    payload = _ruleset_payload()
+    rs = RuleSet.from_dict(payload)
+    # Round-trip must NOT introduce a target_kind key for an unannotated rule.
+    assert rs.to_dict() == payload
+    assert "target_kind" not in rs.to_dict()["rules"][0]
+
+
+def test_rule_round_trip_with_target_kind():
+    payload = _ruleset_payload()
+    payload["rules"][0]["target_kind"] = "pr_description"
+    rs = RuleSet.from_dict(payload)
+    assert rs.rules[0].target_kind is TargetKind.PR_DESCRIPTION
+    # to_dict must include the field when set.
+    assert rs.to_dict()["rules"][0]["target_kind"] == "pr_description"
+
+
+def test_rule_rejects_invalid_target_kind():
+    payload = _ruleset_payload()
+    payload["rules"][0]["target_kind"] = "not_a_kind"
+    with pytest.raises(ValueError, match="not a valid TargetKind"):
+        RuleSet.from_dict(payload)
+
+
+def test_rule_accepts_unspecified_target_kind_explicitly():
+    payload = _ruleset_payload()
+    payload["rules"][0]["target_kind"] = "unspecified"
+    rs = RuleSet.from_dict(payload)
+    assert rs.rules[0].target_kind is TargetKind.UNSPECIFIED
+    # When the source dict explicitly carried "unspecified", the round-trip
+    # output omits it (the persisted shape is "absent => unspecified").
+    assert "target_kind" not in rs.to_dict()["rules"][0]

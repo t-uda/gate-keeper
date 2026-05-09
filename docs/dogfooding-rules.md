@@ -20,9 +20,9 @@ trailing-10-PR criteria.
 
 ## Semantic advisory rules
 
-- The PR description should name the user-visible change in the first sentence.
-- The PR description should state how the change was tested.
-- The commit message should explain why the change was made, not only what was changed.
+- The PR description should name the user-visible change in the first sentence. [target_kind: pr_description]
+- The PR description should state how the change was tested. [target_kind: pr_description]
+- The commit message should explain why the change was made, not only what was changed. [target_kind: commit_message]
 
 ## Rationale per rule
 

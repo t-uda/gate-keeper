@@ -1,6 +1,6 @@
 """Tests for the semantic self-gating advisory rule pool (#72).
 
-These tests pin three contracts:
+These tests pin four contracts:
 
 1. ``docs/dogfooding-rules.md`` extracts to exactly three semantic rules.
 2. The classifier routes all three to ``semantic_rubric`` / ``llm-rubric``
@@ -8,6 +8,9 @@ These tests pin three contracts:
 3. With no LLM provider configured, ``llm_rubric.check`` returns
    ``Status.UNAVAILABLE`` with ``provider_unconfigured`` evidence — the
    fail-closed advisory contract documented in ``docs/llm-rubric.md``.
+4. (#169) Each rule carries the expected ``target_kind`` annotation
+   (PR-description rules vs commit-message rules) so the rubric backend
+   can recognise the target-kind-mismatch case.
 
 The DOTENV_PATH used by the llm_rubric backend is monkeypatched to a
 non-existent tmpdir so the test does not depend on the developer's local
@@ -20,7 +23,7 @@ from pathlib import Path
 
 from gate_keeper import classifier, parser
 from gate_keeper.backends import llm_rubric
-from gate_keeper.models import Backend, RuleKind, Status
+from gate_keeper.models import Backend, RuleKind, Status, TargetKind
 
 _RULES_DOC = Path(__file__).resolve().parent.parent / "docs" / "dogfooding-rules.md"
 
@@ -63,6 +66,43 @@ class TestClassifierRouting:
         for rule in ruleset.rules:
             assert rule.backend_hint is Backend.LLM_RUBRIC, (
                 f"{rule.text!r} mis-routed to {rule.backend_hint.value}"
+            )
+
+
+class TestTargetKindAnnotations:
+    """#169 — every rule in dogfooding-rules.md must carry an explicit target_kind.
+
+    The orchestrator runs the rule doc against multiple artifact kinds (PR
+    bodies and commit messages); the annotation is what lets the rubric
+    backend recognise the target-kind-mismatch case rather than parroting
+    a PR-description rule's wording onto a commit message.
+    """
+
+    def test_pr_description_rules_carry_pr_description_kind(self):
+        ruleset = _ruleset()
+        pr_rules = [r for r in ruleset.rules if r.text.startswith("The PR description should")]
+        assert pr_rules, "expected at least one PR-description rule"
+        for rule in pr_rules:
+            assert rule.target_kind is TargetKind.PR_DESCRIPTION, (
+                f"{rule.text!r} carries {rule.target_kind.value} (expected pr_description)"
+            )
+
+    def test_commit_message_rule_carries_commit_message_kind(self):
+        ruleset = _ruleset()
+        commit_rules = [r for r in ruleset.rules if r.text.startswith("The commit message should")]
+        assert commit_rules, "expected at least one commit-message rule"
+        for rule in commit_rules:
+            assert rule.target_kind is TargetKind.COMMIT_MESSAGE, (
+                f"{rule.text!r} carries {rule.target_kind.value} (expected commit_message)"
+            )
+
+    def test_no_rule_has_target_kind_parse_warning(self):
+        """Annotations in the doc must use known values (no typo recovery)."""
+        ruleset = _ruleset()
+        for rule in ruleset.rules:
+            assert "target_kind_parse_warning" not in rule.params, (
+                f"{rule.text!r} produced a target_kind parse warning: "
+                f"{rule.params.get('target_kind_parse_warning')}"
             )
 
 

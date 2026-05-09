@@ -59,6 +59,23 @@ class RuleKind(str, enum.Enum):
     EXTERNAL_CHECK = "external_check"
 
 
+class TargetKind(str, enum.Enum):
+    """Artifact kind a rule applies to (#169).
+
+    Optional rule annotation that lets the LLM rubric backend recognise when
+    a rule's premise does not match the artifact under evaluation (e.g. a
+    PR-description rule run against a commit message). When absent, defaults
+    to ``UNSPECIFIED`` and the prompt template behaves as before.
+    """
+
+    UNSPECIFIED = "unspecified"
+    PR_DESCRIPTION = "pr_description"
+    COMMIT_MESSAGE = "commit_message"
+    ISSUE_BODY = "issue_body"
+    DOCUMENTATION = "documentation"
+    CODE_CHANGE = "code_change"
+
+
 def _require_keys(
     data: Any,
     required: set[str],
@@ -152,6 +169,7 @@ class Rule:
     backend_hint: Backend
     confidence: Confidence
     params: dict[str, Any]
+    target_kind: TargetKind = TargetKind.UNSPECIFIED
 
     @classmethod
     def from_dict(cls, data: Any) -> Rule:
@@ -166,7 +184,13 @@ class Rule:
             "confidence",
             "params",
         }
-        _require_keys(data, required, set(), "Rule")
+        optional = {"target_kind"}
+        _require_keys(data, required, optional, "Rule")
+        target_kind_raw = data.get("target_kind")
+        if target_kind_raw is None:
+            target_kind = TargetKind.UNSPECIFIED
+        else:
+            target_kind = _coerce_enum(TargetKind, target_kind_raw, "Rule.target_kind")
         return cls(
             id=_expect_str(data["id"], "Rule.id"),
             title=_expect_str(data["title"], "Rule.title"),
@@ -177,10 +201,11 @@ class Rule:
             backend_hint=_coerce_enum(Backend, data["backend_hint"], "Rule.backend_hint"),
             confidence=_coerce_enum(Confidence, data["confidence"], "Rule.confidence"),
             params=dict(_expect_dict(data["params"], "Rule.params")),
+            target_kind=target_kind,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "id": self.id,
             "title": self.title,
             "source": self.source.to_dict(),
@@ -191,6 +216,11 @@ class Rule:
             "confidence": self.confidence.value,
             "params": dict(self.params),
         }
+        # Omit unspecified target_kind from the persisted output so existing
+        # IR fixtures remain byte-identical and the field stays opt-in.
+        if self.target_kind is not TargetKind.UNSPECIFIED:
+            result["target_kind"] = self.target_kind.value
+        return result
 
 
 @dataclass(frozen=True)
@@ -303,6 +333,7 @@ __all__ = [
     "Severity",
     "Confidence",
     "RuleKind",
+    "TargetKind",
     "SourceLocation",
     "Rule",
     "Evidence",
