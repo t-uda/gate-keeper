@@ -1030,11 +1030,12 @@ class TestLlmJudgmentPydantic:
         )
 
     def test_frozen_prevents_attribute_assignment(self):
-        """frozen=True must raise TypeError on field mutation."""
+        """frozen=True must raise pydantic.ValidationError on field mutation."""
+        import pydantic
         import pytest
 
         j = self._valid_pass()
-        with pytest.raises(Exception):
+        with pytest.raises(pydantic.ValidationError):
             j.judgment = "fail"  # type: ignore[misc]
 
     def test_model_dump_contains_all_fields(self):
@@ -1093,6 +1094,32 @@ class TestLlmJudgmentPydantic:
                 primary_reason="Looks good.",
                 supporting_evidence_quotes=["some quote"],
                 suggested_action="This should not be here.",
+            )
+
+    def test_cross_field_validator_rejects_fail_without_suggested_action(self):
+        """fail verdict with suggested_action=None is invalid."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="fail",
+                primary_reason="Missing sections.",
+                supporting_evidence_quotes=["some quote"],
+                suggested_action=None,
+            )
+
+    def test_cross_field_validator_rejects_fail_with_empty_suggested_action(self):
+        """fail verdict with a whitespace-only suggested_action is invalid."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="fail",
+                primary_reason="Missing sections.",
+                supporting_evidence_quotes=["some quote"],
+                suggested_action="   ",
             )
 
 

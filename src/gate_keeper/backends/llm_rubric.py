@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status, TargetKind
 from gate_keeper.targets import TargetSpec
@@ -250,6 +250,9 @@ class LlmJudgment(BaseModel):
         # suggested_action must be None on pass/unsupported.
         if self.judgment in ("pass", "unsupported") and self.suggested_action is not None:
             raise ValueError("suggested_action must be None when judgment is not 'fail'")
+        # suggested_action must be a non-empty string on fail.
+        if self.judgment == "fail" and (self.suggested_action is None or not self.suggested_action.strip()):
+            raise ValueError("suggested_action must be a non-empty string when judgment is 'fail'")
         return self
 
 
@@ -878,12 +881,19 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         # pass / unsupported — suggested_action must be None/absent
         suggested_action = None
 
-    return LlmJudgment(
-        judgment=judgment,
-        primary_reason=primary_reason,
-        supporting_evidence_quotes=quotes,
-        suggested_action=suggested_action,
-    )
+    try:
+        return LlmJudgment(
+            judgment=judgment,
+            primary_reason=primary_reason,
+            supporting_evidence_quotes=quotes,
+            suggested_action=suggested_action,
+        )
+    except ValidationError as exc:
+        return LlmJudgmentParseError(
+            failure_mode="schema_validation_failed",
+            detail=str(exc),
+            raw_response_excerpt=excerpt,
+        )
 
 
 # ---------------------------------------------------------------------------
