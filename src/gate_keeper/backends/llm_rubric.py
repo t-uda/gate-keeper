@@ -766,11 +766,58 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
 # ---------------------------------------------------------------------------
 
 
+# Regex that extracts the body of a fenced code block (``` or ```json).
+#
+# gpt-4o-mini occasionally wraps its JSON response in a markdown code fence
+# despite the prompt instructing it to return *only* a JSON object (#194).
+# This pattern matches:
+#
+#     ```json
+#     { ... }
+#     ```
+#
+# or the plain-fence variant (no language tag):
+#
+#     ```
+#     { ... }
+#     ```
+#
+# The regex is used as a fallback in _parse_llm_judgment: if the raw
+# response is not valid JSON, we strip any surrounding code fence and retry.
+_CODE_FENCE_RE = re.compile(
+    r"```(?:json)?\s*\n(.*?)\n\s*```",
+    re.DOTALL,
+)
+
+
+def _extract_json_candidate(text: str) -> str | None:
+    """Return the first code-fenced body from *text*, or ``None``.
+
+    Used as a secondary extraction pass inside :func:`_parse_llm_judgment`
+    when the primary ``json.loads`` fails (#194 — gpt-4o-mini sometimes
+    wraps its JSON response in a markdown code fence).  Returns the inner
+    block's text (stripped) so the caller can retry ``json.loads``; returns
+    ``None`` when no fence is found, letting the caller surface the original
+    ``invalid_json`` error.
+    """
+    m = _CODE_FENCE_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
 def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
     """Parse and validate a raw model response string into ``LlmJudgment``.
 
     Returns ``LlmJudgmentParseError`` (never raises) for any failure.
     Extra fields in the JSON are silently ignored.
+
+    When the primary ``json.loads`` fails (e.g. because the model wrapped
+    the JSON in a markdown code fence), a secondary extraction pass via
+    :func:`_extract_json_candidate` strips the fence and retries (#194).
+    If the secondary pass also fails, the error from the original text is
+    returned so the ``raw_response_excerpt`` always refers to what the
+    model actually sent.
     """
     excerpt = text[:200]
 
@@ -781,14 +828,28 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             raw_response_excerpt=excerpt,
         )
 
+    # Primary parse: try the raw response directly.
     try:
         obj = json.loads(text)
     except json.JSONDecodeError as exc:
-        return LlmJudgmentParseError(
-            failure_mode="invalid_json",
-            detail=f"Response is not valid JSON: {exc}",
-            raw_response_excerpt=excerpt,
-        )
+        # Secondary pass: strip a surrounding code fence and retry (#194).
+        candidate = _extract_json_candidate(text)
+        if candidate is not None:
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError as exc2:
+                # Both passes failed; report the secondary error for accuracy.
+                return LlmJudgmentParseError(
+                    failure_mode="invalid_json",
+                    detail=f"Response is not valid JSON (code-fence extraction also failed): {exc2}",
+                    raw_response_excerpt=excerpt,
+                )
+        else:
+            return LlmJudgmentParseError(
+                failure_mode="invalid_json",
+                detail=f"Response is not valid JSON: {exc}",
+                raw_response_excerpt=excerpt,
+            )
 
     if not isinstance(obj, dict):
         return LlmJudgmentParseError(
