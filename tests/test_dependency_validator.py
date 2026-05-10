@@ -351,6 +351,25 @@ def test_stamped_short_digest_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert out.evidence_kind == "target_stamp_malformed"
 
 
+def test_stamped_non_utf8_target_reports_malformed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Target file with non-UTF-8 bytes must surface as ``target_stamp_malformed``.
+
+    Regression for codex P2 on PR #196: the previous ``read_target_stamp``
+    only caught ``OSError``, so a target with mojibake / binary bytes
+    propagated ``UnicodeDecodeError`` past ``_evaluate_stamped_edge`` and
+    crashed the validator instead of producing a structured diagnostic.
+    """
+    _seed_stamped_repo(tmp_path)
+    # Overwrite the stamped target with bytes that are not valid UTF-8.
+    doc = tmp_path / "docs" / "cli-reference.md"
+    doc.write_bytes(b"---\ntracks: src@sha256:" + (b"a" * 64) + b"\n---\nbody \xff\n")
+    _patch_changed(monkeypatch, set())
+    out = _run(tmp_path, "docs/cli-reference.md")
+    assert out.status == "fail"
+    assert out.evidence_kind == "target_stamp_malformed"
+    assert "decode" in out.evidence_data["error"]
+
+
 def test_stamped_wrong_source_id_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Stamp source-id does not match the manifest 'from' node id."""
     _seed_stamped_repo(tmp_path, stamp_source_id="some-other-source")

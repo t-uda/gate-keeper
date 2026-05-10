@@ -109,12 +109,22 @@ def read_target_stamp(path: Path) -> Stamp | None:
     """Read *path* and return its parsed stamp, or ``None`` when absent.
 
     Returns ``None`` only when no frontmatter exists or frontmatter has no
-    ``tracks`` key. All other failure modes raise ``StampError``.
+    ``tracks`` key. All other failure modes raise ``StampError``, including:
+
+    - ``OSError`` (file missing, permission denied, etc.) — surfaced as
+      ``cannot read target ...``.
+    - ``UnicodeDecodeError`` (target contains non-UTF-8 / binary bytes) —
+      surfaced as ``cannot decode target ...``. Frontmatter is defined over
+      UTF-8 text, so decode failure means the target cannot carry a stamp;
+      the validator maps this to ``target_stamp_malformed`` rather than
+      crashing.
     """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise StampError(f"cannot read target {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise StampError(f"cannot decode target {path} as UTF-8: {exc}") from exc
     frontmatter = extract_frontmatter(text)
     if frontmatter is None:
         return None

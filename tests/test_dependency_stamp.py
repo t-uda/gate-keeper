@@ -130,3 +130,26 @@ class TestReadTargetStamp:
     def test_missing_file_raises(self, tmp_path: Path):
         with pytest.raises(StampError, match="cannot read"):
             read_target_stamp(tmp_path / "no-such.md")
+
+    def test_non_utf8_bytes_raises_stamp_error(self, tmp_path: Path):
+        """Target containing non-UTF-8 bytes must surface as ``StampError``,
+        not propagate ``UnicodeDecodeError`` from ``Path.read_text``.
+
+        Regression for codex P2 on PR #196: ``read_target_stamp`` previously
+        only wrapped ``OSError``, so a stamped target with mojibake / binary
+        bytes crashed the validator instead of producing a malformed-stamp
+        diagnostic.
+        """
+        p = tmp_path / "doc.md"
+        # 0xff is not valid UTF-8 in any position; ``Path.read_text(encoding="utf-8")``
+        # raises ``UnicodeDecodeError`` on it.
+        p.write_bytes(b"---\ntracks: src@sha256:" + (b"a" * 64) + b"\n---\nbody \xff\n")
+        with pytest.raises(StampError, match="cannot decode"):
+            read_target_stamp(p)
+
+    def test_binary_target_raises_stamp_error(self, tmp_path: Path):
+        """A purely binary target file is reported as a malformed stamp."""
+        p = tmp_path / "doc.md"
+        p.write_bytes(b"\x00\x01\x02\xff\xfe\xfd")
+        with pytest.raises(StampError, match="cannot decode"):
+            read_target_stamp(p)
