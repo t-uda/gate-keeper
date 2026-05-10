@@ -276,3 +276,220 @@ class TestTargetSpecArgument:
         diag = report.diagnostics[0]
         assert diag.status is Status.UNSUPPORTED
         assert any(e.kind == "multi_target_unsupported" for e in diag.evidence)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic target_kind mismatch precheck (#178)
+# ---------------------------------------------------------------------------
+
+
+def _semantic_rule(
+    target_kind=None,
+) -> Rule:
+    """Build a SEMANTIC_RUBRIC rule with an optional ``target_kind``."""
+    from gate_keeper.models import TargetKind
+
+    if target_kind is None:
+        target_kind = TargetKind.UNSPECIFIED
+    return Rule(
+        id="semantic-rule",
+        title="Semantic rule",
+        source=SourceLocation(path="rules.md", line=1),
+        text="rule text",
+        kind=RuleKind.SEMANTIC_RUBRIC,
+        severity=Severity.ERROR,
+        backend_hint=Backend.LLM_RUBRIC,
+        confidence=Confidence.HIGH,
+        params={},
+        target_kind=target_kind,
+    )
+
+
+class _CallCountingCheck:
+    """Test double for the registered ``llm-rubric`` check.
+
+    Counts invocations and returns a configurable diagnostic. The deterministic
+    precheck path must short-circuit *before* this stub is called, so an
+    invocation count of ``0`` is the assertion that the LLM was never invoked.
+    """
+
+    def __init__(self, status: Status = Status.PASS) -> None:
+        self.calls: list[tuple[Rule, object]] = []
+        self.status = status
+
+    def __call__(self, rule, target):
+        self.calls.append((rule, target))
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=self.status,
+            severity=rule.severity,
+            message="stub: provider response",
+            evidence=[],
+        )
+
+
+class TestArtifactKindPrecheck:
+    """#178 — deterministic short-circuit before invoking llm-rubric.
+
+    These tests prove the dispatch is provider-independent by stubbing the
+    registry entry with a call counter and asserting the LLM is not invoked
+    on mismatch.
+    """
+
+    def test_pr_description_rule_with_commit_message_artifact_short_circuits(self, tmp_path, monkeypatch):
+        """rule.target_kind=pr_description + artifact_kind=commit_message →
+        UNSUPPORTED with target_kind_mismatch and no LLM call."""
+        from gate_keeper.models import TargetKind
+
+        stub = _CallCountingCheck()
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", stub)
+        rule = _semantic_rule(TargetKind.PR_DESCRIPTION)
+        report = validate(
+            _make_ruleset(rule),
+            "any commit message text",
+            backend="auto",
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        diag = report.diagnostics[0]
+        assert stub.calls == []  # Provider was NOT invoked.
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.backend is Backend.LLM_RUBRIC
+        assert len(diag.evidence) == 1
+        ev = diag.evidence[0]
+        assert ev.kind == "target_kind_mismatch"
+        assert ev.data["rule_target_kind"] == "pr_description"
+        assert ev.data["artifact_kind"] == "commit_message"
+        assert ev.data["dispatch"] == "deterministic_precheck"
+        assert ev.data["llm_called"] is False
+
+    def test_matching_kinds_proceed_to_llm(self, tmp_path, monkeypatch):
+        """rule.target_kind=commit_message + artifact_kind=commit_message →
+        backend is invoked normally."""
+        from gate_keeper.models import TargetKind
+
+        stub = _CallCountingCheck(status=Status.PASS)
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", stub)
+        rule = _semantic_rule(TargetKind.COMMIT_MESSAGE)
+        report = validate(
+            _make_ruleset(rule),
+            "subject\n\nbody",
+            backend="auto",
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        diag = report.diagnostics[0]
+        assert len(stub.calls) == 1  # Provider WAS invoked.
+        assert diag.status is Status.PASS
+
+    def test_unspecified_rule_ignores_artifact_kind(self, tmp_path, monkeypatch):
+        """rule.target_kind=unspecified → artifact_kind has no effect."""
+        from gate_keeper.models import TargetKind
+
+        stub = _CallCountingCheck(status=Status.FAIL)
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", stub)
+        rule = _semantic_rule(TargetKind.UNSPECIFIED)
+        report = validate(
+            _make_ruleset(rule),
+            "any artifact",
+            backend="auto",
+            artifact_kind=TargetKind.PR_DESCRIPTION,
+        )
+        # Even though artifact_kind != rule.target_kind formally, an
+        # UNSPECIFIED rule must preserve the prompt-level fallback path —
+        # the backend is invoked.
+        assert len(stub.calls) == 1
+        assert report.diagnostics[0].status is Status.FAIL
+
+    def test_omitted_artifact_kind_preserves_compat(self, tmp_path, monkeypatch):
+        """artifact_kind=None → no precheck, backend is invoked normally."""
+        from gate_keeper.models import TargetKind
+
+        stub = _CallCountingCheck(status=Status.PASS)
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", stub)
+        rule = _semantic_rule(TargetKind.PR_DESCRIPTION)
+        # Note: a *mismatch* would only be visible to a provider; with
+        # artifact_kind=None the validator forwards the rule unchanged so
+        # the prompt-level v4 fallback is responsible for declining.
+        report = validate(
+            _make_ruleset(rule),
+            "commit message text",
+            backend="auto",
+            artifact_kind=None,
+        )
+        assert len(stub.calls) == 1
+        assert report.diagnostics[0].status is Status.PASS
+
+    def test_precheck_provider_independent(self, tmp_path, monkeypatch):
+        """Mismatch path produces the same diagnostic regardless of which
+        provider would have been called — proven by registering a stub that
+        raises on invocation."""
+        from gate_keeper.models import TargetKind
+
+        def _raises(rule, target):
+            raise AssertionError("Provider must NOT be invoked on deterministic mismatch")
+
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", _raises)
+        rule = _semantic_rule(TargetKind.PR_DESCRIPTION)
+        report = validate(
+            _make_ruleset(rule),
+            "any commit message",
+            backend="auto",
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        diag = report.diagnostics[0]
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "target_kind_mismatch"
+        assert diag.evidence[0].data["llm_called"] is False
+
+    def test_precheck_skipped_for_non_llm_rules(self, tmp_path, monkeypatch):
+        """Non-LLM rules (filesystem, github, external) are unaffected by
+        artifact_kind — they receive the target as before."""
+        from gate_keeper.models import TargetKind
+
+        # Fixture file so the filesystem backend has something to evaluate.
+        fixture = tmp_path / "README.md"
+        fixture.write_text("# README\n")
+        rule = Rule(
+            id="fs-rule",
+            title="fs",
+            source=SourceLocation(path="rules.md", line=1),
+            text="README must exist",
+            kind=RuleKind.FILE_EXISTS,
+            severity=Severity.ERROR,
+            backend_hint=Backend.FILESYSTEM,
+            confidence=Confidence.HIGH,
+            params={"path": "README.md"},
+            # Annotations on a filesystem rule are non-binding for routing.
+            target_kind=TargetKind.PR_DESCRIPTION,
+        )
+        report = validate(
+            _make_ruleset(rule),
+            tmp_path,
+            backend="auto",
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        # Filesystem rule is unaffected: it routed to filesystem and PASSed.
+        diag = report.diagnostics[0]
+        assert diag.backend is Backend.FILESYSTEM
+        assert diag.status is Status.PASS
+
+    def test_precheck_diagnostic_round_trips(self, tmp_path, monkeypatch):
+        """Synthesised diagnostic round-trips through Diagnostic.to_dict /
+        from_dict so JSON renderers stay byte-faithful."""
+        from gate_keeper.models import TargetKind
+
+        stub = _CallCountingCheck()
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", stub)
+        rule = _semantic_rule(TargetKind.PR_DESCRIPTION)
+        report = validate(
+            _make_ruleset(rule),
+            "anything",
+            backend="auto",
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        diag = report.diagnostics[0]
+        rebuilt = Diagnostic.from_dict(diag.to_dict())
+        assert rebuilt.status is Status.UNSUPPORTED
+        assert rebuilt.evidence[0].data["dispatch"] == "deterministic_precheck"
+        assert rebuilt.evidence[0].data["llm_called"] is False

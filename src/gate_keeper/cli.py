@@ -8,10 +8,16 @@ from pathlib import Path
 
 from gate_keeper import __version__
 from gate_keeper.diagnostics import EXIT_OK, EXIT_USAGE
-from gate_keeper.models import Backend, RuleSet
+from gate_keeper.models import Backend, RuleSet, TargetKind
 
 # Backend choices exposed by the registry (always includes auto).
 _BACKEND_CHOICES = ["auto", "filesystem", "github", "llm-rubric", "external"]
+
+# ``--artifact-kind`` accepts every TargetKind value except ``unspecified``
+# (#178). Passing ``unspecified`` would be equivalent to omitting the flag,
+# so we reject it explicitly to make the CLI behaviour unambiguous — a user
+# who genuinely wants the legacy prompt-only behaviour omits the flag.
+_ARTIFACT_KIND_CHOICES = sorted(member.value for member in TargetKind if member is not TargetKind.UNSPECIFIED)
 
 
 class _IncludeError(Exception):
@@ -270,6 +276,20 @@ def build_parser() -> argparse.ArgumentParser:
             "enable the project-local 'command' external adapter for this run. "
             "WARNING: this lets the rule document execute arbitrary local commands "
             "(via params.argv). Pass this ONLY for rule documents you fully trust."
+        ),
+    )
+    validate_parser.add_argument(
+        "--artifact-kind",
+        dest="artifact_kind",
+        default=None,
+        choices=_ARTIFACT_KIND_CHOICES,
+        help=(
+            "declare the kind of artifact passed via --target (#178). "
+            "When set, llm-rubric rules whose `target_kind` annotation differs "
+            "from this value short-circuit to UNSUPPORTED with "
+            "`evidence.kind=target_kind_mismatch` BEFORE the model is called. "
+            "Rules with `target_kind=unspecified` ignore this flag. Omit the "
+            "flag to preserve the prompt-level behaviour."
         ),
     )
 
@@ -641,9 +661,25 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     previous_enabled = command_adapter.is_enabled()
     command_adapter.set_enabled(bool(args.allow_command_adapter))
+    # Resolve --artifact-kind into a TargetKind enum value once, here, so the
+    # validator API stays typed (it accepts ``TargetKind | None``). argparse
+    # has already validated the raw value against ``_ARTIFACT_KIND_CHOICES``,
+    # so ``TargetKind(...)`` cannot raise — but if a future refactor widens
+    # the choices we'd want the error to surface cleanly rather than crash.
+    artifact_kind: TargetKind | None
+    if getattr(args, "artifact_kind", None) is None:
+        artifact_kind = None
+    else:
+        artifact_kind = TargetKind(args.artifact_kind)
     try:
         # Run validation.
-        report = validator.validate(ruleset, target, backend=backend, reproducibility=args.reproducibility)
+        report = validator.validate(
+            ruleset,
+            target,
+            backend=backend,
+            reproducibility=args.reproducibility,
+            artifact_kind=artifact_kind,
+        )
     finally:
         command_adapter.set_enabled(previous_enabled)
 

@@ -29,6 +29,33 @@ A single rule may be promoted from advisory to required when **all** hold:
 Promotion is per-rule, not per-ruleset. Demotion is always allowed and does
 not require ceremony beyond an issue noting the trigger.
 
+## Artifact kind for self-gating runs (#178)
+
+When the dogfood loop validates a PR body or a commit message, it must
+pass `--artifact-kind` so rules whose `target_kind` annotation does not
+match the artifact short-circuit deterministically (`Status.UNSUPPORTED`
+with `evidence.kind=target_kind_mismatch`, `llm_called=false`) instead
+of routing through the LLM. Use `pr_description` for PR bodies and
+`commit_message` for commit messages:
+
+```sh
+# Validating a PR description.
+uv run gate-keeper validate docs/dogfooding-rules.md \
+  --target "$(gh pr view <N> --json body --jq .body)" \
+  --artifact-kind pr_description
+
+# Validating a commit message.
+uv run gate-keeper validate docs/dogfooding-rules.md \
+  --target "$(git log -1 --format=%B)" \
+  --artifact-kind commit_message
+```
+
+Rules whose `target_kind` is `unspecified` ignore the flag — only
+annotated rules participate in the deterministic dispatch. See
+[`cli-reference.md` — Deterministic target_kind mismatch
+(#178)](cli-reference.md#deterministic-target_kind-mismatch-178) for
+the evidence shape and full vocabulary.
+
 ## Issue hygiene
 
 Every false positive, false negative, or unclear failure observed during
