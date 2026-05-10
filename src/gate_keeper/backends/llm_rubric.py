@@ -14,14 +14,97 @@ import dataclasses
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status, TargetKind
 from gate_keeper.targets import TargetSpec
 
 name = "llm-rubric"
+
+# ---------------------------------------------------------------------------
+# Strategy registry (#183)
+#
+# Strategy ids surface in the rule IR via ``rule.params["strategy"]``. The
+# default ``single`` preserves the pre-#183 behaviour byte-for-byte (one
+# provider call, one parsed judgment, one diagnostic) and is the only
+# concrete strategy shipped in this slice. ``consensus`` / ``review`` /
+# ``adaptive`` are reserved ids — declared in :data:`KNOWN_STRATEGIES` so
+# the rule IR can validate the value, but invoking them returns
+# ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence so callers
+# discover the gap explicitly rather than silently falling back to
+# ``single``. Higher-effort strategies are opt-in and experimental until
+# benchmarked; the seam exists so they can be plugged in without
+# duplicating provider-call code, not as a green-light to enable them in
+# CI.
+# ---------------------------------------------------------------------------
+
+#: All strategy ids the IR layer recognises. Only ``single`` has a concrete
+#: implementation in this slice; the others are seam placeholders that
+#: dispatch to ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence.
+KNOWN_STRATEGIES: frozenset[str] = frozenset({"single", "consensus", "review", "adaptive"})
+
+#: Default strategy id when ``rule.params["strategy"]`` is unset. Preserves
+#: the pre-#183 single-call behaviour as the backward-compatible default.
+DEFAULT_STRATEGY: Literal["single"] = "single"
+
+
+@dataclass(frozen=True)
+class JudgmentRequest:
+    """Inputs every strategy receives (#183 seam).
+
+    Strategies operate on this immutable request rather than the raw
+    ``check`` arguments so the seam stays narrow and additive — future
+    strategy ids can read the same fields without changing the public
+    ``check`` signature. Multi-target inputs are unwrapped at the
+    dispatcher boundary; strategies see a single ``target`` and never
+    have to handle ``TargetSpec``.
+    """
+
+    rule: Rule
+    target: str | Path
+    artifact_kind: TargetKind | None = None
+
+
+@dataclass(frozen=True)
+class StrategyTelemetry:
+    """Aggregated per-strategy telemetry recorded into evidence (#183).
+
+    The ``single`` strategy fills these from one provider call. Future
+    multi-call strategies (``consensus`` / ``review`` / ``adaptive``)
+    aggregate across calls — ``call_count`` rises above 1, ``models``
+    can carry distinct entries, ``cost_estimate_usd_total`` and
+    ``latency_ms_total`` sum across calls. ``cost_estimate_usd_total``
+    is ``None`` iff any individual call had unknown pricing (preserving
+    the existing fail-closed semantics for ``cost_estimate_usd``).
+    """
+
+    strategy: str
+    call_count: int
+    models: list[str] = field(default_factory=list)
+    cost_estimate_usd_total: float | None = None
+    latency_ms_total: int = 0
+
+
+class Strategy(Protocol):
+    """Strategy seam for LLM-rubric judgment (#183).
+
+    A strategy receives a fully-resolved :class:`JudgmentRequest` and
+    returns a :class:`Diagnostic` ready for the caller. The seam exists
+    so consensus / review / adaptive can plug in without duplicating
+    provider-call helpers, parser code, or evidence construction.
+
+    Strategies own their own provider-call budget, retry policy, and
+    aggregation logic. They MUST surface ``llm_strategy``,
+    ``llm_call_count``, ``models``, ``prompt_version``,
+    ``cost_estimate_usd_total``, and ``latency_ms_total`` on the success
+    evidence dict so downstream consumers can observe strategy effort
+    uniformly. The ``single`` strategy is the reference implementation.
+    """
+
+    def __call__(self, request: JudgmentRequest) -> Diagnostic: ...
+
 
 DOTENV_PATH = Path("/home/vscode/.config/hermes-projects/gate-keeper.env")
 
@@ -715,11 +798,11 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         )
 
     # Required fields
-    for field in ("judgment", "primary_reason", "supporting_evidence_quotes"):
-        if field not in obj:
+    for required_field in ("judgment", "primary_reason", "supporting_evidence_quotes"):
+        if required_field not in obj:
             return LlmJudgmentParseError(
                 failure_mode="missing_field",
-                detail=f"Required field '{field}' is absent.",
+                detail=f"Required field '{required_field}' is absent.",
                 raw_response_excerpt=excerpt,
             )
 
@@ -1254,102 +1337,80 @@ def _unavailable_provider_error(
 # ---------------------------------------------------------------------------
 
 
-def check(
-    rule: Rule,
-    target: str | Path | TargetSpec,
-    *,
-    artifact_kind: TargetKind | None = None,
-) -> Diagnostic:
-    """Evaluate a semantic-rubric rule against *target*.
+def _resolve_strategy_id(rule: Rule) -> str:
+    """Return the strategy id for *rule* from ``rule.params['strategy']`` (#183).
 
-    When no provider is configured (or the env file is absent), returns
-    ``UNAVAILABLE`` with ``provider_unconfigured`` evidence. When a provider is
-    configured, dispatches to the configured provider and maps the response to
-    ``pass``/``fail`` with structured ``llm_judgment`` evidence (see
-    ``LlmJudgment``). Provider errors and unparseable responses map to
-    ``UNAVAILABLE`` with ``provider_error`` evidence — never to a crash,
-    ``pass``, or ``fail``.
-
-    When the rule carries an explicit ``target_kind`` annotation (#169) and
-    the model determines the rule's premise does not apply to the artifact
-    (e.g. a PR-description rule given a commit-message artifact), the
-    judgment maps to :data:`Status.UNSUPPORTED` with
-    ``evidence.kind=target_kind_mismatch`` rather than rendering a verdict.
-
-    Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
-    supported by this backend in the first slice (issue #146); the call
-    returns ``UNSUPPORTED`` with a ``multi_target_unsupported`` evidence
-    record so callers can see that targets were silently dropped is *not*
-    happening — content assembly is deferred to a follow-up. Single-file
-    ``TargetSpec`` values are unwrapped to the underlying path so callers
-    can mix CLI surfaces freely.
-
-    Parameters
-    ----------
-    rule:
-        The semantic-rubric rule to evaluate.
-    target:
-        File path, PR reference, inline string, or single-file
-        :class:`TargetSpec`. When a multi-target spec is supplied the
-        call short-circuits to ``UNSUPPORTED`` with
-        ``multi_target_unsupported`` evidence (see above).
-    artifact_kind:
-        Optional caller-declared :class:`TargetKind` for *target* (#191).
-        When supplied **and** *target* refers to a real file on disk, the
-        prompt's ``Target reference`` block is filled with the file
-        content rather than the path string — gpt-4o-mini at v4 was
-        observed to parrot filenames as artifact-kind evidence
-        (e.g. ``target-03-commit.txt``) when the path was rendered into
-        the prompt, undermining the rule's declared ``target_kind``
-        annotation. Inline / non-existent targets and ``artifact_kind=None``
-        callers preserve the legacy v4 byte-for-byte behaviour. The
-        :func:`_resolve_artifact_text` substring grounding follows the
-        same substitution so quotes are validated against what the model
-        actually saw.
-
-    On success the ``evidence[0].data`` dict contains:
-
-    - ``model``: the model identifier used.
-    - ``prompt_version``: ``PROMPT_VERSION`` constant (for #68 reproducibility).
-    - ``judgment``: ``"pass"`` or ``"fail"``.
-    - ``primary_reason``: one-sentence summary.
-    - ``supporting_evidence_quotes``: list of verbatim quotes.
-    - ``suggested_action``: remediation string (fail only) or ``None`` (pass).
-    - ``latency_ms``: wall-clock provider call duration in integer
-      milliseconds (#76).
-    - ``tokens_in``: provider-reported prompt token count (#76).
-    - ``tokens_out``: provider-reported completion token count (#76).
-    - ``cost_estimate_usd``: estimated USD cost based on static per-model
-      pricing snapshot (#133); ``None`` for unknown models.
-
-    ``Diagnostic.remediation`` is set to ``suggested_action`` on fail.
+    Defaults to :data:`DEFAULT_STRATEGY` (``"single"``) when unset. An
+    explicit non-string value or unknown id is preserved verbatim and
+    surfaced to the dispatcher so it can record an
+    ``unknown_strategy`` / ``strategy_not_implemented`` failure with the
+    offending id in evidence — silently coercing to ``single`` would
+    mask a rule-author typo as a successful single-call verdict.
     """
-    if isinstance(target, TargetSpec):
-        if target.is_multi:
-            return Diagnostic(
-                rule_id=rule.id,
-                source=rule.source,
-                backend=Backend.LLM_RUBRIC,
-                status=Status.UNSUPPORTED,
-                severity=rule.severity,
-                message=(
-                    "llm-rubric backend does not support multi-target evaluation; "
-                    "content assembly is deferred to a follow-up."
-                ),
-                evidence=[
-                    Evidence(
-                        kind="multi_target_unsupported",
-                        data={
-                            "backend": "llm-rubric",
-                            "raw_targets": list(target.raw_targets),
-                            "file_count": len(target.paths),
-                        },
-                    )
-                ],
+    raw = rule.params.get("strategy", DEFAULT_STRATEGY)
+    if not isinstance(raw, str) or not raw:
+        return str(raw)
+    return raw
+
+
+def _strategy_unavailable(
+    rule: Rule,
+    rubric_input: dict[str, Any],
+    strategy_id: str,
+    failure_mode: str,
+    detail: str,
+) -> Diagnostic:
+    """Return ``UNAVAILABLE`` for an unknown / unimplemented strategy id (#183).
+
+    Reserved-but-unimplemented ids (``consensus`` / ``review`` /
+    ``adaptive``) and unknown strings both go through this path. The
+    rule-author sees a fail-closed diagnostic with the offending id and
+    a clear failure mode rather than a silent fallback to ``single``.
+    """
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=(
+            f"LLM rubric strategy {strategy_id!r} is not available; skipping rule. "
+            f"Use one of: {sorted(_STRATEGIES)}."
+        ),
+        evidence=[
+            Evidence(
+                kind="strategy_unavailable",
+                data={
+                    **rubric_input,
+                    "requested_strategy": strategy_id,
+                    "failure_mode": failure_mode,
+                    "detail": detail[:500],
+                    "available_strategies": sorted(_STRATEGIES),
+                    "known_strategies": sorted(KNOWN_STRATEGIES),
+                },
             )
-        # Single-file spec: unwrap so the rest of the function operates on
-        # the underlying path exactly as it did before #146.
-        target = target.paths[0] if target.paths else ""
+        ],
+        remediation=(
+            "Set `params.strategy` to a concrete strategy that is "
+            f"implemented (currently: {sorted(_STRATEGIES)}), or remove "
+            "the `params.strategy` key to fall back to the default "
+            f"({DEFAULT_STRATEGY!r})."
+        ),
+    )
+
+
+def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
+    """Evaluate *request* with the single-call strategy (#183 reference impl).
+
+    Preserves the pre-#183 ``check`` body byte-for-byte except for the
+    additive strategy-metadata fields on the success ``llm_judgment``
+    evidence dict (``llm_strategy``, ``llm_call_count``, ``models``,
+    ``cost_estimate_usd_total``, ``latency_ms_total``). Existing
+    consumers that only read the legacy fields keep working unchanged.
+    """
+    rule = request.rule
+    target = request.target
+    artifact_kind = request.artifact_kind
 
     rubric_input = _build_rubric_input(rule, target)
 
@@ -1388,6 +1449,21 @@ def check(
         f"provider helper returned incomplete telemetry: {sorted(telemetry.keys())}"
     )
 
+    cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
+
+    # #183 — strategy-aggregated telemetry. For ``single`` this is just
+    # the one provider call; for future multi-call strategies these
+    # fields aggregate across calls. The legacy per-call ``latency_ms``
+    # / ``tokens_in`` / ``tokens_out`` / ``cost_estimate_usd`` fields
+    # remain on the evidence dict so existing consumers don't break.
+    strategy_meta: dict[str, Any] = {
+        "llm_strategy": "single",
+        "llm_call_count": 1,
+        "models": [model],
+        "cost_estimate_usd_total": cost,
+        "latency_ms_total": telemetry["latency_ms"],
+    }
+
     # #169 — when the model declines because the rule does not apply to the
     # artifact kind (target_kind_mismatch), surface UNSUPPORTED with
     # ``target_kind_mismatch`` evidence rather than running the
@@ -1415,7 +1491,6 @@ def check(
                     "no grounding. Treat as provider error."
                 ),
             )
-        cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
         return Diagnostic(
             rule_id=rule.id,
             source=rule.source,
@@ -1438,6 +1513,7 @@ def check(
                         "tokens_in": telemetry["tokens_in"],
                         "tokens_out": telemetry["tokens_out"],
                         "cost_estimate_usd": cost,
+                        **strategy_meta,
                     },
                 )
             ],
@@ -1459,7 +1535,6 @@ def check(
     artifact_text = _resolve_artifact_text(target, artifact_kind)
     fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
     if fabricated:
-        cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
         return Diagnostic(
             rule_id=rule.id,
             source=rule.source,
@@ -1487,6 +1562,7 @@ def check(
                         "tokens_in": telemetry["tokens_in"],
                         "tokens_out": telemetry["tokens_out"],
                         "cost_estimate_usd": cost,
+                        **strategy_meta,
                     },
                 )
             ],
@@ -1499,7 +1575,6 @@ def check(
         )
 
     status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
-    cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
     # #179 — once the fabrication validator has confirmed every quote is a
     # normalised substring of the artifact, resolve each to a span pointing
     # back into the original artifact text. Spans are additive: the
@@ -1520,6 +1595,7 @@ def check(
             "tokens_in": telemetry["tokens_in"],
             "tokens_out": telemetry["tokens_out"],
             "cost_estimate_usd": cost,
+            **strategy_meta,
         },
     )
     if status is Status.PASS:
@@ -1541,6 +1617,183 @@ def check(
         message=parsed.primary_reason,
         evidence=[evidence],
         remediation=parsed.suggested_action,
+    )
+
+
+def _run_not_implemented_strategy(request: JudgmentRequest, strategy_id: str) -> Diagnostic:
+    """Reserved-id placeholder (#183). Records the gap fail-closed.
+
+    ``consensus`` / ``review`` / ``adaptive`` are declared in
+    :data:`KNOWN_STRATEGIES` so the rule IR layer can validate the value
+    before reaching the backend, but their concrete bodies are out of
+    scope for this slice. Invoking one returns ``UNAVAILABLE`` with
+    ``strategy_not_implemented`` evidence rather than silently falling
+    back to ``single`` — a rule that asks for ``consensus`` should not
+    receive a single-call verdict in disguise.
+    """
+    rubric_input = _build_rubric_input(request.rule, request.target)
+    return _strategy_unavailable(
+        request.rule,
+        rubric_input,
+        strategy_id,
+        "strategy_not_implemented",
+        (
+            f"Strategy {strategy_id!r} is reserved (#183) but its concrete "
+            "implementation is deferred to a follow-up issue. Use "
+            f"{DEFAULT_STRATEGY!r} for now."
+        ),
+    )
+
+
+#: Concrete strategy registry (#183). Maps strategy id to its
+#: :class:`Strategy` callable. Only ``single`` is implemented in this
+#: slice; reserved ids are absent here and dispatch through
+#: ``_run_not_implemented_strategy`` so the gap is observable.
+_STRATEGIES: dict[str, Strategy] = {
+    "single": _run_single_strategy,
+}
+
+
+def check(
+    rule: Rule,
+    target: str | Path | TargetSpec,
+    *,
+    artifact_kind: TargetKind | None = None,
+) -> Diagnostic:
+    """Evaluate a semantic-rubric rule against *target*.
+
+    When no provider is configured (or the env file is absent), returns
+    ``UNAVAILABLE`` with ``provider_unconfigured`` evidence. When a provider is
+    configured, dispatches to the configured provider and maps the response to
+    ``pass``/``fail`` with structured ``llm_judgment`` evidence (see
+    ``LlmJudgment``). Provider errors and unparseable responses map to
+    ``UNAVAILABLE`` with ``provider_error`` evidence — never to a crash,
+    ``pass``, or ``fail``.
+
+    When the rule carries an explicit ``target_kind`` annotation (#169) and
+    the model determines the rule's premise does not apply to the artifact
+    (e.g. a PR-description rule given a commit-message artifact), the
+    judgment maps to :data:`Status.UNSUPPORTED` with
+    ``evidence.kind=target_kind_mismatch`` rather than rendering a verdict.
+
+    Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
+    supported by this backend in the first slice (issue #146); the call
+    returns ``UNSUPPORTED`` with a ``multi_target_unsupported`` evidence
+    record so callers can see that targets were silently dropped is *not*
+    happening — content assembly is deferred to a follow-up. Single-file
+    ``TargetSpec`` values are unwrapped to the underlying path so callers
+    can mix CLI surfaces freely.
+
+    Strategy dispatch (#183). The judgment strategy is selected from
+    ``rule.params["strategy"]`` and defaults to :data:`DEFAULT_STRATEGY`
+    (``"single"``) for backward compatibility. Only ``"single"`` is
+    implemented in this slice; reserved ids (``"consensus"`` /
+    ``"review"`` / ``"adaptive"``) and unknown ids return
+    ``UNAVAILABLE`` with ``strategy_unavailable`` evidence so callers
+    discover the gap explicitly. Strategy-aggregated metadata
+    (``llm_strategy``, ``llm_call_count``, ``models``,
+    ``cost_estimate_usd_total``, ``latency_ms_total``) is appended to
+    every successful ``llm_judgment`` / ``target_kind_mismatch`` /
+    ``llm_quote_fabrication`` evidence dict; the legacy single-call
+    fields (``latency_ms``, ``tokens_in``, ``tokens_out``,
+    ``cost_estimate_usd``) remain unchanged so existing consumers keep
+    working.
+
+    Parameters
+    ----------
+    rule:
+        The semantic-rubric rule to evaluate.
+    target:
+        File path, PR reference, inline string, or single-file
+        :class:`TargetSpec`. When a multi-target spec is supplied the
+        call short-circuits to ``UNSUPPORTED`` with
+        ``multi_target_unsupported`` evidence (see above).
+    artifact_kind:
+        Optional caller-declared :class:`TargetKind` for *target* (#191).
+        When supplied **and** *target* refers to a real file on disk, the
+        prompt's ``Target reference`` block is filled with the file
+        content rather than the path string — gpt-4o-mini at v4 was
+        observed to parrot filenames as artifact-kind evidence
+        (e.g. ``target-03-commit.txt``) when the path was rendered into
+        the prompt, undermining the rule's declared ``target_kind``
+        annotation. Inline / non-existent targets and ``artifact_kind=None``
+        callers preserve the legacy v4 byte-for-byte behaviour. The
+        :func:`_resolve_artifact_text` substring grounding follows the
+        same substitution so quotes are validated against what the model
+        actually saw.
+
+    On success the ``evidence[0].data`` dict contains:
+
+    - ``model``: the model identifier used.
+    - ``prompt_version``: ``PROMPT_VERSION`` constant (for #68 reproducibility).
+    - ``judgment``: ``"pass"`` or ``"fail"``.
+    - ``primary_reason``: one-sentence summary.
+    - ``supporting_evidence_quotes``: list of verbatim quotes.
+    - ``suggested_action``: remediation string (fail only) or ``None`` (pass).
+    - ``latency_ms``: wall-clock provider call duration in integer
+      milliseconds (#76).
+    - ``tokens_in``: provider-reported prompt token count (#76).
+    - ``tokens_out``: provider-reported completion token count (#76).
+    - ``cost_estimate_usd``: estimated USD cost based on static per-model
+      pricing snapshot (#133); ``None`` for unknown models.
+    - ``llm_strategy``: strategy id used (#183), e.g. ``"single"``.
+    - ``llm_call_count``: number of provider calls the strategy made (#183).
+    - ``models``: list of model identifiers used across the strategy's
+      calls (#183).
+    - ``cost_estimate_usd_total``: aggregated USD cost across the
+      strategy's calls (#183); ``None`` if any call had unknown pricing.
+    - ``latency_ms_total``: aggregated provider-call wall-clock latency
+      in integer milliseconds across the strategy's calls (#183).
+
+    ``Diagnostic.remediation`` is set to ``suggested_action`` on fail.
+    """
+    if isinstance(target, TargetSpec):
+        if target.is_multi:
+            return Diagnostic(
+                rule_id=rule.id,
+                source=rule.source,
+                backend=Backend.LLM_RUBRIC,
+                status=Status.UNSUPPORTED,
+                severity=rule.severity,
+                message=(
+                    "llm-rubric backend does not support multi-target evaluation; "
+                    "content assembly is deferred to a follow-up."
+                ),
+                evidence=[
+                    Evidence(
+                        kind="multi_target_unsupported",
+                        data={
+                            "backend": "llm-rubric",
+                            "raw_targets": list(target.raw_targets),
+                            "file_count": len(target.paths),
+                        },
+                    )
+                ],
+            )
+        # Single-file spec: unwrap so the rest of the function operates on
+        # the underlying path exactly as it did before #146.
+        target = target.paths[0] if target.paths else ""
+
+    # #183 — strategy dispatch. ``rule.params["strategy"]`` selects the
+    # judgment strategy; defaults to :data:`DEFAULT_STRATEGY` (``"single"``)
+    # so unannotated rules preserve the pre-#183 single-call behaviour.
+    strategy_id = _resolve_strategy_id(rule)
+    request = JudgmentRequest(rule=rule, target=target, artifact_kind=artifact_kind)
+    strategy = _STRATEGIES.get(strategy_id)
+    if strategy is not None:
+        return strategy(request)
+    if strategy_id in KNOWN_STRATEGIES:
+        return _run_not_implemented_strategy(request, strategy_id)
+    return _strategy_unavailable(
+        rule,
+        _build_rubric_input(rule, target),
+        strategy_id,
+        "unknown_strategy",
+        (
+            f"Strategy {strategy_id!r} is not a recognised id. "
+            f"Known ids: {sorted(KNOWN_STRATEGIES)}; implemented in this build: "
+            f"{sorted(_STRATEGIES)}."
+        ),
     )
 
 
