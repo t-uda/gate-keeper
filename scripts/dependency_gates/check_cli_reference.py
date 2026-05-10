@@ -30,6 +30,10 @@ if __package__ in (None, ""):
         compute_changed_files,
         resolve_base_ref,
     )
+    from dependency_gates._stamp import (  # noqa: E402
+        StampError,
+        read_target_stamp,
+    )
     from dependency_gates.manifest import (  # noqa: E402
         Edge,
         Manifest,
@@ -42,6 +46,10 @@ else:
         ChangedFilesError,
         compute_changed_files,
         resolve_base_ref,
+    )
+    from ._stamp import (
+        StampError,
+        read_target_stamp,
     )
     from .manifest import (
         Edge,
@@ -105,29 +113,41 @@ def _run(*, repo_root: Path, manifest_path: Path, target: str) -> Outcome:
             evidence_data={"target": target_rel},
         )
 
-    missing = [node.path for node in manifest.nodes if not (repo_root / node.path).exists()]
-    if missing:
-        return Outcome(
-            status="fail",
-            message=f"manifest references missing path(s): {missing}",
-            evidence_kind="manifest_target_missing",
-            evidence_data={"missing_paths": missing},
-            remediation=("Update the manifest entries or restore the referenced files."),
-        )
+    # Mode A's manifest_target_missing check covers every node globally;
+    # Mode B handles missing source/target per-edge (with `unavailable`
+    # evidence) so the global check applies only when at least one applicable
+    # edge needs Mode A semantics.
+    has_mode_a_edge = any(edge.mode == "affected_set" for edge in edges)
+    if has_mode_a_edge:
+        missing = [node.path for node in manifest.nodes if not (repo_root / node.path).exists()]
+        if missing:
+            return Outcome(
+                status="fail",
+                message=f"manifest references missing path(s): {missing}",
+                evidence_kind="manifest_target_missing",
+                evidence_data={"missing_paths": missing},
+                remediation=("Update the manifest entries or restore the referenced files."),
+            )
 
-    base_ref = resolve_base_ref()
-    try:
-        changed = compute_changed_files(repo_root, base_ref)
-    except ChangedFilesError as exc:
-        return Outcome(
-            status="unavailable",
-            message=f"cannot compute changed-file set: {exc}",
-            evidence_kind="changed_file_source_unresolved",
-            evidence_data={"base_ref": base_ref, "error": str(exc)},
-            remediation=(
-                "Set GATE_KEEPER_BASE_REF to a resolvable git ref, or run inside a git working tree."
-            ),
-        )
+    # Mode A needs the changed-file set; Mode B is a pure target-side check.
+    # Defer the diff invocation until at least one applicable edge needs it,
+    # so a manifest containing only stamped edges does not fail when git is
+    # unavailable.
+    changed: frozenset[str] = frozenset()
+    if has_mode_a_edge:
+        base_ref = resolve_base_ref()
+        try:
+            changed = compute_changed_files(repo_root, base_ref)
+        except ChangedFilesError as exc:
+            return Outcome(
+                status="unavailable",
+                message=f"cannot compute changed-file set: {exc}",
+                evidence_kind="changed_file_source_unresolved",
+                evidence_data={"base_ref": base_ref, "error": str(exc)},
+                remediation=(
+                    "Set GATE_KEEPER_BASE_REF to a resolvable git ref, or run inside a git working tree."
+                ),
+            )
 
     return _evaluate_edges(
         manifest=manifest,
@@ -186,19 +206,30 @@ def _evaluate_edge(
     target_path = target_node.path
     edge_id = _edge_id(edge, source_node, target_node)
 
+    if edge.mode == "stamped":
+        return _evaluate_stamped_edge(
+            edge=edge,
+            source_node=source_node,
+            target_node=target_node,
+            edge_id=edge_id,
+            repo_root=repo_root,
+        )
+
     if edge.mode != "affected_set":
+        # Defensive: the manifest loader already restricts ``mode`` to the
+        # documented enum, so unknown modes can only arrive via direct
+        # construction (e.g. tests). Surface them rather than silently
+        # mis-evaluating.
         return Outcome(
             status="unavailable",
-            message=(f"edge {edge_id}: mode {edge.mode!r} is not implemented in slice 1 (affected_set only)"),
+            message=(f"edge {edge_id}: mode {edge.mode!r} is not a recognised dependency-gate mode"),
             evidence_kind="stamped_mode_not_implemented",
             evidence_data={
                 "edge_id": edge_id,
                 "mode": edge.mode,
             },
             remediation=(
-                "Slice 1 implements Mode A (affected_set) only. "
-                "Mode B (stamped) is reserved for a future slice; see "
-                "docs/design/dependency-gates.md §6."
+                "Use 'affected_set' (Mode A) or 'stamped' (Mode B); see docs/design/dependency-gates.md §2.4."
             ),
         )
 
@@ -266,6 +297,154 @@ def _evaluate_edge(
             f"Update {target_path} to reflect the change in {source_path}, "
             f"or commit a reviewer ack at "
             f".gate-keeper/acks/{edge_id}.yml with source_sha={source_sha}."
+        ),
+    )
+
+
+def _evaluate_stamped_edge(
+    *,
+    edge: Edge,
+    source_node: Node,
+    target_node: Node,
+    edge_id: str,
+    repo_root: Path,
+) -> Outcome:
+    """Mode B: target frontmatter must record ``tracks: <source-id>@sha256:<digest>``.
+
+    The validator compares the stamp digest against the current source file's
+    SHA-256 and emits one of:
+
+    - ``dependent_artifact_unaffected``        (pass) — stamp matches source.
+    - ``dependent_artifact_stale_by_hash``     (fail) — stamp present but stale.
+    - ``target_stamp_missing``                 (fail) — no ``tracks:`` in target frontmatter.
+    - ``target_stamp_malformed``               (fail) — frontmatter or stamp unparseable.
+    - ``dependent_artifact_source_missing``    (unavailable) — source path absent.
+    - ``dependent_artifact_target_missing``    (unavailable) — target path absent.
+
+    Slice 1 (issue #181): whole-file source hashing; one source per target;
+    stamp must live in YAML frontmatter (no inline lines).
+    """
+    source_path = source_node.path
+    target_path = target_node.path
+    source_abs = repo_root / source_path
+    target_abs = repo_root / target_path
+
+    if not source_abs.is_file():
+        return Outcome(
+            status="unavailable",
+            message=f"edge {edge_id}: source file {source_path} not found",
+            evidence_kind="dependent_artifact_source_missing",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+            },
+            remediation=(
+                f"Restore {source_path} or fix the manifest 'from' node to reference an existing file."
+            ),
+        )
+    if not target_abs.is_file():
+        return Outcome(
+            status="unavailable",
+            message=f"edge {edge_id}: target file {target_path} not found",
+            evidence_kind="dependent_artifact_target_missing",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+            },
+            remediation=(
+                f"Restore {target_path} or fix the manifest 'to' node to reference an existing file."
+            ),
+        )
+
+    source_sha = _file_sha256(source_abs)
+    expected_stamp = f"{source_node.id}@sha256:{source_sha}"
+
+    try:
+        stamp = read_target_stamp(target_abs)
+    except StampError as exc:
+        return Outcome(
+            status="fail",
+            message=f"edge {edge_id}: target stamp malformed: {exc}",
+            evidence_kind="target_stamp_malformed",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+                "error": str(exc),
+            },
+            remediation=(f"Fix the YAML frontmatter of {target_path}; set 'tracks: {expected_stamp}'."),
+        )
+
+    if stamp is None:
+        return Outcome(
+            status="fail",
+            message=f"edge {edge_id}: {target_path} has no 'tracks:' stamp in frontmatter",
+            evidence_kind="target_stamp_missing",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+                "expected_stamp": expected_stamp,
+            },
+            remediation=(
+                f"Add a YAML frontmatter block to {target_path} containing 'tracks: {expected_stamp}'."
+            ),
+        )
+
+    if stamp.source_id != source_node.id:
+        return Outcome(
+            status="fail",
+            message=(
+                f"edge {edge_id}: target stamp source-id {stamp.source_id!r} "
+                f"does not match manifest source {source_node.id!r}"
+            ),
+            evidence_kind="target_stamp_malformed",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+                "stamp_source_id": stamp.source_id,
+                "expected_source_id": source_node.id,
+            },
+            remediation=(f"Update the 'tracks:' field in {target_path} to '{expected_stamp}'."),
+        )
+
+    if stamp.digest == source_sha:
+        return Outcome(
+            status="pass",
+            message=(f"edge {edge_id}: target stamp matches current source sha"),
+            evidence_kind="dependent_artifact_unaffected",
+            evidence_data={
+                "edge_id": edge_id,
+                "source_path": source_path,
+                "target_path": target_path,
+                "source_sha": source_sha,
+                "stamp": expected_stamp,
+                "mode": "stamped",
+            },
+        )
+
+    return Outcome(
+        status="fail",
+        message=(
+            f"edge {edge_id}: target stamp tracks sha256:{stamp.digest} but "
+            f"source {source_path} is now sha256:{source_sha}"
+        ),
+        evidence_kind="dependent_artifact_stale_by_hash",
+        evidence_data={
+            "edge_id": edge_id,
+            "source_path": source_path,
+            "target_path": target_path,
+            "source_sha": source_sha,
+            "stamp_digest": stamp.digest,
+            "stamp_source_id": stamp.source_id,
+            "expected_stamp": expected_stamp,
+        },
+        remediation=(
+            f"Re-review {target_path} against the new source and update "
+            f"the 'tracks:' field to '{expected_stamp}'."
         ),
     )
 
