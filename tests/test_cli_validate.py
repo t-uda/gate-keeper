@@ -787,7 +787,7 @@ class TestRulesFormatIR:
 
         captured_rulesets: list[RuleSet] = []
 
-        def fake_validate(ruleset, target, *, backend, reproducibility):
+        def fake_validate(ruleset, target, *, backend, reproducibility, artifact_kind=None):
             captured_rulesets.append(ruleset)
             return DiagnosticReport(diagnostics=[])
 
