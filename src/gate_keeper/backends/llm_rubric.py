@@ -766,29 +766,28 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
 # ---------------------------------------------------------------------------
 
 
+# Regex that extracts the body of a fenced code block (``` or ```json).
+#
+# gpt-4o-mini occasionally wraps its JSON response in a markdown code fence
+# despite the prompt instructing it to return *only* a JSON object (#194).
+# This pattern matches:
+#
+#     ```json
+#     { ... }
+#     ```
+#
+# or the plain-fence variant (no language tag):
+#
+#     ```
+#     { ... }
+#     ```
+#
+# The regex is used as a fallback in _parse_llm_judgment: if the raw
+# response is not valid JSON, we strip any surrounding code fence and retry.
 _CODE_FENCE_RE = re.compile(
     r"```(?:json)?\s*\n(.*?)\n\s*```",
     re.DOTALL,
 )
-"""Regex that extracts the body of a fenced code block (``` or ```json).
-
-gpt-4o-mini occasionally wraps its JSON response in a markdown code fence
-despite the prompt instructing it to return *only* a JSON object (#194).
-This pattern is:
-
-    ```json
-    { ... }
-    ```
-
-or the plain-fence variant (no language tag):
-
-    ```
-    { ... }
-    ```
-
-The regex is used as a fallback in :func:`_parse_llm_judgment`: if the raw
-response is not valid JSON, we strip any surrounding code fence and retry.
-"""
 
 
 def _extract_json_candidate(text: str) -> str | None:
@@ -838,11 +837,11 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         if candidate is not None:
             try:
                 obj = json.loads(candidate)
-            except json.JSONDecodeError:
-                # Both passes failed; report the original error.
+            except json.JSONDecodeError as exc2:
+                # Both passes failed; report the secondary error for accuracy.
                 return LlmJudgmentParseError(
                     failure_mode="invalid_json",
-                    detail=f"Response is not valid JSON (code-fence extraction also failed): {exc}",
+                    detail=f"Response is not valid JSON (code-fence extraction also failed): {exc2}",
                     raw_response_excerpt=excerpt,
                 )
         else:
