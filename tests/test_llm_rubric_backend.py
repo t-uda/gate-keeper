@@ -10,6 +10,7 @@ Updated in #67 to assert on the new structured ``LlmJudgment`` evidence shape.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -2631,3 +2632,194 @@ class TestEstimateCost:
         data = diag.evidence[0].data
         assert "cost_estimate_usd" in data
         assert data["cost_estimate_usd"] is None
+
+
+# ---------------------------------------------------------------------------
+# Strategy seam (#183): default `single`, reserved-id placeholders, unknown ids
+# ---------------------------------------------------------------------------
+
+
+def _semantic_rule_with_strategy(strategy: object) -> Rule:
+    """Return a stub semantic rule with ``params['strategy']`` set to *strategy*.
+
+    Mirrors :func:`_semantic_rule` but plumbs the new ``rule.params['strategy']``
+    surface (#183) through so the dispatcher path is exercised end-to-end.
+    """
+    return Rule(
+        id="stub-llm-rule",
+        title="Stub semantic rule",
+        source=SourceLocation(path="rules.md", line=5),
+        text="The documentation should be clear and comprehensive",
+        kind=RuleKind.SEMANTIC_RUBRIC,
+        severity=Severity.ERROR,
+        backend_hint=Backend.LLM_RUBRIC,
+        confidence=Confidence.LOW,
+        params={"strategy": strategy},
+    )
+
+
+class TestStrategySeam:
+    """Issue #183 — strategy abstraction for LLM rubric judgment.
+
+    The default strategy id is ``"single"`` and preserves pre-#183 behaviour
+    byte-for-byte except for the additive metadata fields on success
+    evidence. Reserved ids (``"consensus"`` / ``"review"`` / ``"adaptive"``)
+    return ``UNAVAILABLE`` with ``strategy_unavailable`` evidence so callers
+    discover the gap explicitly. Unknown ids likewise fail closed.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    def test_default_strategy_is_single(self):
+        """Module-level constant declares ``single`` as the default."""
+        assert llm_backend.DEFAULT_STRATEGY == "single"
+
+    def test_known_strategies_set(self):
+        """All four reserved ids are declared so the IR can validate values."""
+        assert llm_backend.KNOWN_STRATEGIES == frozenset({"single", "consensus", "review", "adaptive"})
+
+    def test_resolve_strategy_id_defaults_to_single(self):
+        """Unset ``rule.params['strategy']`` resolves to the default id."""
+        rule = _semantic_rule()
+        assert llm_backend._resolve_strategy_id(rule) == "single"
+
+    def test_resolve_strategy_id_honours_explicit_value(self):
+        rule = _semantic_rule_with_strategy("consensus")
+        assert llm_backend._resolve_strategy_id(rule) == "consensus"
+
+    def test_strategies_registry_contains_single(self):
+        """Only ``single`` is implemented in the #183 slice."""
+        assert "single" in llm_backend._STRATEGIES
+        assert callable(llm_backend._STRATEGIES["single"])
+
+    def test_strategies_registry_omits_reserved_ids(self):
+        """Reserved-but-unimplemented ids must not appear in the live registry.
+
+        They are declared in ``KNOWN_STRATEGIES`` so the IR can validate
+        the value, but they must not silently dispatch to a single-call
+        strategy in disguise.
+        """
+        for reserved in ("consensus", "review", "adaptive"):
+            assert reserved not in llm_backend._STRATEGIES
+
+    def test_default_pass_evidence_carries_strategy_metadata(self, monkeypatch, tmp_path):
+        """Issue #183 acceptance: success evidence advertises strategy fields."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 137, "tokens_in": 250, "tokens_out": 60},
+            ),
+        )
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        # Strategy metadata is appended additively — the legacy fields are
+        # untouched so existing consumers keep working.
+        assert data["llm_strategy"] == "single"
+        assert data["llm_call_count"] == 1
+        assert data["models"] == [llm_backend.OPENAI_DEFAULT_MODEL]
+        assert data["latency_ms_total"] == 137
+        # cost_estimate_usd_total mirrors cost_estimate_usd for a single call;
+        # both are populated for known models in _MODEL_PRICING.
+        assert data["cost_estimate_usd_total"] == data["cost_estimate_usd"]
+        # Legacy fields untouched.
+        assert data["latency_ms"] == 137
+        assert data["tokens_in"] == 250
+        assert data["tokens_out"] == 60
+        assert data["judgment"] == "pass"
+        assert data["prompt_version"] == llm_backend.PROMPT_VERSION
+
+    def test_explicit_single_strategy_id_honoured(self, monkeypatch, tmp_path):
+        """An explicit ``params.strategy=single`` id behaves like the default."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(
+                _VALID_PASS_JSON,
+                {"latency_ms": 50, "tokens_in": 100, "tokens_out": 20},
+            ),
+        )
+        rule = _semantic_rule_with_strategy("single")
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+        assert diag.evidence[0].data["llm_strategy"] == "single"
+        assert diag.evidence[0].data["llm_call_count"] == 1
+
+    @pytest.mark.parametrize("strategy_id", ["consensus", "review", "adaptive"])
+    def test_reserved_strategy_returns_unavailable(self, monkeypatch, tmp_path, strategy_id):
+        """Reserved ids dispatch through ``strategy_not_implemented``.
+
+        Provider stubs are still wired so a regression where the seam
+        silently falls back to ``single`` would surface as a PASS
+        verdict; the assertion catches that.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        provider_called: dict[str, int] = {"n": 0}
+
+        def _spy(*_a, **_k):
+            provider_called["n"] += 1
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy)
+        rule = _semantic_rule_with_strategy(strategy_id)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "strategy_unavailable"
+        assert diag.evidence[0].data["requested_strategy"] == strategy_id
+        assert diag.evidence[0].data["failure_mode"] == "strategy_not_implemented"
+        # Critically: provider is NOT called for an unimplemented strategy.
+        assert provider_called["n"] == 0
+
+    def test_unknown_strategy_returns_unavailable(self, monkeypatch, tmp_path):
+        """Strings outside ``KNOWN_STRATEGIES`` fail closed with ``unknown_strategy``."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
+        )
+        rule = _semantic_rule_with_strategy("nonsense-xyz")
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "strategy_unavailable"
+        assert diag.evidence[0].data["requested_strategy"] == "nonsense-xyz"
+        assert diag.evidence[0].data["failure_mode"] == "unknown_strategy"
+        assert "single" in diag.evidence[0].data["available_strategies"]
+
+    def test_strategy_seam_works_without_provider_calls(self, monkeypatch, tmp_path):
+        """Acceptance: fake-provider tests can exercise the strategy seam.
+
+        This verifies the issue #183 acceptance criterion that fake-provider
+        tests can drive the strategy seam without live LLM calls. The
+        provider stub is the standard ``_stub_response`` helper used
+        throughout this file; no network call is involved.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        calls: list[tuple] = []
+
+        def _spy(api_key, system, user, model):
+            calls.append((api_key, model))
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy)
+        diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        # Exactly one call for the single strategy.
+        assert len(calls) == 1
+        assert diag.evidence[0].data["llm_call_count"] == 1
+        # And the model used is reflected in the strategy-aggregated list.
+        assert diag.evidence[0].data["models"] == [calls[0][1]]
+
+    def test_judgment_request_dataclass_is_frozen(self):
+        """``JudgmentRequest`` is the seam contract; immutability matters."""
+        rule = _semantic_rule()
+        request = llm_backend.JudgmentRequest(rule=rule, target="x")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            request.target = "y"  # type: ignore[misc]
