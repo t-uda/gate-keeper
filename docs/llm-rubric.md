@@ -549,7 +549,7 @@ Reference history:
 - v3 (26 entries): 14 correct / 53.8%. The v2 → v3 transition added the
   optional `target_kind` annotation, the artifact-kind prompt block, and
   the `target-kind-mismatch-01` fixture; see PR #174 / #169.
-- v4 (28 entries): 16 correct / 57.1%. The v3 → v4 transition (#175)
+- v4 (28 entries): 16 correct / 57.1%. The v3 → v4 transition (PR #176 / #175)
   rewrites the artifact-kind block to name the rule's annotated
   `target_kind` value, replaces the canned ``unsupported`` example with
   kind-neutral placeholders, and **gates the unsupported-example block
@@ -620,11 +620,8 @@ justification block at merge time.
 
 **Data provenance.** Both baselines are recoverable from the Git history:
 
-- v3 baseline: commit `405da56` (`feat(llm-rubric): target_kind annotation + v3
-  prompt (#169) (#174)`) — `tests/fixtures/semantic/baseline.json` at that ref.
-- v4 baseline: commit `c11d525` (`feat(llm-rubric): v4 prompt grounds
-  rule.target_kind verbatim (#175) (#176)`) — same path.  Identical to the
-  current committed baseline (no subsequent baseline changes).
+- v3 baseline: commit `405da56` (`feat(llm-rubric): target_kind annotation + v3 prompt (#169) (#174)`) — `tests/fixtures/semantic/baseline.json` at that ref.
+- v4 baseline: commit `c11d525` (`feat(llm-rubric): v4 prompt grounds rule.target_kind verbatim (#175) (#176)`) — same path.  Identical to the current committed baseline (no subsequent baseline changes).
 
 #### Aggregate accuracy
 
@@ -734,5 +731,5 @@ The v3 → v4 transition is **accepted**.
 **Future prompt bumps must attach this justification block at PR merge time**,
 not retroactively.  The template in "Regression tolerance and justification
 template" above is the required format; attach it under a
-`## Prompt regression analysis` header in the PR description, referencing
+`## Prompt regression justification` header in the PR description, referencing
 the prior-version baseline commit SHA for reproducibility.
