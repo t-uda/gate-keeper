@@ -106,6 +106,7 @@ jobs:
           # fetch the PR it falls back to deterministic-no-evidence path.
           uv run gate-keeper validate docs/dogfooding-rules.md \
             --target "$PR_URL" \
+            --artifact-kind pr_description \
             --backend llm-rubric \
             --format json \
             > /tmp/dogfood.json 2> /tmp/dogfood.err || echo "validate exited non-zero (advisory; see stderr below)"
