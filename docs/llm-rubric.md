@@ -241,13 +241,98 @@ strip-and-flag offending quotes. The user-visible signal "this verdict
 came from a model that ignored the substring contract" is more valuable
 than a verdict whose grounding has been silently degraded.
 
+### Span-based evidence offsets (#179)
+
+After the substring-grounding validator accepts the model's quotes, the
+backend additionally resolves each validated quote to a span pointing into
+the **original** artifact text. Spans surface as a parallel list under
+`evidence[0].data.supporting_evidence_spans` on every successful
+`llm_judgment` evidence record. The pre-existing
+`supporting_evidence_quotes` field is preserved verbatim — spans are
+**additive**, not a replacement.
+
+A span has the following shape:
+
+```json
+{
+  "quote": "<the model's raw quote string, verbatim>",
+  "artifact_index": 0,
+  "start_offset": 142,
+  "end_offset": 181,
+  "start_line": 8,
+  "start_column": 3,
+  "end_line": 8,
+  "end_column": 42,
+  "match_normalisation": "exact" | "smart_quotes" | "whitespace"
+}
+```
+
+- **Character offsets** (`start_offset`, `end_offset`) — Python `str`
+  indices into the artifact text the model was shown (the same string the
+  fabrication validator runs against; see "Parser-side substring
+  grounding"). Half-open: `artifact_text[start_offset:end_offset]` slices
+  the matched substring out of the **original** artifact, even when the
+  match required normalisation. Byte offsets are not emitted; the artifact
+  is held as a Python `str` and recovering bytes would require nailing an
+  encoding for no extra evidence.
+- **1-indexed line / column** (`start_line`, `start_column`, `end_line`,
+  `end_column`) — for human-friendly rendering. Lines and columns are
+  1-indexed; columns count Unicode code points within the line. End
+  position is one past the last matched character (matching the half-open
+  convention of `end_offset`).
+- **`artifact_index: 0`** — reserved for the multi-artifact follow-up
+  (#182). Single-artifact callers can ignore it; including it now keeps
+  the wire format forward-compatible.
+- **`match_normalisation`** — records which tolerance the resolver had
+  to apply. `"exact"` means the quote was found verbatim; `"smart_quotes"`
+  means the curly-quote / dash folding (see `_QUOTE_FOLDING`) was needed;
+  `"whitespace"` means whitespace-run collapsing was needed (typically a
+  line-wrapped quote in the artifact rendered as one line by the model).
+  The resolver records the **weakest** normalisation that succeeded — an
+  exact match always wins over a smart-quote match, and a smart-quote
+  match always wins over a whitespace-collapse match.
+- **`quote`** — the model's raw quote string, preserved verbatim so a
+  consumer can correlate `supporting_evidence_spans[i]` with
+  `supporting_evidence_quotes[i]` even when the in-artifact text differs
+  (e.g. a smart-quote-folded match where the original artifact carries
+  curly punctuation).
+
+#### Duplicate quote handling
+
+If a quote occurs multiple times in the artifact, the span points to the
+**first match**. This is the simplest deterministic default and the one
+humans usually want when asking "where did the model find this quote?".
+A future iteration may add an "ambiguity flag" or all-matches list, but
+the first-match contract is stable for the current evidence shape.
+
+#### Fabricated quotes do not get spans
+
+Quote fabrication still produces an `llm_quote_fabrication` diagnostic
+(see "Parser-side substring grounding" above) — by definition, a
+fabricated quote has no in-artifact location. The fabrication evidence
+record carries the standard quote / telemetry fields and **does not**
+include a `supporting_evidence_spans` field. Consumers that branch on
+`evidence[0].kind == "llm_judgment"` get spans; consumers that branch
+on `evidence[0].kind == "llm_quote_fabrication"` do not.
+
+#### Compatibility
+
+`supporting_evidence_quotes` remains the stable, authoritative
+compatibility surface. A consumer that ignores
+`supporting_evidence_spans` keeps working unchanged. A consumer that
+needs location-aware rendering reads the spans list. If the resolver
+fails to locate a validated quote (a guard against future drift between
+the validator and the resolver), that quote is silently omitted from the
+span list — the quote remains in `supporting_evidence_quotes`, so no
+information is lost; only the optional location annotation is missing.
+
 ### Successful diagnostic shape
 
 When a provider responds successfully, the diagnostic carries:
 
 - `status`: `pass` or `fail`.
 - `message`: the `primary_reason` from the structured judgment.
-- `evidence[0]`: `{ kind: "llm_judgment", data: { model, prompt_version, judgment, primary_reason, supporting_evidence_quotes, suggested_action, latency_ms, tokens_in, tokens_out, cost_estimate_usd } }`.
+- `evidence[0]`: `{ kind: "llm_judgment", data: { model, prompt_version, judgment, primary_reason, supporting_evidence_quotes, supporting_evidence_spans, suggested_action, latency_ms, tokens_in, tokens_out, cost_estimate_usd } }`.
 - `remediation`: set to `suggested_action` when `status=fail`; `null` on `pass`.
 
 ### Per-rule observability fields

@@ -1286,6 +1286,360 @@ class TestQuoteFabricationDetection:
 
 
 # ---------------------------------------------------------------------------
+# Span resolution for validated quotes (#179)
+# ---------------------------------------------------------------------------
+
+
+class TestQuoteSpanResolution:
+    """#179 — span metadata for validated supporting quotes.
+
+    Once :func:`_find_fabricated_quotes` confirms a quote is a normalised
+    substring of the artifact, :func:`_resolve_quote_span_in` locates the
+    first match inside the original artifact text and returns deterministic
+    span metadata: character offsets and 1-indexed line/column ranges, plus
+    a ``match_normalisation`` tag identifying which tolerance was needed.
+
+    These unit tests exercise the resolver directly so a future refactor
+    that changes how spans are wired into ``check()`` can leave the span
+    semantics covered without depending on the provider-dispatch fixtures.
+    """
+
+    def test_exact_match_first_line(self):
+        artifact = "alpha beta gamma\ndelta epsilon"
+        span = llm_backend._resolve_quote_span_in(artifact, "alpha beta")
+        assert span is not None
+        assert span.match_normalisation == "exact"
+        assert span.artifact_index == 0
+        assert span.start_offset == 0
+        assert span.end_offset == 10
+        assert span.start_line == 1
+        assert span.start_column == 1
+        assert span.end_line == 1
+        # 1-indexed half-open: column one past the last matched character.
+        assert span.end_column == 11
+        # Slicing the original artifact by these offsets yields the quote.
+        assert artifact[span.start_offset : span.end_offset] == "alpha beta"
+
+    def test_exact_match_second_line_spanning_no_newline(self):
+        artifact = "first line\nsecond line\n"
+        span = llm_backend._resolve_quote_span_in(artifact, "second line")
+        assert span is not None
+        assert span.match_normalisation == "exact"
+        assert span.start_offset == artifact.index("second line")
+        assert span.start_line == 2
+        assert span.start_column == 1
+        assert span.end_line == 2
+        assert span.end_column == 12
+
+    def test_exact_match_spanning_newline(self):
+        # A multi-line quote: end_line is one greater than start_line.
+        artifact = "line one\nline two\nline three"
+        quote = "one\nline two"
+        span = llm_backend._resolve_quote_span_in(artifact, quote)
+        assert span is not None
+        assert span.match_normalisation == "exact"
+        assert span.start_line == 1
+        assert span.end_line == 2
+        # Slicing reproduces the multi-line quote.
+        assert artifact[span.start_offset : span.end_offset] == quote
+
+    def test_whitespace_normalised_match(self):
+        # Artifact line-wraps the phrase; quote arrives as one line. The
+        # resolver must locate the run in the original (line-wrapped) text
+        # and tag the span as whitespace-normalised.
+        artifact = "The PR description names\nthe user-visible change in the\nfirst sentence."
+        quote = "The PR description names the user-visible change in the first sentence."
+        span = llm_backend._resolve_quote_span_in(artifact, quote)
+        assert span is not None
+        assert span.match_normalisation == "whitespace"
+        # The span points back into the **original** artifact: slicing it
+        # yields the line-wrapped phrase, not the collapsed quote.
+        assert artifact[span.start_offset : span.end_offset].replace("\n", " ") == quote
+        assert span.start_line == 1
+        assert span.start_column == 1
+        assert span.end_line == 3
+        # 1-indexed half-open column at end of "first sentence."
+        assert span.end_column == len("first sentence.") + 1
+
+    def test_smart_quote_normalised_match(self):
+        # Artifact has curly apostrophe; quote arrives as ASCII.
+        artifact = "It’s the body that matters, not the subject line."
+        quote = "It's the body that matters, not the subject line."
+        span = llm_backend._resolve_quote_span_in(artifact, quote)
+        assert span is not None
+        assert span.match_normalisation == "smart_quotes"
+        # Slicing the original yields the curly-quote form (not the ASCII
+        # form the model returned). This is intentional — the span points
+        # into the original artifact text.
+        assert artifact[span.start_offset : span.end_offset] == artifact
+        assert span.start_line == 1
+
+    def test_duplicate_quote_first_match_wins(self):
+        artifact = "echo line.\nMiddle filler.\necho line."
+        span = llm_backend._resolve_quote_span_in(artifact, "echo line.")
+        assert span is not None
+        assert span.match_normalisation == "exact"
+        # First match — line 1, not line 3.
+        assert span.start_offset == 0
+        assert span.start_line == 1
+
+    def test_no_match_returns_none(self):
+        artifact = "Real artifact body here."
+        # Substring not present even after normalisation — model fabrication.
+        span = llm_backend._resolve_quote_span_in(artifact, "completely unrelated")
+        assert span is None
+
+    def test_empty_quote_returns_none(self):
+        # Defence in depth: the fabrication validator already rejects empty
+        # quotes, but the resolver must also be safe to call on them.
+        assert llm_backend._resolve_quote_span_in("any text", "") is None
+
+    def test_resolve_quote_spans_skips_unresolvable_silently(self):
+        # If a quote slips past the validator but cannot be located, it is
+        # silently dropped from the span list — supporting_evidence_quotes
+        # remains the authoritative compatibility surface.
+        artifact = "alpha beta"
+        spans = llm_backend._resolve_quote_spans(["alpha", "missing"], artifact)
+        assert [s.quote for s in spans] == ["alpha"]
+
+    def test_resolve_quote_spans_preserves_quote_string_verbatim(self):
+        # span.quote is the model's raw quote, not the in-artifact form,
+        # so a consumer can correlate spans[i] with quotes[i] across
+        # smart-quote folding.
+        artifact = "It’s here."
+        spans = llm_backend._resolve_quote_spans(["It's here."], artifact)
+        assert len(spans) == 1
+        assert spans[0].quote == "It's here."
+        assert spans[0].match_normalisation == "smart_quotes"
+
+    def test_to_dict_returns_documented_keys(self):
+        span = llm_backend._resolve_quote_span_in("alpha beta", "alpha")
+        assert span is not None
+        d = span.to_dict()
+        # Documented contract: every span dict carries these nine keys
+        # (and no others). Consumers may rely on this shape.
+        assert set(d.keys()) == {
+            "quote",
+            "artifact_index",
+            "start_offset",
+            "end_offset",
+            "start_line",
+            "start_column",
+            "end_line",
+            "end_column",
+            "match_normalisation",
+        }
+
+    def test_line_col_helper_clamps_offset(self):
+        # Defence in depth: callers may pass end_offset == len(text) for a
+        # trailing match; the helper must not raise.
+        line, col = llm_backend._line_col_from_offset("abc", 3)
+        assert line == 1
+        assert col == 4
+        # Negative clamps to (1, 1).
+        line, col = llm_backend._line_col_from_offset("abc", -1)
+        assert line == 1
+        assert col == 1
+
+
+class TestQuoteSpansInEvidence:
+    """#179 — supporting_evidence_spans surfaces alongside quotes in evidence.
+
+    The success path of :func:`check` must attach a ``supporting_evidence_spans``
+    list to every ``llm_judgment`` evidence entry. The pre-existing
+    ``supporting_evidence_quotes`` field must remain untouched (additive
+    extension, not replacement). Quote fabrication still produces
+    ``llm_quote_fabrication`` and does not attach spans.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    def test_pass_evidence_carries_spans(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = (
+            "The README documents both install and validate commands. "
+            "README.md has no '## Usage' heading and no example."
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+        data = diag.evidence[0].data
+        # Compatibility: existing field is preserved verbatim.
+        assert data["supporting_evidence_quotes"] == [
+            "The README documents both install and validate commands."
+        ]
+        # New field: one span per quote, with the documented schema.
+        spans = data["supporting_evidence_spans"]
+        assert isinstance(spans, list)
+        assert len(spans) == 1
+        span = spans[0]
+        assert span["quote"] == "The README documents both install and validate commands."
+        assert span["artifact_index"] == 0
+        assert span["start_offset"] == 0
+        assert span["end_offset"] == len(span["quote"])
+        assert span["match_normalisation"] == "exact"
+        assert span["start_line"] == 1
+        assert span["start_column"] == 1
+
+    def test_fail_evidence_carries_spans(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = (
+            "The README documents both install and validate commands. "
+            "README.md has no '## Usage' heading and no example."
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(_VALID_FAIL_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.FAIL
+        spans = diag.evidence[0].data["supporting_evidence_spans"]
+        assert len(spans) == 1
+        # The fail-stub's quote is "README.md has no '## Usage' heading"
+        assert spans[0]["quote"] == "README.md has no '## Usage' heading"
+        assert spans[0]["match_normalisation"] == "exact"
+        assert artifact[spans[0]["start_offset"] : spans[0]["end_offset"]] == spans[0]["quote"]
+
+    def test_whitespace_normalised_quote_records_normalisation(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        # Artifact is line-wrapped; the model emits a single-line quote.
+        artifact = "The PR description names\nthe user-visible change in the\nfirst sentence."
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    "The PR description names the user-visible change in the first sentence."
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        spans = diag.evidence[0].data["supporting_evidence_spans"]
+        assert len(spans) == 1
+        assert spans[0]["match_normalisation"] == "whitespace"
+        assert spans[0]["start_line"] == 1
+        assert spans[0]["end_line"] == 3
+
+    def test_smart_quote_quote_records_normalisation(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "It’s the body that matters, not the subject line."
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": ["It's the body that matters, not the subject line."],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        spans = diag.evidence[0].data["supporting_evidence_spans"]
+        assert len(spans) == 1
+        assert spans[0]["match_normalisation"] == "smart_quotes"
+
+    def test_duplicate_quote_evidence_first_match(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "echo line.\nMiddle filler.\necho line."
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": ["echo line."],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        spans = diag.evidence[0].data["supporting_evidence_spans"]
+        # First-match policy: first occurrence at offset 0, line 1.
+        assert spans[0]["start_offset"] == 0
+        assert spans[0]["start_line"] == 1
+
+    def test_fabricated_quote_yields_no_spans(self, monkeypatch):
+        # Fabricated quotes route through llm_quote_fabrication, not
+        # llm_judgment. The fabrication evidence MUST NOT carry spans —
+        # there is no in-artifact location for a string the model invented.
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "Real artifact body."
+        fabricated_payload = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "x",
+                "supporting_evidence_quotes": ["Wholly fabricated phrase not in body."],
+                "suggested_action": "fix it",
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(fabricated_payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+        # Fabrication evidence keeps the existing fields and does not
+        # introduce a spans field — the quote is by definition unlocatable.
+        assert "supporting_evidence_spans" not in diag.evidence[0].data
+
+    def test_multiple_quotes_each_get_a_span(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "alpha beta gamma\ndelta epsilon zeta\neta theta iota"
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    "alpha beta",
+                    "delta epsilon",
+                    "iota",
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(payload),
+        )
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        spans = diag.evidence[0].data["supporting_evidence_spans"]
+        assert [s["quote"] for s in spans] == [
+            "alpha beta",
+            "delta epsilon",
+            "iota",
+        ]
+        # Each span resolves to the documented line in the artifact.
+        assert [s["start_line"] for s in spans] == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
 # _parse_response backward-compat shim (legacy tests, kept for regression)
 # ---------------------------------------------------------------------------
 
