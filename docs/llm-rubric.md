@@ -218,14 +218,28 @@ The backend therefore enforces the substring contract in `check()` after
   punctuation pairs (curly single/double quotes, en/em dashes) is folded
   to their ASCII counterparts, so the model may copy with cosmetic
   differences. **Paraphrase or rewording is not tolerated.**
-- The check runs against `str(target)` — exactly the string the prompt
-  template renders into the `Target reference` block via `_build_prompt`.
-  This matches what the model actually sees: the provider helpers do
-  not give the model a file-read tool, so for path / PR-reference
-  targets the model only ever has access to the reference string. The
-  bench harness pre-resolves path targets to file contents before
-  calling `check`, so for bench callers the target string is already the
-  inline content.
+- The check runs against the **same string the prompt template rendered**
+  into the `Target reference` block via `_build_prompt`. The substitution
+  rules (issue #191) are:
+  - When the caller declares `--artifact-kind` **and** `target` resolves
+    to a real file on disk, the prompt renders the **file content**;
+    the substring check is therefore performed against that content.
+    This is the post-#191 path — gpt-4o-mini at v4 was observed
+    parroting filenames as artifact-kind evidence on path targets, so
+    the path / filename is intentionally withheld from the prompt.
+  - When `--artifact-kind` is **not** declared, the prompt renders
+    `str(target)` byte-for-byte (legacy v4 behaviour), and the
+    substring check accepts only quotes drawn from the path / inline
+    string the model actually saw.
+  - Inline-string targets and non-existent paths fall back to
+    `str(target)` regardless of `--artifact-kind` — there is no file
+    body to substitute.
+  The provider helpers do not give the model a file-read tool, so the
+  model only ever sees the rendered `Target reference` block. The bench
+  harness pre-resolves path targets to file contents before calling
+  `check`, so for bench callers the target string is already the inline
+  content; for the bench callers, `--artifact-kind` therefore changes
+  nothing at the substring-grounding layer.
 - On any violation the verdict is **rejected**: the diagnostic returns
   `status=unsupported` with `evidence[0]` of kind
   `llm_quote_fabrication`. The evidence preserves the model's claimed

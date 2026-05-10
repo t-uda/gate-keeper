@@ -26,6 +26,7 @@ Diagnostics are emitted in the same order as ``ruleset.rules``.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from pathlib import Path
 from typing import Callable
 
@@ -85,11 +86,78 @@ def _resolve_backend_name(rule: Rule, backend_name: str) -> str:
     return backend_name
 
 
+def _accepts_artifact_kind(check_fn: Callable) -> bool:
+    """Return ``True`` if *check_fn* declares an ``artifact_kind`` parameter
+    (or accepts arbitrary ``**kwargs``).
+
+    Determined by signature introspection rather than a try/except on
+    ``TypeError`` so that genuine ``TypeError``s raised inside the backend
+    body (e.g. by ``llm_rubric.check``) are not misinterpreted as a
+    signature mismatch and silently retried with the keyword dropped
+    (codex P1 review on #193). Falls back to ``False`` for builtins and
+    other callables whose signature cannot be inspected — those are
+    invoked through the legacy two-argument form, which is the safe
+    default for test stubs.
+    """
+    try:
+        sig = inspect.signature(check_fn)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "artifact_kind" and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            return True
+    return False
+
+
+def _invoke_check(
+    check_fn: Callable,
+    rule: Rule,
+    target: str | Path | TargetSpec,
+    artifact_kind: TargetKind | None,
+) -> Diagnostic:
+    """Invoke *check_fn* with optional ``artifact_kind`` keyword (#191).
+
+    The registry's published callable signature is ``(rule, target) ->
+    Diagnostic``; the real ``llm_rubric.check`` adds an optional
+    ``artifact_kind=`` keyword. Test doubles register simple two-argument
+    callables that do not declare the keyword. To keep both shapes
+    callable through the same code path we introspect *check_fn*'s
+    signature once and decide whether to forward the keyword:
+
+    - When *artifact_kind* is ``None``: call ``check_fn(rule, target)``
+      verbatim — every registered check accepts this form.
+    - When *artifact_kind* is supplied and *check_fn* declares an
+      ``artifact_kind`` parameter (or accepts ``**kwargs``): forward
+      the keyword.
+    - Otherwise: call the legacy two-argument form. Tests that exercise
+      the deterministic precheck only need the call count, so omitting
+      the keyword for stubs is harmless. Tests that want to assert on
+      the keyword register a stub that declares ``artifact_kind`` (or
+      ``**kwargs``).
+
+    Using signature introspection — rather than catching ``TypeError``
+    from the call — keeps real runtime ``TypeError``s raised inside
+    backend bodies (e.g. ``llm_rubric.check``) from being silently
+    swallowed and retried without the keyword (codex P1 review on
+    #193). Such errors now propagate to the caller, which converts them
+    to ``Status.ERROR`` diagnostics in the normal exception path.
+    """
+    if artifact_kind is None or not _accepts_artifact_kind(check_fn):
+        return check_fn(rule, target)
+    return check_fn(rule, target, artifact_kind=artifact_kind)
+
+
 def _run_n(
     check_fn: Callable,
     rule: Rule,
     target: str | Path | TargetSpec,
     n: int,
+    artifact_kind: TargetKind | None = None,
 ) -> Diagnostic:
     """Run *check_fn* ``n`` times and aggregate via majority vote.
 
@@ -100,10 +168,16 @@ def _run_n(
     Ties break toward fail (fail-closed). Returns early on the first
     non-pass/fail diagnostic (UNAVAILABLE / ERROR) without synthesising a
     reproducibility score (fail-closed for unconfigured states).
+
+    *artifact_kind* (#191) is forwarded as a keyword argument to *check_fn*
+    when non-``None``. Test stubs that only accept ``(rule, target)``
+    continue to work because the keyword is omitted in that case; the
+    real ``llm_rubric.check`` accepts ``artifact_kind=`` and uses it to
+    decide whether to substitute file content into the prompt.
     """
     diags: list[Diagnostic] = []
     for _ in range(n):
-        d = check_fn(rule, target)
+        d = _invoke_check(check_fn, rule, target, artifact_kind)
         if d.status not in (Status.PASS, Status.FAIL):
             return d
         diags.append(d)
@@ -292,10 +366,16 @@ def validate(
                 # #68: apply multi-run reproducibility for llm-rubric rules via
                 # the registry check_fn so stubs/overrides work in tests.
                 # Non-LLM backends silently ignore N>1.
+                #
+                # #191: forward ``artifact_kind`` via ``_invoke_check`` only
+                # for the llm-rubric route — non-LLM backends (filesystem,
+                # github, external) take ``(rule, target)`` and would not
+                # benefit from the keyword.
+                rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
                 if reproducibility > 1 and resolved_name == "llm-rubric":
-                    diag = _run_n(check_fn, rule, target, reproducibility)
+                    diag = _run_n(check_fn, rule, target, reproducibility, rule_artifact_kind)
                 else:
-                    diag = check_fn(rule, target)
+                    diag = _invoke_check(check_fn, rule, target, rule_artifact_kind)
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)
