@@ -121,8 +121,8 @@ to `single`.
 
 ```yaml
 telemetry:
-  token_counts: optional | required | omit
-  latency_required: true | false
+  token_counts: optional   # one of: optional | required | omit
+  latency_required: true   # true or false
 ```
 
 - `token_counts: optional` — emit `tokens_in` / `tokens_out` when the provider
@@ -203,8 +203,8 @@ Stated precisely:
 | Local provider, `budget_usd_per_run: 0.0` | `null` | `0.0` |
 | Local provider, `budget_usd_per_run` unset | `null` | `null` |
 
-The `StrategyTelemetry` docstring from PR #197 states: "`cost_estimate_usd_total` is
-`None` iff any individual call had unknown pricing." For local profiles, the canonical
+The `StrategyTelemetry` class (`src/gate_keeper/backends/llm_rubric.py:71`) states:
+"`cost_estimate_usd_total` is `None` iff any individual call had unknown pricing." For local profiles, the canonical
 approach is to declare `budget_usd_per_run: 0.0` explicitly and have the loader inject
 a `0.0` aggregate — not derived from individual call pricing — before constructing
 `StrategyTelemetry`. The loader sets `cost_estimate_usd_total = 0.0` when the profile
@@ -292,13 +292,20 @@ When `strategy: review` lands (#185), two calls are made: base judge and reviewe
 
 Local profiles carry `blocking_allowed: false` by default. This mirrors the current
 advisory posture of `llm-rubric` (docs/llm-rubric.md: "LLM-evaluated rules are
-advisory evidence, not authoritative gates"). An implementation that encounters a
-`semantic_rubric` rule with `severity: error` paired with a local profile that has
-`blocking_allowed: false` should either:
-(a) downgrade severity to `advisory` for that rule, or
-(b) return `UNAVAILABLE` with a `blocking_disallowed` evidence kind.
+advisory evidence, not authoritative gates"). The CLI exit-code policy (`compute_exit_code()` in
+`src/gate_keeper/diagnostics.py`) is based on `Diagnostic.status` only: any
+non-`PASS` status (`FAIL`, `UNAVAILABLE`, `UNSUPPORTED`, `ERROR`) produces a
+non-zero exit code regardless of severity. Changing severity alone does **not**
+prevent blocking. An implementation that encounters a `semantic_rubric` rule
+paired with a local profile that has `blocking_allowed: false` should:
 
-Option (b) is preferred — it is fail-closed and makes the misconfiguration explicit.
+(a) Return `UNAVAILABLE` with a `blocking_disallowed` evidence kind (preferred —
+    fail-closed; makes the misconfiguration explicit with a non-zero exit code), or
+(b) Return `PASS` with an advisory note in the evidence payload (only when the
+    caller has explicitly opted in to advisory-only mode at invocation time).
+
+Option (a) is preferred. Option (b) requires a dedicated advisory-mode flag that
+does not yet exist; do not implement it by silently rewriting status or severity.
 
 ### 5.5 Connection to model matrix (#177)
 
