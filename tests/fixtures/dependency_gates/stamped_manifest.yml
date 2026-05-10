@@ -1,0 +1,37 @@
+# Fixture manifest exercising Mode B (target-stamped) edges.
+#
+# Used by tests/test_dependency_validator.py and as a worked example of the
+# stamp syntax documented in docs/design/dependency-gates.md §3.3.
+#
+# Schema: docs/design/dependency-gates.md §3.
+
+nodes:
+  - id: lean-theorem
+    path: theorems/foo.lean
+    kind: code
+  - id: appendix-explanation
+    path: docs/appendix-foo.md
+    kind: reference
+  - id: cli-implementation
+    path: src/gate_keeper/cli.py
+    kind: code
+  - id: cli-reference
+    path: docs/cli-reference.md
+    kind: reference
+
+edges:
+  # Mode B (stamped): the appendix explanation pins the exact Lean-theorem
+  # source it tracks. Slice-1 (issue #181) implements whole-file source
+  # hashing, so the digest is sha256(source-file-bytes).
+  - from: lean-theorem
+    to: appendix-explanation
+    relation: explains
+    mode: stamped
+
+  # Mode A (affected_set): the CLI reference must co-change or carry an ack
+  # whenever the CLI implementation changes. Default mode; explicit here for
+  # the fixture's pedagogical value.
+  - from: cli-implementation
+    to: cli-reference
+    relation: documents
+    mode: affected_set

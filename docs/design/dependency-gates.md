@@ -13,7 +13,13 @@ Tracking umbrella: #159. Coordinates children #156 (code↔doc / doc↔doc depen
 > - IR rule file `docs/dependency-gate-rules.json` exercisable via `gate-keeper validate --rules-format ir ... --allow-command-adapter`.
 > - Loader and validator tests, including a `@pytest.mark.integration` end-to-end round-trip.
 >
-> **Out of slice (deferred):** PR-trailer ack transport, MCP validator transport, cycle-detection rule, in-repo #158 reference validator, automatic dependency discovery, any new `RuleKind`. See §7 for the full out-of-scope list.
+> **Issue #181 (Mode B slice).** Adds target-stamped freshness checking:
+>
+> - Stamp parser at `scripts/dependency_gates/_stamp.py` (frontmatter + canonical syntax, see §3.3).
+> - Mode B branch in the validator emits one of `dependent_artifact_unaffected`, `dependent_artifact_stale_by_hash`, `target_stamp_missing`, `target_stamp_malformed`, `dependent_artifact_source_missing`, or `dependent_artifact_target_missing`.
+> - Whole-file SHA-256 source hashing (no anchors); single source per target; target frontmatter required (no inline lines).
+>
+> **Out of slice (deferred):** PR-trailer ack transport, MCP validator transport, cycle-detection rule, in-repo #158 reference validator, automatic dependency discovery, any new `RuleKind`, opaque source anchors, multi-source-per-target stamp representation, automatic stamp rewriting, semantic equivalence between source and target, cross-repository source hashing. See §7 for the full out-of-scope list.
 
 ---
 
@@ -36,13 +42,13 @@ The seven rules below are load-bearing. The slice-1 implementation honours them.
 
 ### 2.1 Manifest schema is graph-shaped
 
-Top-level `nodes` (id, path, anchor?, kind?) and `edges` (from-id, to-id, relation, mode?, pair_id?). A `pairs:` sugar form is accepted as input but the loader desugars it to nodes+edges before any consumer sees it.
+Top-level `nodes` (`id`, `path`, `anchor`?, `kind`?) and `edges` (`from`-id, `to`-id, `relation`, `mode`?, `pair_id`?). A `pairs:` sugar form is accepted as input but the loader desugars it to nodes+edges before any consumer sees it.
 
 A pair is just two nodes connected by an edge. A graph is the strict superset of a list of pairs. Choosing the superset gives one loader, one schema, one validation pass.
 
 ### 2.2 Anchor is opaque to the loader
 
-A node's `anchor` is a string. The loader stores it verbatim and does not interpret it. Validators that consume an edge interpret the anchor in whatever vocabulary fits — Markdown heading, LaTeX label, Lean declaration, code symbol id, regex selector.
+A node's `anchor` is a string. The loader stores it verbatim and does not interpret it. Validators that consume an edge interpret the anchor in whatever vocabulary fits — Markdown heading, LaTeX label, Lean declaration, code symbol ID, regular-expression selector.
 
 Anchor *resolution* is a per-validator concern. Pinning an anchor grammar in the manifest schema would conflate the manifest's contract (what edges exist) with each validator's contract (how it locates content within a file).
 
@@ -93,11 +99,15 @@ Slice-1 vocabulary:
 - `dependent_artifact_co_changed` — source changed and target also changed in the same set.
 - `dependent_artifact_acked` — source changed, target unchanged, valid ack file present.
 - `dependent_artifact_changed_without_target_update` — source changed, target unchanged, no valid ack.
-- `dependent_artifact_stale_by_hash` — Mode B: target's `tracks:` sha does not match the source's current sha. (Reserved; emitted only once Mode B is implemented in slice 2.)
+- `dependent_artifact_stale_by_hash` — Mode B: target's `tracks:` digest does not match the source's current SHA-256. Emitted by the issue #181 Mode B implementation.
+- `target_stamp_missing` — Mode B: target has no `tracks:` field in YAML frontmatter (issue #181).
+- `target_stamp_malformed` — Mode B: frontmatter unparseable, `tracks:` not in canonical `<source-id>@sha256:<digest>` form, or stamp source-ID does not match the manifest source ID (issue #181).
+- `dependent_artifact_source_missing` — Mode B: manifest source path absent on disk; emitted as `unavailable` (issue #181).
+- `dependent_artifact_target_missing` — Mode B: manifest target path absent on disk; emitted as `unavailable` (issue #181).
 - `ack_invalid` — ack file exists but cannot be parsed as a YAML mapping; emitted as FAIL so the author is not left wondering why a file they committed was silently ignored.
 - `edge_not_applicable` — the validator was invoked on a target that does not appear in any edge; emitted as PASS so the rule is safe to enable on multiple targets.
-- `changed_file_source_unresolved` — Mode A: git unavailable or base ref unresolvable; emitted as `unavailable`.
-- `stamped_mode_not_implemented` — an edge declares `mode: stamped` but slice-1 only implements Mode A; emitted as `unavailable` so the deferred mode is surfaced explicitly rather than silently miscategorised.
+- `changed_file_source_unresolved` — Mode A: Git unavailable or base ref unresolvable; emitted as `unavailable`.
+- `stamped_mode_not_implemented` — historical from the slice-1-only era. Mode B is implemented as of issue #181; this evidence kind is retained for any future unrecognised mode value (defensive guard against direct construction outside the manifest loader's enum).
 
 New subtypes are added as needed. `Status` enum values are unchanged; only the evidence vocabulary grows.
 
@@ -130,7 +140,7 @@ pairs:                     # optional sugar; desugared on load
     target: en-foo
 ```
 
-A `pairs[].source` and `pairs[].target` reference node ids. Each `pairs` entry produces two directed edges with `pair_id` set to `pairs[].id`.
+A `pairs[].source` and `pairs[].target` reference node IDs. Each `pairs` entry produces two directed edges with `pair_id` set to `pairs[].id`.
 
 ### 3.2 JSON-Schema fragment
 
@@ -190,10 +200,43 @@ A `pairs[].source` and `pairs[].target` reference node ids. Each `pairs` entry p
 
 The loader additionally enforces:
 
-- node ids are unique;
-- every `edges[].from` and `edges[].to` references a known node id;
-- every `pairs[].source` and `pairs[].target` references a known node id;
+- node IDs are unique;
+- every `edges[].from` and `edges[].to` references a known node ID;
+- every `pairs[].source` and `pairs[].target` references a known node ID;
 - `pair_id` set on a desugared edge equals the originating `pairs[].id`.
+
+### 3.3 Canonical stamp syntax (Mode B)
+
+A target whose incoming edge declares `mode: stamped` records the source revision it tracks via a YAML frontmatter `tracks:` field:
+
+```markdown
+---
+tracks: <source-node-id>@sha256:<64-hex-digit-digest>
+---
+# CLI reference
+
+...
+```
+
+Slice-1 (issue #181) constraints:
+
+- **Frontmatter required.** The stamp must live in a YAML frontmatter block opened with `---` on the very first line and closed with `---` on its own line. Inline tracking lines outside frontmatter are deliberately ignored in this slice.
+- **Whole-file source hashing.** The digest is `sha256(source_file_bytes)` exactly — opaque source anchors are deferred (see §7).
+- **Algorithm prefix is mandatory.** Only `sha256:` is accepted; the prefix is part of the canonical syntax so future algorithms can coexist without changing the schema.
+- **Lowercase 64-hex-digit digest.** Uppercase digests and short digests are rejected as `target_stamp_malformed`.
+- **Single source per target.** A target with multiple incoming stamped edges must currently satisfy each independently, with no multi-source representation. Multi-source stamp aggregation is deferred (see §7).
+- **`<source-node-id>` references the manifest `from` node ID.** A mismatch surfaces as `target_stamp_malformed` so the author is not left wondering why a stamp is silently rejected.
+
+The validator emits one of the following Mode B evidence kinds (extends §2.7):
+
+- `dependent_artifact_unaffected` (PASS, `mode: stamped`) — stamp's digest equals current source SHA-256.
+- `dependent_artifact_stale_by_hash` (FAIL) — stamp present but digest does not match current source.
+- `target_stamp_missing` (FAIL) — target has no `tracks:` field in frontmatter.
+- `target_stamp_malformed` (FAIL) — frontmatter unparseable, `tracks:` value not in canonical syntax, or stamp source-ID does not match the manifest source ID.
+- `dependent_artifact_source_missing` (UNAVAILABLE) — manifest source path does not exist on disk.
+- `dependent_artifact_target_missing` (UNAVAILABLE) — manifest target path does not exist on disk.
+
+The validator never auto-edits a stamp; on a stale or malformed stamp the diagnostic's `remediation` field carries the canonical replacement string.
 
 ---
 
@@ -201,7 +244,7 @@ The loader additionally enforces:
 
 ### 4.1 Manifest path
 
-`.gate-keeper/dependency-manifest.yml`. Co-located with `.gate-keeper/acks/`. The `external_check` rule passes `params.manifest` to the validator; absent, the validator falls back to this default.
+`.gate-keeper/dependency-manifest.yml`. Sits alongside `.gate-keeper/acks/`. The `external_check` rule passes `params.manifest` to the validator; absent, the validator falls back to this default.
 
 ### 4.2 Validator script location
 
@@ -211,7 +254,7 @@ The loader additionally enforces:
 
 The validator computes `git diff --name-only ${GATE_KEEPER_BASE_REF:-origin/main}...HEAD` internally via `subprocess.run(..., shell=False)`. No new CLI flag in slice 1.
 
-If git is unavailable or the base ref does not resolve, the validator emits `Status.UNAVAILABLE` with evidence `kind: changed_file_source_unresolved` rather than treating "all files changed" as a fallback. Fail-closed.
+If Git is unavailable or the base ref does not resolve, the validator emits `Status.UNAVAILABLE` with evidence `kind: changed_file_source_unresolved` rather than treating "all files changed" as a fallback. Fail-closed.
 
 `GATE_KEEPER_BASE_REF` may be set in CI or by the developer; default `origin/main` works for both PR-context CI and `git rebase`-style local workflows.
 
@@ -242,7 +285,7 @@ This note settles slice 1. The following remain deferred:
 - MCP transport for validators.
 - Cycle-detection rule (`documentation_dependency_graph_acyclic` candidate from #156 stays deferred).
 - Cross-repository graphs.
-- An in-repo #158-family reference validator. The repo has no `*.ja.md` / `*.en.md` pair, no Lean files, and no in-repo formalization↔explanation pair. The #158 manifest shape is exercised at the loader-fixture level (bidirectional `pairs:` desugaring; `mode: stamped` parsing) until a real pair exists.
+- An in-repo #158-family reference validator. The repository has no `*.ja.md` / `*.en.md` pair, no Lean files, and no in-repo formalization↔explanation pair. The #158 manifest shape is exercised at the loader-fixture level (bidirectional `pairs:` desugaring; `mode: stamped` parsing) until a real pair exists.
 - Promoting any failure subtype to a `RuleKind`.
 - A new CLI flag for the changed-file set; the validator owns its diff source.
 - Semantic equivalence checks (translation faithfulness, formalization correctness). These remain advisory and route to `semantic_rubric` if and when wired; this note does not couple to that path.
