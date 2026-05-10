@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
+
 from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status, TargetKind
 from gate_keeper.targets import TargetSpec
 
@@ -188,12 +190,11 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Structured LLM judgment schema (#67)
+# Structured LLM judgment schema (#67, migrated to Pydantic #187)
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class LlmJudgment:
+class LlmJudgment(BaseModel):
     """Structured output schema for a single LLM rubric evaluation.
 
     Fields
@@ -224,10 +225,35 @@ class LlmJudgment:
         pass and on unsupported.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     judgment: Literal["pass", "fail", "unsupported"]
     primary_reason: str
     supporting_evidence_quotes: list[str]
     suggested_action: str | None
+
+    @field_validator("primary_reason")
+    @classmethod
+    def _primary_reason_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("primary_reason must be a non-empty string")
+        return v
+
+    @model_validator(mode="after")
+    def _cross_field_constraints(self) -> "LlmJudgment":
+        # pass and fail must have at least one grounding quote (#168).
+        if self.judgment in ("pass", "fail") and len(self.supporting_evidence_quotes) == 0:
+            raise ValueError(
+                "supporting_evidence_quotes must contain at least one entry"
+                f" when judgment is {self.judgment!r}"
+            )
+        # suggested_action must be None on pass/unsupported.
+        if self.judgment in ("pass", "unsupported") and self.suggested_action is not None:
+            raise ValueError("suggested_action must be None when judgment is not 'fail'")
+        # suggested_action must be a non-empty string on fail.
+        if self.judgment == "fail" and (self.suggested_action is None or not self.suggested_action.strip()):
+            raise ValueError("suggested_action must be a non-empty string when judgment is 'fail'")
+        return self
 
 
 @dataclass
@@ -916,12 +942,19 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         # pass / unsupported — suggested_action must be None/absent
         suggested_action = None
 
-    return LlmJudgment(
-        judgment=judgment,
-        primary_reason=primary_reason,
-        supporting_evidence_quotes=quotes,
-        suggested_action=suggested_action,
-    )
+    try:
+        return LlmJudgment(
+            judgment=judgment,
+            primary_reason=primary_reason,
+            supporting_evidence_quotes=quotes,
+            suggested_action=suggested_action,
+        )
+    except ValidationError as exc:
+        return LlmJudgmentParseError(
+            failure_mode="schema_validation_failed",
+            detail=str(exc),
+            raw_response_excerpt=excerpt,
+        )
 
 
 # ---------------------------------------------------------------------------

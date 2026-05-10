@@ -1093,6 +1093,129 @@ class TestExtractJsonCandidate:
 
 
 # ---------------------------------------------------------------------------
+# LlmJudgment Pydantic model properties (#187)
+# ---------------------------------------------------------------------------
+
+
+class TestLlmJudgmentPydantic:
+    """Verify Pydantic-specific behaviour of LlmJudgment (#187).
+
+    These tests cover frozen=True immutability and model_dump() shape — the
+    two guarantees that required migrating from @dataclass(frozen=True) to
+    BaseModel.
+    """
+
+    def _valid_pass(self) -> LlmJudgment:
+        return LlmJudgment(
+            judgment="pass",
+            primary_reason="Clear documentation.",
+            supporting_evidence_quotes=["direct quote from artifact"],
+            suggested_action=None,
+        )
+
+    def _valid_fail(self) -> LlmJudgment:
+        return LlmJudgment(
+            judgment="fail",
+            primary_reason="Section headings are missing.",
+            supporting_evidence_quotes=["direct quote from artifact"],
+            suggested_action="Add a ## Usage section.",
+        )
+
+    def test_frozen_prevents_attribute_assignment(self):
+        """frozen=True must raise pydantic.ValidationError on field mutation."""
+        import pydantic
+        import pytest
+
+        j = self._valid_pass()
+        with pytest.raises(pydantic.ValidationError):
+            j.judgment = "fail"  # type: ignore[misc]
+
+    def test_model_dump_contains_all_fields(self):
+        """model_dump() must return a dict with all four field keys."""
+        j = self._valid_fail()
+        d = j.model_dump()
+        assert set(d.keys()) == {
+            "judgment",
+            "primary_reason",
+            "supporting_evidence_quotes",
+            "suggested_action",
+        }
+        assert d["judgment"] == "fail"
+        assert d["suggested_action"] == "Add a ## Usage section."
+
+    def test_model_dump_pass_suggested_action_none(self):
+        """model_dump() on a pass verdict has suggested_action=None."""
+        j = self._valid_pass()
+        d = j.model_dump()
+        assert d["suggested_action"] is None
+
+    def test_field_validator_rejects_empty_primary_reason(self):
+        """primary_reason must be a non-empty string."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="pass",
+                primary_reason="   ",
+                supporting_evidence_quotes=["some quote"],
+                suggested_action=None,
+            )
+
+    def test_cross_field_validator_rejects_pass_with_empty_quotes(self):
+        """pass verdict with empty supporting_evidence_quotes is invalid."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="pass",
+                primary_reason="Looks good.",
+                supporting_evidence_quotes=[],
+                suggested_action=None,
+            )
+
+    def test_cross_field_validator_rejects_pass_with_suggested_action(self):
+        """pass verdict with a non-None suggested_action is invalid."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="pass",
+                primary_reason="Looks good.",
+                supporting_evidence_quotes=["some quote"],
+                suggested_action="This should not be here.",
+            )
+
+    def test_cross_field_validator_rejects_fail_without_suggested_action(self):
+        """fail verdict with suggested_action=None is invalid."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="fail",
+                primary_reason="Missing sections.",
+                supporting_evidence_quotes=["some quote"],
+                suggested_action=None,
+            )
+
+    def test_cross_field_validator_rejects_fail_with_empty_suggested_action(self):
+        """fail verdict with a whitespace-only suggested_action is invalid."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LlmJudgment(
+                judgment="fail",
+                primary_reason="Missing sections.",
+                supporting_evidence_quotes=["some quote"],
+                suggested_action="   ",
+            )
+
+
+# ---------------------------------------------------------------------------
 # Quote-fabrication validator (#172)
 # ---------------------------------------------------------------------------
 
