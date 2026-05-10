@@ -220,3 +220,25 @@ class TestMainCli:
         assert report["aggregate"]["correct"] == 1
         assert len(report["models"]) == 1
         assert report["models"][0]["label"] == "openai:gpt-4o-mini"
+
+    @pytest.mark.parametrize("bad", ["0", "-1"])
+    def test_main_rejects_non_positive_reproducibility(self, tmp_path, capsys, bad):
+        """--reproducibility <= 0 must exit cleanly via argparse, not propagate
+        a ValueError out of bench.run_bench as an uncaught traceback (#177
+        codex P2)."""
+        entries_dir = _single_entry_dir(tmp_path)
+
+        with pytest.raises(SystemExit) as excinfo:
+            matrix.main(
+                [
+                    "--models",
+                    "openai:gpt-4o-mini",
+                    "--entries-dir",
+                    str(entries_dir),
+                    "--reproducibility",
+                    bad,
+                ]
+            )
+        assert excinfo.value.code == 2
+        captured = capsys.readouterr()
+        assert "--reproducibility" in captured.err

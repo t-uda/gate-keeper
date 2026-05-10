@@ -265,6 +265,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--entries-dir does not exist or is not a directory: {entries_dir}")
         return 2  # pragma: no cover — argparse exits
 
+    if args.reproducibility < 1:
+        parser.error(f"--reproducibility must be >= 1, got {args.reproducibility}")
+        return 2  # pragma: no cover — argparse exits
+
     report = run_matrix(entries_dir, models, reproducibility=args.reproducibility)
     rendered = render_json(report)
 
