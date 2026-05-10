@@ -26,6 +26,7 @@ Diagnostics are emitted in the same order as ``ruleset.rules``.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from pathlib import Path
 from typing import Callable
 
@@ -85,6 +86,34 @@ def _resolve_backend_name(rule: Rule, backend_name: str) -> str:
     return backend_name
 
 
+def _accepts_artifact_kind(check_fn: Callable) -> bool:
+    """Return ``True`` if *check_fn* declares an ``artifact_kind`` parameter
+    (or accepts arbitrary ``**kwargs``).
+
+    Determined by signature introspection rather than a try/except on
+    ``TypeError`` so that genuine ``TypeError``s raised inside the backend
+    body (e.g. by ``llm_rubric.check``) are not misinterpreted as a
+    signature mismatch and silently retried with the keyword dropped
+    (codex P1 review on #193). Falls back to ``False`` for builtins and
+    other callables whose signature cannot be inspected — those are
+    invoked through the legacy two-argument form, which is the safe
+    default for test stubs.
+    """
+    try:
+        sig = inspect.signature(check_fn)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "artifact_kind" and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            return True
+    return False
+
+
 def _invoke_check(
     check_fn: Callable,
     rule: Rule,
@@ -97,26 +126,30 @@ def _invoke_check(
     Diagnostic``; the real ``llm_rubric.check`` adds an optional
     ``artifact_kind=`` keyword. Test doubles register simple two-argument
     callables that do not declare the keyword. To keep both shapes
-    callable through the same code path:
+    callable through the same code path we introspect *check_fn*'s
+    signature once and decide whether to forward the keyword:
 
     - When *artifact_kind* is ``None``: call ``check_fn(rule, target)``
       verbatim — every registered check accepts this form.
-    - When *artifact_kind* is supplied: call ``check_fn(rule, target,
-      artifact_kind=artifact_kind)`` first; on ``TypeError`` (the stub
-      doesn't accept the keyword), retry without it. Tests that exercise
-      the deterministic precheck only need the call count, so dropping
+    - When *artifact_kind* is supplied and *check_fn* declares an
+      ``artifact_kind`` parameter (or accepts ``**kwargs``): forward
+      the keyword.
+    - Otherwise: call the legacy two-argument form. Tests that exercise
+      the deterministic precheck only need the call count, so omitting
       the keyword for stubs is harmless. Tests that want to assert on
-      the keyword can register a stub that accepts ``**kwargs``.
+      the keyword register a stub that declares ``artifact_kind`` (or
+      ``**kwargs``).
+
+    Using signature introspection — rather than catching ``TypeError``
+    from the call — keeps real runtime ``TypeError``s raised inside
+    backend bodies (e.g. ``llm_rubric.check``) from being silently
+    swallowed and retried without the keyword (codex P1 review on
+    #193). Such errors now propagate to the caller, which converts them
+    to ``Status.ERROR`` diagnostics in the normal exception path.
     """
-    if artifact_kind is None:
+    if artifact_kind is None or not _accepts_artifact_kind(check_fn):
         return check_fn(rule, target)
-    try:
-        return check_fn(rule, target, artifact_kind=artifact_kind)
-    except TypeError:
-        # Registered stub does not accept the keyword. Fall back to the
-        # legacy signature so non-LLM stubs (which never read
-        # artifact_kind anyway) keep working.
-        return check_fn(rule, target)
+    return check_fn(rule, target, artifact_kind=artifact_kind)
 
 
 def _run_n(
