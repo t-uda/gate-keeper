@@ -82,14 +82,14 @@ to `strategy`.
 | `provider_kind` | Description | Extra required fields |
 |---|---|---|
 | `local_http` | OpenAI-compatible HTTP endpoint (Ollama, LM Studio, vLLM) | `endpoint` |
-| `local_cli` | Subprocess CLI tool that reads prompt from stdin / args | `command` (list) |
+| `local_cli` | Subprocess command-line tool that reads prompt from stdin / args | `command` (list) |
 | `fake` | In-process deterministic stub for tests; no network or subprocess | none |
 
 The existing remote kinds (`anthropic`, `openai`) are not `provider_kind` values —
 they are resolved from the dotenv credential file as today (#51). Local profiles
 bypass the dotenv path entirely: no API key, no credential file, no pricing lookup.
 
-### 3.2 Strategy id (`strategy`)
+### 3.2 Strategy ID (`strategy`)
 
 `strategy` identifies the **judgment algorithm**, not the transport. It maps directly
 to the `KNOWN_STRATEGIES` registry introduced by #183:
@@ -219,7 +219,7 @@ When `strategy: consensus` with `panel_size: 3`:
 - `latency_ms_total`: wall-clock sum across all three calls (or parallel wall-clock if
   calls are concurrent — implementation decides; must document which)
 - `cost_estimate_usd_total: 0.0` (from `budget_usd_per_run: 0.0`)
-- `models`: list of three model ids (may all be identical)
+- `models`: list of three model IDs (may all be identical)
 
 Sum-of-zeros is `0.0`, not `null`. The null-propagation rule from `StrategyTelemetry`
 applies to unknown-pricing calls only; explicit `0.0` declarations short-circuit it.
