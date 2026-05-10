@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "pr-body-explains-motivation",
+      "title": "PR body explains motivation",
+      "source": {
+        "path": "docs/example-rules.md",
+        "line": 1
+      },
+      "text": "The pull-request body must explain why the change is needed.",
+      "kind": "semantic_rubric",
+      "severity": "warning",
+      "backend_hint": "llm-rubric",
+      "confidence": "medium",
+      "params": {},
+      "target_kind": "pr_description"
+    }
+  ]
+}

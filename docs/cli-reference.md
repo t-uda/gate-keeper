@@ -183,6 +183,7 @@ gate-keeper validate [--rules-format {markdown,ir}]
                      [--format {text,json}] [--verbose]
                      [--reproducibility N]
                      [--allow-command-adapter]
+                     [--artifact-kind {pr_description,commit_message,issue_body,documentation,code_change}]
                      --target <TARGET> [--target <TARGET> ...]
                      (<rules> | --include GLOB [--include GLOB ...])
 ```
@@ -203,6 +204,7 @@ Provide either a single positional `rules` document **or** one or more
 | `--verbose, -v` | flag | off | Expand structured LLM-rubric rationale (judgment, reason, evidence quotes, suggested action, model) as indented lines below each diagnostic. Has no effect for non-LLM backends. |
 | `--reproducibility N` | option | `1` | Run each LLM-rubric rule N times and record an agreement-rate `reproducibility_score` evidence entry. **No-op for non-LLM backends** (filesystem, GitHub, external ignore this flag). |
 | `--allow-command-adapter` | flag | off | Enable the project-local `command` external adapter for this run only. **Security: pass this only for rule documents you fully trust** — the adapter executes whatever `params.argv` the rule document defines. Without this flag, every `external_check` rule whose `params.tool == "command"` returns `unavailable` / `command_adapter_disabled` and no subprocess runs. See [Project-local `command` adapter (#149)](#project-local-command-adapter-149) below. |
+| `--artifact-kind {pr_description,commit_message,issue_body,documentation,code_change}` | option | — | Declare the kind of artifact passed via `--target` (#178). When set, every rule routed to the `llm-rubric` backend whose `target_kind` annotation differs from this value short-circuits to `unsupported` with `evidence.kind=target_kind_mismatch` (carrying `dispatch=deterministic_precheck` and `llm_called=false`) **before any provider call**. Rules with `target_kind=unspecified` ignore this flag (the prompt-level fallback still applies). Omit the flag to preserve the prior compatibility behaviour. See [Deterministic target_kind mismatch (#178)](#deterministic-target_kind-mismatch-178) below. |
 | `-h, --help` | flag | — | Show help and exit. |
 
 ### When to use `--rules-format ir`
@@ -392,6 +394,63 @@ of the resolved paths.
 
 See [docs/design/multi-target.md](design/multi-target.md) for the design
 background; this section documents the first implemented slice.
+
+### Deterministic target_kind mismatch (#178)
+
+The `--artifact-kind` flag declares the kind of artifact passed via
+`--target` so the validator can decide deterministically — before any
+LLM call — whether each rule's annotated `target_kind` applies. When a
+rule routed to the `llm-rubric` backend carries an explicit
+`target_kind` annotation that differs from `--artifact-kind`, the rule
+short-circuits to `unsupported` with a `target_kind_mismatch` evidence
+record:
+
+```json
+{
+  "kind": "target_kind_mismatch",
+  "data": {
+    "rule_target_kind": "pr_description",
+    "artifact_kind": "commit_message",
+    "dispatch": "deterministic_precheck",
+    "llm_called": false
+  }
+}
+```
+
+The `dispatch=deterministic_precheck` and `llm_called=false` markers
+distinguish this short-circuit from a model-returned `unsupported`
+verdict (which carries the same evidence kind plus provider telemetry).
+
+Vocabulary matches `TargetKind`: `pr_description`, `commit_message`,
+`issue_body`, `documentation`, `code_change`. `unspecified` is rejected
+by argparse — users who want the legacy prompt-level behaviour omit the
+flag entirely. Rules whose `target_kind` is `unspecified` are
+unaffected: they preserve the prompt-level fallback (the `llm-rubric`
+prompt still names the rule's annotated kind in the model's
+instructions for defence-in-depth, see `docs/llm-rubric.md`). Rules
+routed to non-LLM backends (filesystem, github, external) ignore this
+flag.
+
+Sample invocations:
+
+```sh
+# PR-description rule + PR body → reach the model normally.
+gate-keeper validate docs/dogfooding-rules.md \
+  --target "$(gh pr view 178 --json body --jq .body)" \
+  --artifact-kind pr_description
+
+# Commit-message rule + commit message → reach the model normally.
+gate-keeper validate docs/dogfooding-rules.md \
+  --target "$(git log -1 --format=%B)" \
+  --artifact-kind commit_message
+
+# Mismatch: PR-description rule + commit message → short-circuit, no
+# model call. The rule's diagnostic carries
+# evidence.kind = target_kind_mismatch.
+gate-keeper validate docs/dogfooding-rules.md \
+  --target "$(git log -1 --format=%B)" \
+  --artifact-kind pr_description
+```
 
 ### Project-local `command` adapter (#149)
 

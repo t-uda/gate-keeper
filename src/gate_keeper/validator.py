@@ -38,6 +38,7 @@ from gate_keeper.models import (
     Rule,
     RuleSet,
     Status,
+    TargetKind,
 )
 from gate_keeper.targets import TargetSpec
 
@@ -132,11 +133,55 @@ def _run_n(
     )
 
 
+def _target_kind_mismatch_diagnostic(
+    rule: Rule,
+    artifact_kind: TargetKind,
+) -> Diagnostic:
+    """Synthesise an ``Status.UNSUPPORTED`` diagnostic for the deterministic
+    target-kind-mismatch precheck (#178).
+
+    The evidence carries ``dispatch=deterministic_precheck`` and
+    ``llm_called=false`` so callers can distinguish the deterministic
+    short-circuit from a model-returned ``unsupported`` (which surfaces as
+    ``target_kind_mismatch`` evidence with provider telemetry).
+    """
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=Status.UNSUPPORTED,
+        severity=rule.severity,
+        message=(
+            f"Rule annotated `target_kind: {rule.target_kind.value}` does not "
+            f"apply to artifact of kind `{artifact_kind.value}`; skipping "
+            "without invoking the LLM."
+        ),
+        evidence=[
+            Evidence(
+                kind="target_kind_mismatch",
+                data={
+                    "rule_target_kind": rule.target_kind.value,
+                    "artifact_kind": artifact_kind.value,
+                    "dispatch": "deterministic_precheck",
+                    "llm_called": False,
+                },
+            )
+        ],
+        remediation=(
+            "The rule's premise does not apply to this artifact kind. "
+            "Either evaluate the rule against an artifact whose kind "
+            f"matches its `target_kind` ({rule.target_kind.value}), or "
+            "remove / change the `target_kind` annotation on the rule."
+        ),
+    )
+
+
 def validate(
     ruleset: RuleSet,
     target: str | Path | TargetSpec,
     backend: str = "auto",
     reproducibility: int = 1,
+    artifact_kind: TargetKind | None = None,
 ) -> DiagnosticReport:
     """Validate *ruleset* against *target* using *backend*.
 
@@ -166,6 +211,20 @@ def validate(
         preserves the original behaviour. Values ``> 1`` apply only to rules
         dispatched to the ``llm-rubric`` backend; non-LLM backends ignore this
         parameter. Must be ``>= 1``.
+    artifact_kind:
+        Optional caller-declared :class:`TargetKind` for *target* (#178).
+        When supplied, every rule routed to the ``llm-rubric`` backend with
+        an explicit ``rule.target_kind`` annotation is checked
+        deterministically: if the rule's ``target_kind`` is set
+        (i.e. not :data:`TargetKind.UNSPECIFIED`) and differs from
+        *artifact_kind*, the rule is short-circuited to
+        :data:`Status.UNSUPPORTED` with ``evidence.kind=target_kind_mismatch``
+        (carrying ``dispatch=deterministic_precheck`` and
+        ``llm_called=false``) **without invoking the provider**. Rules whose
+        ``target_kind`` is ``unspecified`` are unaffected. Rules dispatched
+        to other backends (filesystem, github, external) ignore this
+        parameter. Default ``None`` preserves prior behaviour, including
+        the prompt-level fallback inside the llm-rubric backend.
 
     Returns
     -------
@@ -188,6 +247,22 @@ def validate(
     diagnostics: list[Diagnostic] = []
     for rule in ruleset.rules:
         resolved_name = _resolve_backend_name(rule, backend)
+
+        # #178 — deterministic target-kind-mismatch precheck. Applied only
+        # to rules routed to the llm-rubric backend that carry an explicit
+        # ``target_kind`` annotation (UNSPECIFIED rules preserve the
+        # prompt-level fallback). The check is performed here, before
+        # dispatch, so no provider call is made on mismatch — the test
+        # suite asserts this by counting calls into the stubbed provider.
+        if (
+            artifact_kind is not None
+            and resolved_name == "llm-rubric"
+            and rule.target_kind is not TargetKind.UNSPECIFIED
+            and rule.target_kind is not artifact_kind
+        ):
+            diagnostics.append(_target_kind_mismatch_diagnostic(rule, artifact_kind))
+            continue
+
         check_fn = _registry.get(resolved_name)
         if check_fn is None:
             # Defensive: name resolved from backend_hint is not registered.

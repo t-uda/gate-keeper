@@ -1632,3 +1632,144 @@ class TestGlobMetacharLiteralFallthrough:
                 f"resolution; got evidence {[ev['kind'] for ev in diag['evidence']]}"
             )
             assert summary["data"]["file_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# --artifact-kind (issue #178) — deterministic target_kind mismatch precheck
+# ---------------------------------------------------------------------------
+
+
+IR_LLM_PR_DESC_RULES = IR_FIXTURES / "rule-llm-rubric-pr-description.json"
+
+
+class TestArtifactKindFlag:
+    """End-to-end CLI tests for ``--artifact-kind``.
+
+    Uses a precompiled IR rule (``target_kind: pr_description``, llm-rubric
+    backend) so the test does not depend on the Markdown classifier or on
+    the model API. The deterministic short-circuit lives in the validator
+    layer; we assert the backend was never reached by inspecting the
+    rendered evidence shape (``dispatch=deterministic_precheck``,
+    ``llm_called=false``).
+    """
+
+    def test_mismatch_short_circuits_to_unsupported(self, capsys):
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(IR_LLM_PR_DESC_RULES),
+                "--target",
+                "fix(parser): handle CRLF\n\nbody",
+                "--artifact-kind",
+                "commit_message",
+                "--format",
+                "json",
+            ]
+        )
+        # UNSUPPORTED rules are advisory by default — exit code reflects
+        # the diagnostic policy. The behaviour we care about is the
+        # diagnostic shape, not the exit code, so assert on the JSON.
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["diagnostics"]) == 1
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unsupported"
+        assert diag["backend"] == "llm-rubric"
+        ev = diag["evidence"][0]
+        assert ev["kind"] == "target_kind_mismatch"
+        assert ev["data"]["rule_target_kind"] == "pr_description"
+        assert ev["data"]["artifact_kind"] == "commit_message"
+        assert ev["data"]["dispatch"] == "deterministic_precheck"
+        assert ev["data"]["llm_called"] is False
+        # Sanity: rc is a usage-clean exit (no argparse error).
+        assert rc != EXIT_USAGE
+
+    def test_match_does_not_short_circuit(self, capsys, monkeypatch):
+        """A matching --artifact-kind must let the rule reach the backend."""
+        from gate_keeper.backends import llm_rubric
+
+        # Force the backend to its unconfigured fallback (no model call).
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(IR_LLM_PR_DESC_RULES),
+                "--target",
+                "PR body that explains the change",
+                "--artifact-kind",
+                "pr_description",
+                "--format",
+                "json",
+            ]
+        )
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        # When kinds match, the rule reaches the backend. With no provider
+        # configured, the backend returns UNAVAILABLE — proving the
+        # precheck did NOT fire (which would have produced UNSUPPORTED).
+        assert diag["status"] == "unavailable"
+        assert diag["evidence"][0]["kind"] == "provider_unconfigured"
+        assert rc != EXIT_USAGE
+
+    def test_omitted_artifact_kind_preserves_compat(self, capsys, monkeypatch):
+        """No --artifact-kind → no precheck; reach the backend as before."""
+        from gate_keeper.backends import llm_rubric
+
+        monkeypatch.setattr(llm_rubric, "_load_env_file", lambda *a, **kw: {})
+        rc = main(
+            [
+                "validate",
+                "--rules-format",
+                "ir",
+                str(IR_LLM_PR_DESC_RULES),
+                "--target",
+                "any artifact text",
+                "--format",
+                "json",
+            ]
+        )
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        diag = data["diagnostics"][0]
+        assert diag["status"] == "unavailable"
+        assert diag["evidence"][0]["kind"] == "provider_unconfigured"
+        assert rc != EXIT_USAGE
+
+    def test_invalid_artifact_kind_exits_2(self, capsys):
+        """An unknown kind must be rejected by argparse (exit 2)."""
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "validate",
+                    "--rules-format",
+                    "ir",
+                    str(IR_LLM_PR_DESC_RULES),
+                    "--target",
+                    "x",
+                    "--artifact-kind",
+                    "not_a_kind",
+                ]
+            )
+        assert excinfo.value.code == EXIT_USAGE
+
+    def test_unspecified_rejected_by_argparse(self, capsys):
+        """``--artifact-kind unspecified`` is rejected — users omit the flag instead."""
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "validate",
+                    "--rules-format",
+                    "ir",
+                    str(IR_LLM_PR_DESC_RULES),
+                    "--target",
+                    "x",
+                    "--artifact-kind",
+                    "unspecified",
+                ]
+            )
+        assert excinfo.value.code == EXIT_USAGE
