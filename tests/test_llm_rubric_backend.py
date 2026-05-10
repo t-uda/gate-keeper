@@ -999,6 +999,98 @@ class TestParseLlmJudgment:
         assert isinstance(result, LlmJudgmentParseError)
         assert result.failure_mode == "invalid_json"
 
+    # ------------------------------------------------------------------
+    # Code-fence extraction fallback (#194)
+    # ------------------------------------------------------------------
+
+    def test_json_in_json_code_fence_is_parsed(self):
+        """gpt-4o-mini sometimes wraps its JSON in a ```json ... ``` fence (#194).
+
+        The parser must strip the fence and succeed rather than returning
+        ``invalid_json``.  This is a recorded failure mode from the
+        completeness-05-rule-doc-has-target-cue bench run.
+        """
+        inner = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Each bullet names its target artefact.",
+                "supporting_evidence_quotes": ["The pull request title is at most 70 characters."],
+                "suggested_action": None,
+            }
+        )
+        fenced = f"```json\n{inner}\n```"
+        result = llm_backend._parse_llm_judgment(fenced)
+        assert isinstance(result, LlmJudgment), f"Expected LlmJudgment, got {result!r}"
+        assert result.judgment == "pass"
+        assert result.primary_reason == "Each bullet names its target artefact."
+
+    def test_json_in_plain_code_fence_is_parsed(self):
+        """Plain ``` ... ``` (no language tag) should also be stripped (#194)."""
+        inner = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "Rule body omits target artefact names.",
+                "supporting_evidence_quotes": ["The CHANGELOG file has an Unreleased section."],
+                "suggested_action": "Name the artefact each rule addresses.",
+            }
+        )
+        fenced = f"```\n{inner}\n```"
+        result = llm_backend._parse_llm_judgment(fenced)
+        assert isinstance(result, LlmJudgment), f"Expected LlmJudgment, got {result!r}"
+        assert result.judgment == "fail"
+
+    def test_code_fence_extraction_failure_returns_invalid_json(self):
+        """When the code-fence body is itself invalid JSON, the parser returns invalid_json (#194)."""
+        fenced = "```json\nnot valid json at all\n```"
+        result = llm_backend._parse_llm_judgment(fenced)
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "invalid_json"
+        # The excerpt must reference the original response, not the extracted candidate.
+        assert result.raw_response_excerpt.startswith("```json")
+
+    def test_prose_with_no_fence_returns_invalid_json(self):
+        """When no code fence is present, a prose response still returns invalid_json (#194)."""
+        result = llm_backend._parse_llm_judgment(
+            "The rule is satisfied because each bullet names its artefact."
+        )
+        assert isinstance(result, LlmJudgmentParseError)
+        assert result.failure_mode == "invalid_json"
+
+
+# ---------------------------------------------------------------------------
+# Code-fence extraction helper (#194)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractJsonCandidate:
+    """Unit tests for :func:`_extract_json_candidate`."""
+
+    def test_json_fence_extracted(self):
+        inner = '{"a": 1}'
+        assert llm_backend._extract_json_candidate(f"```json\n{inner}\n```") == inner
+
+    def test_plain_fence_extracted(self):
+        inner = '{"b": 2}'
+        assert llm_backend._extract_json_candidate(f"```\n{inner}\n```") == inner
+
+    def test_no_fence_returns_none(self):
+        assert llm_backend._extract_json_candidate("just some prose") is None
+
+    def test_fence_with_surrounding_prose(self):
+        """Code fence may be preceded / followed by prose (model preamble)."""
+        inner = '{"c": 3}'
+        text = f"Here is my answer:\n```json\n{inner}\n```\nEnd of response."
+        result = llm_backend._extract_json_candidate(text)
+        assert result == inner
+
+    def test_first_fence_wins_on_multiple(self):
+        """When multiple fences appear the first match is returned."""
+        first = '{"first": true}'
+        second = '{"second": true}'
+        text = f"```json\n{first}\n```\n\nsome text\n\n```json\n{second}\n```"
+        result = llm_backend._extract_json_candidate(text)
+        assert result == first
+
 
 # ---------------------------------------------------------------------------
 # Quote-fabrication validator (#172)
