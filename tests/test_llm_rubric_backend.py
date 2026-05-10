@@ -2147,6 +2147,209 @@ class TestUnsupportedDispatch:
         assert diag.evidence[0].data["failure_mode"] == "unsupported_without_target_kind"
 
 
+class TestArtifactKindStripsFilenameFromPrompt:
+    """#191 — when ``--artifact-kind`` is declared and ``--target`` is a real file
+    path, the prompt's ``Target reference`` block must carry the file
+    *content*, not the file *path*.
+
+    Background: gpt-4o-mini at v4 was observed parroting filenames as
+    artifact-kind evidence on positive controls (rule.target_kind matches
+    --artifact-kind, deterministic precheck does NOT fire, the LLM is
+    invoked). The model returned ``judgment=unsupported`` with
+    ``primary_reason: "The rule is annotated 'commit_message' but the
+    artifact provided is a target-03-commit.txt."`` — i.e. it cited the
+    filename instead of honouring the declared kind.
+
+    The fix strips filename context from the prompt when ``--artifact-kind``
+    is declared by reading the file content and rendering it into the
+    ``Target reference`` slot. The substring fabrication validator
+    (``_resolve_artifact_text``) follows the same substitution so quote
+    grounding stays consistent with what the model actually saw.
+    """
+
+    @staticmethod
+    def _commit_rule():
+        from gate_keeper.models import TargetKind
+
+        return _semantic_rule_with_target_kind(TargetKind.COMMIT_MESSAGE)
+
+    def test_path_target_with_artifact_kind_renders_file_content(self, tmp_path):
+        """The prompt's ``Target reference`` slot must contain the file
+        content — not the path string — when ``artifact_kind`` is
+        declared and ``target`` is an existing file path."""
+        from gate_keeper.models import TargetKind
+
+        commit_path = tmp_path / "target-03-commit.txt"
+        commit_body = "fix(parser): handle CRLF in evidence blocks\n\nrelated to #foo"
+        commit_path.write_text(commit_body, encoding="utf-8")
+
+        _system, user = llm_backend._build_prompt(
+            self._commit_rule(),
+            commit_path,
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+
+        # The file content must appear inline.
+        assert commit_body in user
+        # The path / filename must NOT appear in the rendered prompt — the
+        # whole point of #191 is to deny the model a filename to parrot.
+        assert str(commit_path) not in user
+        assert commit_path.name not in user
+
+    def test_path_target_with_artifact_kind_string_path_also_strips(self, tmp_path):
+        """The substitution applies to both ``Path`` and string-path
+        targets — the CLI surface forwards ``--target`` as a string."""
+        from gate_keeper.models import TargetKind
+
+        commit_path = tmp_path / "target-03-commit.txt"
+        commit_body = "feat(cli): emit --help on stderr\n\nbecause stdout is reserved for results"
+        commit_path.write_text(commit_body, encoding="utf-8")
+
+        _system, user = llm_backend._build_prompt(
+            self._commit_rule(),
+            str(commit_path),
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+
+        assert commit_body in user
+        assert str(commit_path) not in user
+        assert commit_path.name not in user
+
+    def test_path_target_without_artifact_kind_preserves_legacy_path_render(self, tmp_path):
+        """When ``artifact_kind`` is omitted, legacy v4 behaviour is
+        preserved byte-for-byte: the path string is rendered into the
+        ``Target reference`` slot, not the file content. This guards
+        against accidentally widening the file-content substitution to
+        unannotated callers.
+        """
+        commit_path = tmp_path / "target-03-commit.txt"
+        commit_body = "fix(parser): pre-191 default behaviour\n\nbody intentionally unique"
+        commit_path.write_text(commit_body, encoding="utf-8")
+
+        _system, user = llm_backend._build_prompt(self._commit_rule(), commit_path)
+
+        # Legacy: the path is rendered, the body is not.
+        assert str(commit_path) in user
+        assert commit_body not in user
+
+    def test_inline_target_with_artifact_kind_stays_inline(self):
+        """Inline string targets (no on-disk file) are passed through
+        unchanged regardless of ``artifact_kind`` — there is no path to
+        strip and no file to read."""
+        from gate_keeper.models import TargetKind
+
+        inline = "fix(parser): handle CRLF in evidence blocks\n\nrelated to #foo"
+        _system, user = llm_backend._build_prompt(
+            self._commit_rule(),
+            inline,
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        assert inline in user
+
+    def test_nonexistent_path_with_artifact_kind_falls_back_to_string(self, tmp_path):
+        """A non-existent path with ``artifact_kind`` set must not raise;
+        the helper falls back to ``str(target)`` so the model still gets
+        a reference (and the existing instruction "judge from the
+        reference alone" applies)."""
+        from gate_keeper.models import TargetKind
+
+        missing = tmp_path / "does-not-exist.txt"
+        _system, user = llm_backend._build_prompt(
+            self._commit_rule(),
+            missing,
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+        assert str(missing) in user
+
+    def test_resolve_artifact_text_mirrors_prompt_substitution(self, tmp_path):
+        """The substring fabrication validator must see the same
+        artifact text the prompt rendered, otherwise legitimate
+        content-grounded quotes would be falsely flagged
+        ``llm_quote_fabrication``.
+        """
+        from gate_keeper.models import TargetKind
+
+        path = tmp_path / "target-03-commit.txt"
+        body = "fix(parser): handle CRLF in evidence blocks"
+        path.write_text(body, encoding="utf-8")
+
+        # With artifact_kind declared, the validator returns file content.
+        assert llm_backend._resolve_artifact_text(path, TargetKind.COMMIT_MESSAGE) == body
+        # Without artifact_kind, the validator returns str(target) (legacy).
+        assert llm_backend._resolve_artifact_text(path, None) == str(path)
+        assert llm_backend._resolve_artifact_text(path) == str(path)
+
+    def test_path_target_with_artifact_kind_judges_content_via_check(self, monkeypatch, tmp_path):
+        """End-to-end: ``check`` with a path + ``artifact_kind`` produces
+        an ``llm_judgment`` whose grounding quotes are content
+        substrings (not path / filename substrings).
+
+        The provider helper is monkeypatched so the test is deterministic
+        — the substring-grounding validator (#172) is what proves the
+        ``Target reference`` slot rendered file content rather than a
+        path string: a quote that is a substring of the file body but
+        not of the path string would otherwise be flagged
+        ``llm_quote_fabrication``.
+        """
+        from gate_keeper.models import TargetKind
+
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-test",
+        }
+        _patch_env(monkeypatch, env)
+
+        commit_path = tmp_path / "target-03-commit.txt"
+        commit_body = (
+            "fix(parser): handle CRLF in evidence blocks\n\n"
+            "Without this guard, blocks copied from Windows editors silently "
+            "fail substring grounding because the artifact text carries \\r\\n "
+            "while the LLM emits \\n quotes."
+        )
+        commit_path.write_text(commit_body, encoding="utf-8")
+
+        # The model returns a quote that is a substring of the body — but
+        # NOT a substring of the path / filename. Without #191 this would
+        # be flagged as fabricated; with #191 the validator sees the
+        # body and the quote is grounded.
+        body_quote = "blocks copied from Windows editors silently fail substring grounding"
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Body explains the failure mode and the fix concretely.",
+                "supporting_evidence_quotes": [body_quote],
+                "suggested_action": None,
+            }
+        )
+
+        captured: dict[str, object] = {}
+
+        def _capture_call(api_key, system, user, model):
+            captured["user"] = user
+            return _stub_response(response)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _capture_call)
+
+        rule = self._commit_rule()
+        diag = llm_backend.check(
+            rule,
+            commit_path,
+            artifact_kind=TargetKind.COMMIT_MESSAGE,
+        )
+
+        # Sanity: the prompt the helper saw included the body and not the path.
+        assert isinstance(captured["user"], str)
+        rendered_prompt: str = captured["user"]  # type: ignore[assignment]
+        assert body_quote in rendered_prompt
+        assert str(commit_path) not in rendered_prompt
+        assert commit_path.name not in rendered_prompt
+
+        # End result: PASS with content-grounded evidence (no fabrication).
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+        assert diag.evidence[0].data["supporting_evidence_quotes"] == [body_quote]
+
+
 # ---------------------------------------------------------------------------
 # Reproducibility metric (#68): run_n
 # ---------------------------------------------------------------------------

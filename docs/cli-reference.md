@@ -452,6 +452,36 @@ gate-keeper validate docs/dogfooding-rules.md \
   --artifact-kind pr_description
 ```
 
+#### Path targets — file content is rendered, not the path (#191)
+
+When `--artifact-kind` is declared **and** `--target` resolves to a real
+file on disk, the `llm-rubric` backend renders the file *content* into
+the prompt's `Target reference` slot rather than the path string. This
+prevents the model from latching onto the filename as a substitute for
+the declared kind: at v4, gpt-4o-mini was observed returning
+`judgment=unsupported` with `primary_reason: "The rule is annotated
+'commit_message' but the artifact provided is a target-03-commit.txt."`
+on positive controls (rule's `target_kind` matched the declared
+`--artifact-kind`, so the deterministic precheck above correctly did NOT
+fire) — citing the filename instead of evaluating the body. With the
+content rendered, the model has no filename to parrot.
+
+```sh
+# Path target + matching --artifact-kind → the model sees the file body,
+# not the path. The substring fabrication validator (#172) checks
+# quotes against the same content, so content-grounded quotes resolve
+# to spans (#179) normally.
+gate-keeper validate docs/dogfooding-rules.md \
+  --target /tmp/scratch/target-03-commit.txt \
+  --artifact-kind commit_message
+```
+
+Omitting `--artifact-kind` preserves the legacy v4 byte-for-byte
+behaviour (the `Target reference` slot carries `str(target)` and the
+prompt-level fallback in #169 / #175 is responsible for declining
+mismatches). Inline-string targets (`--target "<commit message body>"`)
+and non-existent paths are forwarded unchanged regardless of the flag.
+
 ### Project-local `command` adapter (#149)
 
 The `command` external adapter lets a trusted local rule document delegate a

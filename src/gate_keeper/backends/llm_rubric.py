@@ -53,6 +53,15 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   message" example with a kind-neutral schema illustration, and (c) adds
 #   a checklist step requiring the model to identify which artifact kind
 #   the rule's predicate actually targets before deciding.
+#
+# The ``PROMPT_VERSION`` constant is **not** bumped for #191. The rendered
+# template body (schema, instructions, constraints, examples) is unchanged;
+# the only change is what string fills the ``Target reference`` slot — when
+# the caller declared an ``--artifact-kind`` and the target resolves to a
+# real file, the prompt now carries the file *content* rather than the
+# file *path* (and the substring grounding check follows the same
+# substitution). Reproducibility records keyed on ``prompt_version``
+# continue to mean the same thing.
 PROMPT_VERSION = "v4"
 
 # ---------------------------------------------------------------------------
@@ -458,8 +467,75 @@ def _build_rubric_input(rule: Rule, target: str | Path) -> dict[str, Any]:
     return payload
 
 
-def _build_prompt(rule: Rule, target: str | Path) -> tuple[str, str]:
-    """Render the system + user messages for *rule* against *target* (#169 / #175).
+def _resolve_artifact_input(
+    target: str | Path,
+    artifact_kind: TargetKind | None,
+) -> str:
+    """Return the string to render into the prompt's ``Target reference`` block (#191).
+
+    When *artifact_kind* is declared by the caller (``--artifact-kind`` on
+    the CLI surface) **and** *target* refers to a real file on disk, return
+    the file's text content so the model sees the artifact body itself
+    rather than the path string. The declared kind already tells the model
+    what kind of artifact this is — leaking the filename adds no signal and
+    actively misleads the model on file-path callers. (Issue #191:
+    gpt-4o-mini at v4 parroted ``target-03-commit.txt`` as the artifact
+    kind regardless of the declared ``--artifact-kind=commit_message``.)
+
+    When *artifact_kind* is ``None`` (caller omitted the flag), preserve
+    the legacy v4 behaviour byte-for-byte: return ``str(target)`` so the
+    prompt's ``Target reference`` block carries whatever the caller passed
+    in (path string for path targets, inline content for inline targets).
+    The legacy prompt-level fallback in #169/#175 is still responsible for
+    declining or evaluating in that path.
+
+    When *target* is a non-existent path (or any string that does not
+    resolve to a file), return ``str(target)`` regardless of
+    *artifact_kind*: there is no file body to substitute, and the model
+    will judge from the reference alone per the existing instruction
+    ("If you cannot read the target's content directly, judge from the
+    reference alone."). A read error (permission denied, decode failure,
+    …) also falls back to ``str(target)`` so the behaviour stays
+    fail-open at the prompt-builder level — the substring fabrication
+    validator in :func:`_resolve_artifact_text` mirrors the same
+    substitution so a successful content load is observable in evidence
+    even on this branch.
+
+    Note: the helper accepts both ``str`` and ``Path`` because
+    :func:`check` is called with whatever the validator forwards. The
+    ``str`` branch is the common one (``--target /path/to/file`` ⇒ str);
+    we coerce to ``Path`` locally before stat-ing.
+    """
+    if artifact_kind is None:
+        return str(target)
+    # Coerce to Path for the existence/read step. Construction itself
+    # cannot raise for any reasonable input; ``is_file`` may raise
+    # ``OSError`` on filesystems that reject the byte-string (matches
+    # the CLI's defensive handling in cli.py).
+    try:
+        path = target if isinstance(target, Path) else Path(str(target))
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # Fail-open at the prompt-builder level: legacy
+                # path-string behaviour is the safe fallback; the
+                # diagnostic remains observable via the regular
+                # provider response path.
+                return str(target)
+    except OSError:
+        # ``is_file`` itself rejected the path (e.g. ENAMETOOLONG when
+        # someone passes a long inline string as --target). Fall back.
+        pass
+    return str(target)
+
+
+def _build_prompt(
+    rule: Rule,
+    target: str | Path,
+    artifact_kind: TargetKind | None = None,
+) -> tuple[str, str]:
+    """Render the system + user messages for *rule* against *target* (#169 / #175 / #191).
 
     When ``rule.target_kind`` is :data:`TargetKind.UNSPECIFIED` three
     target-kind-related blocks render to the empty string:
@@ -479,11 +555,21 @@ def _build_prompt(rule: Rule, target: str | Path) -> tuple[str, str]:
     saw the canned ``unsupported`` example and emitted a stray
     ``unsupported`` verdict that the backend then degraded to
     ``provider_error / unsupported_without_target_kind``.
+
+    The optional *artifact_kind* parameter (#191) selects what fills the
+    ``Target reference`` slot. When the caller declares an
+    ``--artifact-kind`` and *target* resolves to a real file, the slot
+    receives the file content — not the path string — so gpt-4o-mini
+    cannot latch onto the filename as a substitute for the declared kind.
+    When ``artifact_kind is None`` the legacy ``str(target)`` rendering is
+    preserved byte-for-byte (the prompt-level v4 fallback continues to
+    apply). See :func:`_resolve_artifact_input` for the substitution
+    rules.
     """
     system = RUBRIC_SYSTEM_PROMPT
     user = RUBRIC_PROMPT_TEMPLATE.format(
         rule_text=rule.text,
-        target=str(target),
+        target=_resolve_artifact_input(target, artifact_kind),
         target_kind_block=_render_target_kind_block(rule.target_kind),
         unsupported_instruction=_render_unsupported_instruction(rule.target_kind),
         unsupported_example_block=_render_unsupported_example_block(rule.target_kind),
@@ -763,36 +849,48 @@ def _normalise_for_substring(text: str) -> str:
     return collapsed.strip()
 
 
-def _resolve_artifact_text(target: str | Path) -> str:
+def _resolve_artifact_text(
+    target: str | Path,
+    artifact_kind: TargetKind | None = None,
+) -> str:
     """Return the artifact text used for substring validation.
 
-    Returns ``str(target)`` — the same string the prompt template renders
-    into the ``Target reference`` block via ``_build_prompt``. This is
-    deliberate: the substring check must be performed against what the
-    **model actually saw**, not against any out-of-band file contents.
+    Returns the **same string the prompt template renders into the
+    ``Target reference`` block** via ``_build_prompt``. The substring
+    check must be performed against what the model actually saw, not
+    against any out-of-band file contents.
 
-    Concretely:
+    Concretely (#191 update):
+
+    - When *artifact_kind* is ``None`` (caller did not declare
+      ``--artifact-kind``): legacy behaviour. Returns ``str(target)`` —
+      the prompt also renders ``str(target)``, so quote substrings are
+      checked against the path / inline string the model actually saw.
+    - When *artifact_kind* is declared and *target* resolves to a real
+      file: the prompt now renders the file content (#191), so this
+      function returns the same content. Quotes must be substrings of
+      the file body, matching what the model saw.
+    - When *artifact_kind* is declared but *target* is inline / a
+      non-existent path: ``_resolve_artifact_input`` falls back to
+      ``str(target)`` and so does this function — they stay in lockstep.
+
+    Pre-existing properties preserved:
 
     - For inline-string targets (the dogfood case ``--target "<PR body>"``)
       the model receives the body inline; quotes must be substrings of it.
-    - For path / PR-reference targets (the ``validate --target <file>``
-      flow) the model receives only the reference string and is instructed
-      to "judge from the reference alone" when it cannot read the
-      content. The substring check accepts only quotes drawn from that
-      reference. Generic placeholder strings invented by the model still
-      fail containment and are flagged as ``llm_quote_fabrication`` — the
-      desired behaviour.
     - The bench harness pre-resolves path targets to file contents before
       invoking ``check`` (``bench.run_entry`` ⇒ ``Target.resolve``), so for
       bench callers the target string is already the inline content; no
       special-casing is required here.
 
-    Reading file contents off-band would diverge from what the model has
-    access to and would force every legitimate verdict on a path target
-    into a false ``llm_quote_fabrication`` rejection (Codex review on
-    PR #173).
+    Reading file contents off-band when *artifact_kind* is **not** set
+    would diverge from what the model sees and would force every
+    legitimate verdict on a path target into a false
+    ``llm_quote_fabrication`` rejection (Codex review on PR #173). The
+    #191 substitution is gated on *artifact_kind* precisely so the
+    no-flag legacy path stays untouched.
     """
-    return str(target)
+    return _resolve_artifact_input(target, artifact_kind)
 
 
 def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
@@ -1156,7 +1254,12 @@ def _unavailable_provider_error(
 # ---------------------------------------------------------------------------
 
 
-def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
+def check(
+    rule: Rule,
+    target: str | Path | TargetSpec,
+    *,
+    artifact_kind: TargetKind | None = None,
+) -> Diagnostic:
     """Evaluate a semantic-rubric rule against *target*.
 
     When no provider is configured (or the env file is absent), returns
@@ -1180,6 +1283,29 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     happening — content assembly is deferred to a follow-up. Single-file
     ``TargetSpec`` values are unwrapped to the underlying path so callers
     can mix CLI surfaces freely.
+
+    Parameters
+    ----------
+    rule:
+        The semantic-rubric rule to evaluate.
+    target:
+        File path, PR reference, inline string, or single-file
+        :class:`TargetSpec`. When a multi-target spec is supplied the
+        call short-circuits to ``UNSUPPORTED`` with
+        ``multi_target_unsupported`` evidence (see above).
+    artifact_kind:
+        Optional caller-declared :class:`TargetKind` for *target* (#191).
+        When supplied **and** *target* refers to a real file on disk, the
+        prompt's ``Target reference`` block is filled with the file
+        content rather than the path string — gpt-4o-mini at v4 was
+        observed to parrot filenames as artifact-kind evidence
+        (e.g. ``target-03-commit.txt``) when the path was rendered into
+        the prompt, undermining the rule's declared ``target_kind``
+        annotation. Inline / non-existent targets and ``artifact_kind=None``
+        callers preserve the legacy v4 byte-for-byte behaviour. The
+        :func:`_resolve_artifact_text` substring grounding follows the
+        same substitution so quotes are validated against what the model
+        actually saw.
 
     On success the ``evidence[0].data`` dict contains:
 
@@ -1237,7 +1363,7 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
 
     provider = env["GATE_KEEPER_LLM_PROVIDER"]
     model = _resolve_model(provider, env)
-    system, user = _build_prompt(rule, target)
+    system, user = _build_prompt(rule, target, artifact_kind)
 
     try:
         if provider == "anthropic":
@@ -1326,7 +1452,11 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
     # #172 — parser-side enforcement of the v2 prompt's substring-grounding
     # contract. If any quote is not a substring of the artifact text, reject
     # the verdict and surface UNSUPPORTED with llm_quote_fabrication evidence.
-    artifact_text = _resolve_artifact_text(target)
+    # #191 — when ``artifact_kind`` is declared and the target is a real file,
+    # ``_resolve_artifact_text`` returns the file content (mirroring what
+    # ``_build_prompt`` injected). Quotes are validated against what the
+    # model actually saw.
+    artifact_text = _resolve_artifact_text(target, artifact_kind)
     fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
     if fabricated:
         cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
@@ -1419,7 +1549,13 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
 # ---------------------------------------------------------------------------
 
 
-def run_n(rule: Rule, target: str | Path, n: int) -> Diagnostic:
+def run_n(
+    rule: Rule,
+    target: str | Path,
+    n: int,
+    *,
+    artifact_kind: TargetKind | None = None,
+) -> Diagnostic:
     """Evaluate *rule* against *target* ``n`` times and aggregate the result.
 
     Reproducibility metric (#68): runs ``check`` ``n`` times, then aggregates the
@@ -1440,16 +1576,19 @@ def run_n(rule: Rule, target: str | Path, n: int) -> Diagnostic:
     - If *any* run returns a non-pass/fail diagnostic (``UNAVAILABLE`` /
       ``ERROR``), aggregation is abandoned and that diagnostic is returned
       unchanged - fail-closed for unconfigured / error states.
+    - The optional *artifact_kind* keyword is forwarded verbatim to each
+      ``check`` call (#191) so reproducibility runs see the same prompt
+      substitution as a single-shot call.
     """
     if n < 1:
         raise ValueError(f"reproducibility n must be >= 1, got {n}")
 
     if n == 1:
-        return check(rule, target)
+        return check(rule, target, artifact_kind=artifact_kind)
 
     diagnostics: list[Diagnostic] = []
     for _ in range(n):
-        diag = check(rule, target)
+        diag = check(rule, target, artifact_kind=artifact_kind)
         # Fail-closed on non-deterministic outcomes: if any run is unavailable
         # or errored, don't synthesise a misleading reproducibility score.
         if diag.status not in (Status.PASS, Status.FAIL):

@@ -85,11 +85,46 @@ def _resolve_backend_name(rule: Rule, backend_name: str) -> str:
     return backend_name
 
 
+def _invoke_check(
+    check_fn: Callable,
+    rule: Rule,
+    target: str | Path | TargetSpec,
+    artifact_kind: TargetKind | None,
+) -> Diagnostic:
+    """Invoke *check_fn* with optional ``artifact_kind`` keyword (#191).
+
+    The registry's published callable signature is ``(rule, target) ->
+    Diagnostic``; the real ``llm_rubric.check`` adds an optional
+    ``artifact_kind=`` keyword. Test doubles register simple two-argument
+    callables that do not declare the keyword. To keep both shapes
+    callable through the same code path:
+
+    - When *artifact_kind* is ``None``: call ``check_fn(rule, target)``
+      verbatim — every registered check accepts this form.
+    - When *artifact_kind* is supplied: call ``check_fn(rule, target,
+      artifact_kind=artifact_kind)`` first; on ``TypeError`` (the stub
+      doesn't accept the keyword), retry without it. Tests that exercise
+      the deterministic precheck only need the call count, so dropping
+      the keyword for stubs is harmless. Tests that want to assert on
+      the keyword can register a stub that accepts ``**kwargs``.
+    """
+    if artifact_kind is None:
+        return check_fn(rule, target)
+    try:
+        return check_fn(rule, target, artifact_kind=artifact_kind)
+    except TypeError:
+        # Registered stub does not accept the keyword. Fall back to the
+        # legacy signature so non-LLM stubs (which never read
+        # artifact_kind anyway) keep working.
+        return check_fn(rule, target)
+
+
 def _run_n(
     check_fn: Callable,
     rule: Rule,
     target: str | Path | TargetSpec,
     n: int,
+    artifact_kind: TargetKind | None = None,
 ) -> Diagnostic:
     """Run *check_fn* ``n`` times and aggregate via majority vote.
 
@@ -100,10 +135,16 @@ def _run_n(
     Ties break toward fail (fail-closed). Returns early on the first
     non-pass/fail diagnostic (UNAVAILABLE / ERROR) without synthesising a
     reproducibility score (fail-closed for unconfigured states).
+
+    *artifact_kind* (#191) is forwarded as a keyword argument to *check_fn*
+    when non-``None``. Test stubs that only accept ``(rule, target)``
+    continue to work because the keyword is omitted in that case; the
+    real ``llm_rubric.check`` accepts ``artifact_kind=`` and uses it to
+    decide whether to substitute file content into the prompt.
     """
     diags: list[Diagnostic] = []
     for _ in range(n):
-        d = check_fn(rule, target)
+        d = _invoke_check(check_fn, rule, target, artifact_kind)
         if d.status not in (Status.PASS, Status.FAIL):
             return d
         diags.append(d)
@@ -292,10 +333,16 @@ def validate(
                 # #68: apply multi-run reproducibility for llm-rubric rules via
                 # the registry check_fn so stubs/overrides work in tests.
                 # Non-LLM backends silently ignore N>1.
+                #
+                # #191: forward ``artifact_kind`` via ``_invoke_check`` only
+                # for the llm-rubric route — non-LLM backends (filesystem,
+                # github, external) take ``(rule, target)`` and would not
+                # benefit from the keyword.
+                rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
                 if reproducibility > 1 and resolved_name == "llm-rubric":
-                    diag = _run_n(check_fn, rule, target, reproducibility)
+                    diag = _run_n(check_fn, rule, target, reproducibility, rule_artifact_kind)
                 else:
-                    diag = check_fn(rule, target)
+                    diag = _invoke_check(check_fn, rule, target, rule_artifact_kind)
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)
