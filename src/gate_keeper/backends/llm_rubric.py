@@ -815,6 +815,290 @@ def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Span resolution for validated quotes (#179)
+#
+# Once ``_find_fabricated_quotes`` confirms every quote is a normalised
+# substring of the artifact, ``_resolve_quote_spans`` locates the **first
+# match** of each quote inside the original (un-normalised) artifact text and
+# returns deterministic span metadata: character offsets and 1-indexed
+# line / column ranges, plus a ``match_normalisation`` tag identifying which
+# tolerance step was needed (``"exact"`` / ``"whitespace"`` /
+# ``"smart_quotes"``).
+#
+# Design choices:
+#
+# - **Character offsets, not byte offsets.** Python strings index by code
+#   point and the artifact_text we receive is already a ``str``; computing
+#   byte offsets would require nailing an encoding (UTF-8 by convention) and
+#   re-encoding for every match, with no extra information for the consumer.
+#   Line / column are computed alongside for human-friendly rendering.
+#
+# - **First match wins on duplicates.** If the same quote appears N times in
+#   the artifact, the span points to the first occurrence. This is the
+#   simplest deterministic default and the one humans usually want when
+#   asking "where did the model find this quote?". Documented in
+#   ``docs/llm-rubric.md``.
+#
+# - **Normalisation-aware fallback.** ``str.find`` is tried first against
+#   the raw text (``match_normalisation: "exact"``); if that misses, a
+#   smart-quote-folded copy is searched (``"smart_quotes"``); if that still
+#   misses, the artifact's whitespace is collapsed and a regex over the
+#   collapsed-whitespace artifact locates the run, with the offsets mapped
+#   back to the original text (``"whitespace"``). The fabrication validator
+#   in ``_find_fabricated_quotes`` already accepts this composite tolerance,
+#   so any quote that passed validation is guaranteed to resolve to a span.
+#
+# - **Single-artifact ``artifact_index: 0``.** Included so the field stays
+#   meaningful when multi-artifact attribution arrives in a follow-up
+#   (#182 / multi-target semantic context). Single-artifact callers can
+#   ignore it without confusion.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QuoteSpan:
+    """Span metadata for one validated supporting quote (#179).
+
+    Fields
+    ------
+    quote:
+        The quote string as the model returned it. Preserved verbatim so a
+        consumer can correlate ``supporting_evidence_spans[i]`` with
+        ``supporting_evidence_quotes[i]`` even when the in-artifact text
+        differs (e.g. smart-quote folding).
+    artifact_index:
+        Index of the artifact this span points into. Always ``0`` in the
+        first slice (single-artifact); reserved so future multi-artifact
+        evidence attribution does not break the wire format.
+    start_offset, end_offset:
+        Character offsets (Python ``str`` indices) into the artifact text.
+        Half-open: ``artifact_text[start_offset:end_offset]`` is the
+        matched substring in the **original** artifact text — even when
+        ``match_normalisation`` is ``"whitespace"`` or ``"smart_quotes"``.
+    start_line, end_line:
+        1-indexed line numbers of the start and end positions. ``end_line``
+        is the line containing the last matched character (inclusive).
+    start_column, end_column:
+        1-indexed column numbers (Unicode code-points within the line).
+        ``end_column`` is one past the last matched character (so an empty
+        match would have ``start_column == end_column``); this matches the
+        half-open-interval convention used for ``end_offset``.
+    match_normalisation:
+        ``"exact"`` if the quote was found verbatim, ``"smart_quotes"`` if
+        smart-quote folding was needed, ``"whitespace"`` if collapsing
+        whitespace runs was needed. The tag records the **weakest**
+        normalisation the resolver had to apply: an exact match always
+        wins over a smart-quote match, and a smart-quote match always wins
+        over a whitespace-collapse match.
+    """
+
+    quote: str
+    artifact_index: int
+    start_offset: int
+    end_offset: int
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    match_normalisation: Literal["exact", "smart_quotes", "whitespace"]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "quote": self.quote,
+            "artifact_index": self.artifact_index,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+            "start_line": self.start_line,
+            "start_column": self.start_column,
+            "end_line": self.end_line,
+            "end_column": self.end_column,
+            "match_normalisation": self.match_normalisation,
+        }
+
+
+def _line_col_from_offset(text: str, offset: int) -> tuple[int, int]:
+    """Return the 1-indexed (line, column) for *offset* in *text*.
+
+    ``offset`` is clamped into ``[0, len(text)]`` so callers can pass
+    ``end_offset`` (which may equal ``len(text)`` for a trailing match) without
+    branching. Lines are 1-indexed; columns are 1-indexed within the line and
+    counted in Python ``str`` code points.
+    """
+    if offset < 0:
+        offset = 0
+    if offset > len(text):
+        offset = len(text)
+    # Number of newlines before *offset* gives the 0-indexed line; +1 makes it
+    # 1-indexed. Column = offset minus the position just after the last
+    # preceding newline (or 0 if none), then +1 for 1-indexing.
+    last_newline = text.rfind("\n", 0, offset)
+    line = text.count("\n", 0, offset) + 1
+    column = offset - (last_newline + 1) + 1
+    return line, column
+
+
+def _resolve_quote_span_in(artifact_text: str, quote: str) -> QuoteSpan | None:
+    """Return the first-match span for *quote* in *artifact_text*, or ``None``.
+
+    Tries three strategies in escalating tolerance order, recording the
+    weakest one that succeeded as ``match_normalisation``:
+
+    1. **Exact** substring search via ``str.find`` against the raw
+       artifact text.
+    2. **Smart-quote folded** search: fold both artifact and quote through
+       ``_QUOTE_FOLDING`` (preserving character count — every entry in the
+       table maps to a single ASCII character), then run ``str.find`` on
+       the folded artifact. Offsets in the folded form coincide with
+       offsets in the original because folding is character-for-character.
+    3. **Whitespace-collapsed** search: collapse each whitespace run in the
+       artifact to a single space, build an offset-mapping array from
+       collapsed-form indices back to original-form indices, then locate
+       the (smart-quote-folded, whitespace-collapsed) quote inside the
+       (smart-quote-folded, whitespace-collapsed) artifact via regex. The
+       returned offsets point into the **original** artifact text, so
+       ``artifact_text[start_offset:end_offset]`` always slices something
+       meaningful.
+
+    Returns ``None`` only if the quote does not match under any of the
+    three strategies. ``_find_fabricated_quotes`` already enforces the
+    composite tolerance so a quote that passed validation always resolves.
+    """
+    if not isinstance(quote, str) or not quote:
+        return None
+
+    # Strategy 1: exact match in the raw artifact.
+    idx = artifact_text.find(quote)
+    if idx >= 0:
+        start_line, start_column = _line_col_from_offset(artifact_text, idx)
+        end_line, end_column = _line_col_from_offset(artifact_text, idx + len(quote))
+        return QuoteSpan(
+            quote=quote,
+            artifact_index=0,
+            start_offset=idx,
+            end_offset=idx + len(quote),
+            start_line=start_line,
+            start_column=start_column,
+            end_line=end_line,
+            end_column=end_column,
+            match_normalisation="exact",
+        )
+
+    # Strategy 2: smart-quote folded match. The folding table maps each
+    # character to exactly one character, so str.find offsets in the folded
+    # artifact correspond byte-for-byte to offsets in the original.
+    folded_artifact = artifact_text.translate(_QUOTE_FOLDING)
+    folded_quote = quote.translate(_QUOTE_FOLDING)
+    if folded_artifact != artifact_text or folded_quote != quote:
+        idx = folded_artifact.find(folded_quote)
+        if idx >= 0:
+            start_line, start_column = _line_col_from_offset(artifact_text, idx)
+            end_line, end_column = _line_col_from_offset(artifact_text, idx + len(folded_quote))
+            return QuoteSpan(
+                quote=quote,
+                artifact_index=0,
+                start_offset=idx,
+                end_offset=idx + len(folded_quote),
+                start_line=start_line,
+                start_column=start_column,
+                end_line=end_line,
+                end_column=end_column,
+                match_normalisation="smart_quotes",
+            )
+
+    # Strategy 3: whitespace-collapsed match. We build a parallel index map
+    # so collapsed-form offsets translate back to original-form offsets.
+    # The mapping uses the smart-quote-folded artifact so quotes that need
+    # both normalisations also resolve.
+    collapsed_chars: list[str] = []
+    collapsed_to_original: list[int] = []
+    in_ws_run = False
+    ws_run_start = -1
+    for i, ch in enumerate(folded_artifact):
+        if ch.isspace():
+            if not in_ws_run:
+                in_ws_run = True
+                ws_run_start = i
+                collapsed_chars.append(" ")
+                collapsed_to_original.append(i)
+        else:
+            in_ws_run = False
+            ws_run_start = -1
+            collapsed_chars.append(ch)
+            collapsed_to_original.append(i)
+    del ws_run_start  # only used as a sentinel above
+    collapsed_artifact = "".join(collapsed_chars)
+    collapsed_quote = re.sub(r"\s+", " ", folded_quote).strip()
+    if not collapsed_quote:
+        return None
+
+    # Locate within the collapsed string. We use str.find on the stripped
+    # collapsed_artifact-equivalent: leading/trailing whitespace in the
+    # collapsed form does not change the quote's offset since str.find
+    # already skips past it; but we must be careful — the collapsed quote
+    # is stripped, while the collapsed_artifact retains leading whitespace.
+    # str.find naturally skips leading whitespace runs because they don't
+    # match the stripped quote, so this is correct.
+    cidx = collapsed_artifact.find(collapsed_quote)
+    if cidx < 0:
+        return None
+    cend = cidx + len(collapsed_quote)
+    start_offset = collapsed_to_original[cidx]
+    # End offset is one past the last matched character in the original.
+    # The last collapsed-form index is cend - 1 → maps to one original char.
+    # If that char is part of a whitespace run, the run in the original may
+    # be longer; advance to one past the run-original character.
+    if cend - 1 < len(collapsed_to_original):
+        last_original = collapsed_to_original[cend - 1]
+        # Determine whether the last collapsed character is a whitespace
+        # run representative; if so, end_offset is the original index of
+        # the next non-whitespace character (i.e. one past the whitespace
+        # run). For a non-whitespace last character, end_offset is one
+        # past last_original.
+        if folded_artifact[last_original].isspace():
+            end_offset = last_original + 1
+            while end_offset < len(folded_artifact) and folded_artifact[end_offset].isspace():
+                end_offset += 1
+        else:
+            end_offset = last_original + 1
+    else:  # pragma: no cover — defensive; cidx<len means cend-1<len.
+        end_offset = len(artifact_text)
+
+    start_line, start_column = _line_col_from_offset(artifact_text, start_offset)
+    end_line, end_column = _line_col_from_offset(artifact_text, end_offset)
+    return QuoteSpan(
+        quote=quote,
+        artifact_index=0,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        start_line=start_line,
+        start_column=start_column,
+        end_line=end_line,
+        end_column=end_column,
+        match_normalisation="whitespace",
+    )
+
+
+def _resolve_quote_spans(quotes: list[str], artifact_text: str) -> list[QuoteSpan]:
+    """Return ``QuoteSpan`` for every quote in *quotes* (#179).
+
+    Precondition: every quote in *quotes* has already passed
+    ``_find_fabricated_quotes`` and is known to be a normalised substring of
+    *artifact_text*. Quotes that nevertheless fail to resolve (a guard
+    against future drift between the validator and the resolver) are
+    silently skipped — the caller still has ``supporting_evidence_quotes``
+    as the stable, span-free record. Skipping rather than raising preserves
+    the "spans are additive, quotes remain authoritative" invariant from
+    #179's compatibility design.
+    """
+    spans: list[QuoteSpan] = []
+    for quote in quotes:
+        span = _resolve_quote_span_in(artifact_text, quote)
+        if span is not None:
+            spans.append(span)
+    return spans
+
+
+# ---------------------------------------------------------------------------
 # Diagnostic constructors — #51 contract preserved byte-for-byte
 # ---------------------------------------------------------------------------
 
@@ -1086,6 +1370,12 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
 
     status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
     cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
+    # #179 — once the fabrication validator has confirmed every quote is a
+    # normalised substring of the artifact, resolve each to a span pointing
+    # back into the original artifact text. Spans are additive: the
+    # ``supporting_evidence_quotes`` field remains the stable compatibility
+    # surface, ``supporting_evidence_spans`` is the new offset-bearing field.
+    spans = _resolve_quote_spans(parsed.supporting_evidence_quotes, artifact_text)
     evidence = Evidence(
         kind="llm_judgment",
         data={
@@ -1094,6 +1384,7 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
             "judgment": parsed.judgment,
             "primary_reason": parsed.primary_reason,
             "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+            "supporting_evidence_spans": [span.to_dict() for span in spans],
             "suggested_action": parsed.suggested_action,
             "latency_ms": telemetry["latency_ms"],
             "tokens_in": telemetry["tokens_in"],
