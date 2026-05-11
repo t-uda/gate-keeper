@@ -2911,19 +2911,15 @@ class TestStrategySeam:
         assert callable(llm_backend._STRATEGIES["single"])
 
     def test_strategies_registry_omits_reserved_ids(self):
-        """Reserved-but-unimplemented ids must not appear in the live registry.
+        """All four known strategy ids now have concrete implementations.
 
-        ``consensus`` is now implemented (#184) and ``review`` is now
-        implemented (#185); both live in the registry. ``adaptive`` remains
-        reserved (unimplemented) and must not silently dispatch to a single-
-        call strategy in disguise.
+        ``consensus`` is implemented (#184), ``review`` is implemented (#185),
+        and ``adaptive`` is implemented (#186). All must appear in the registry.
         """
-        for reserved in ("adaptive",):
-            assert reserved not in llm_backend._STRATEGIES
-        # consensus IS implemented in #184.
+        # All four are now concrete.
         assert "consensus" in llm_backend._STRATEGIES
-        # review IS implemented in #185.
         assert "review" in llm_backend._STRATEGIES
+        assert "adaptive" in llm_backend._STRATEGIES
 
     def test_default_pass_evidence_carries_strategy_metadata(self, monkeypatch, tmp_path):
         """Issue #183 acceptance: success evidence advertises strategy fields."""
@@ -2972,32 +2968,18 @@ class TestStrategySeam:
         assert diag.evidence[0].data["llm_strategy"] == "single"
         assert diag.evidence[0].data["llm_call_count"] == 1
 
-    @pytest.mark.parametrize("strategy_id", ["adaptive"])
-    def test_reserved_strategy_returns_unavailable(self, monkeypatch, tmp_path, strategy_id):
-        """Still-reserved ids dispatch through ``strategy_not_implemented``.
+    def test_all_four_known_strategies_are_concrete(self):
+        """All four known strategy ids are now concrete implementations (#186).
 
-        ``consensus`` is now implemented (#184) and ``review`` is now
-        implemented (#185); both are removed from this parametrize.
-        ``adaptive`` remains unimplemented. Provider stubs are still wired
-        so a regression where the seam silently falls back to ``single``
-        would surface as a PASS verdict; the assertion catches that.
+        ``consensus`` (#184), ``review`` (#185), and ``adaptive`` (#186) are
+        all fully implemented. No known strategy dispatches through
+        ``_run_not_implemented_strategy`` any more.
         """
-        _patch_env(monkeypatch, self._ENV)
-        provider_called: dict[str, int] = {"n": 0}
-
-        def _spy(*_a, **_k):
-            provider_called["n"] += 1
-            return _stub_response(_VALID_PASS_JSON)
-
-        monkeypatch.setattr(llm_backend, "_call_openai", _spy)
-        rule = _semantic_rule_with_strategy(strategy_id)
-        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
-        assert diag.status is Status.UNAVAILABLE
-        assert diag.evidence[0].kind == "strategy_unavailable"
-        assert diag.evidence[0].data["requested_strategy"] == strategy_id
-        assert diag.evidence[0].data["failure_mode"] == "strategy_not_implemented"
-        # Critically: provider is NOT called for an unimplemented strategy.
-        assert provider_called["n"] == 0
+        for strategy_id in llm_backend.KNOWN_STRATEGIES:
+            assert strategy_id in llm_backend._STRATEGIES, (
+                f"Expected {strategy_id!r} to be a concrete strategy but it is absent "
+                "from _STRATEGIES. Update this test when new reserved ids are added."
+            )
 
     def test_unknown_strategy_returns_unavailable(self, monkeypatch, tmp_path):
         """Strings outside ``KNOWN_STRATEGIES`` fail closed with ``unknown_strategy``."""
@@ -3620,3 +3602,264 @@ class TestReviewStrategy:
         diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].kind == "provider_unconfigured"
+
+
+# ---------------------------------------------------------------------------
+# Adaptive strategy (#186): single→consensus escalation
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveStrategy:
+    """Issue #186 — adaptive escalation policy (single → consensus).
+
+    All tests use fake provider stubs; no live LLM calls are made.
+
+    Escalation triggers:
+    - Tier 1 evidence kind ``target_kind_mismatch`` → escalate to consensus.
+    - Any other Tier 1 outcome → commit directly (no escalation).
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    # JSON payload the model returns when it declares the rule does not apply
+    # to the artifact kind. Requires a rule with target_kind != UNSPECIFIED
+    # so that the single-strategy path emits target_kind_mismatch evidence.
+    _UNSUPPORTED_JSON = json.dumps(
+        {
+            "judgment": "unsupported",
+            "primary_reason": "The rule targets PR descriptions; this is a commit message.",
+            "supporting_evidence_quotes": [],
+            "suggested_action": None,
+        }
+    )
+
+    def _rule(self, *, with_target_kind: bool = False) -> "Rule":
+        from gate_keeper.models import TargetKind
+
+        return Rule(
+            id="stub-adaptive-rule",
+            title="Stub adaptive rule",
+            source=SourceLocation(path="rules.md", line=1),
+            text="The documentation should be clear and comprehensive",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params={"strategy": "adaptive"},
+            target_kind=TargetKind.PR_DESCRIPTION if with_target_kind else TargetKind.UNSPECIFIED,
+        )
+
+    def _make_spy(self, responses: list[str]) -> "tuple[list[tuple], object]":
+        """Return (calls_log, spy_fn) where spy_fn cycles through *responses*."""
+        calls: list[tuple] = []
+        idx = {"i": 0}
+
+        def _spy(api_key, system, user, model):
+            calls.append((api_key, model))
+            text = responses[idx["i"] % len(responses)]
+            idx["i"] += 1
+            return _stub_response(text, {"latency_ms": 50, "tokens_in": 100, "tokens_out": 20})
+
+        return calls, _spy
+
+    # ---- dispatcher routing ----
+
+    def test_adaptive_routes_to_adaptive_strategy(self, monkeypatch, tmp_path):
+        """``params.strategy=adaptive`` dispatches to ``_run_adaptive_strategy``."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].kind == "llm_adaptive"
+        assert diag.evidence[0].data["llm_strategy"] == "adaptive"
+
+    # ---- Tier 1 pass → commit, no escalation ----
+
+    def test_tier1_pass_commits_no_escalation(self, monkeypatch, tmp_path):
+        """Tier 1 pass → PASS at adaptive_tier=1, provider called exactly once."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+        assert data["llm_call_count"] == 1
+        # Only one provider call was made.
+        assert len(calls) == 1
+
+    # ---- Tier 1 fail → commit, no escalation ----
+
+    def test_tier1_fail_commits_no_escalation(self, monkeypatch, tmp_path):
+        """Tier 1 fail → FAIL at adaptive_tier=1, provider called exactly once."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_FAIL_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+        assert data["llm_call_count"] == 1
+        assert len(calls) == 1
+        assert diag.remediation is not None
+
+    # ---- Tier 1 target_kind_mismatch → escalate to consensus ----
+
+    def test_tier1_target_kind_mismatch_escalates(self, monkeypatch, tmp_path):
+        """Tier 1 target_kind_mismatch → escalate; 1+3=4 provider calls total."""
+        _patch_env(monkeypatch, self._ENV)
+        # First call: unsupported (tier 1). Next three: consensus panel (tier 2).
+        responses = [self._UNSUPPORTED_JSON] + [_VALID_PASS_JSON] * 3
+        calls, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        rule = self._rule(with_target_kind=True)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        # 4 total calls: 1 for tier-1 single + 3 for tier-2 consensus panel.
+        assert len(calls) == 4
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 2
+        assert data["adaptive_escalation_reason"] == "tier1_unsupported"
+        assert data["llm_call_count"] == 4
+
+    def test_tier1_target_kind_mismatch_escalation_verdict_from_consensus(self, monkeypatch, tmp_path):
+        """After escalation, the final verdict comes from the consensus result."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = [self._UNSUPPORTED_JSON] + [_VALID_FAIL_JSON] * 3
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        rule = self._rule(with_target_kind=True)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 2
+        assert data["adaptive_escalation_reason"] == "tier1_unsupported"
+
+    def test_tier1_unsupported_without_target_kind_does_not_escalate(self, monkeypatch, tmp_path):
+        """Stray unsupported from unspecified target_kind → UNAVAILABLE, no escalation.
+
+        The single strategy treats unsupported-without-target_kind as a
+        provider contract violation (UNAVAILABLE with provider_error evidence).
+        Adaptive must not escalate that — it is fail-closed, not ambiguous.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([self._UNSUPPORTED_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        # Rule without target_kind: unsupported verdict is treated as provider error.
+        rule = self._rule(with_target_kind=False)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        # Only one provider call — no escalation.
+        assert len(calls) == 1
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+
+    # ---- Tier 1 unavailable (parse error) → fail-closed, no escalation ----
+
+    def test_tier1_parse_failure_failclosed_no_escalation(self, monkeypatch, tmp_path):
+        """Tier 1 parse failure → UNAVAILABLE at adaptive_tier=1, no escalation."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy(["not valid json {{{{"])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        # Only one call — no escalation.
+        assert len(calls) == 1
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+
+    # ---- Tier 1 unavailable (fabricated quotes) → fail-closed, no escalation ----
+
+    def test_tier1_fabricated_quotes_failclosed_no_escalation(self, monkeypatch, tmp_path):
+        """Tier 1 quote fabrication → UNSUPPORTED(llm_quote_fabrication) at tier=1, no escalation."""
+        _patch_env(monkeypatch, self._ENV)
+        fabricated_payload = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "All good.",
+                "supporting_evidence_quotes": ["This phrase does not exist in the artifact at all."],
+                "suggested_action": None,
+            }
+        )
+        calls, spy = self._make_spy([fabricated_payload])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        # Quote fabrication returns UNSUPPORTED (not UNAVAILABLE), but adaptive
+        # must NOT escalate it — evidence kind is llm_quote_fabrication, not
+        # target_kind_mismatch.
+        assert diag.status is Status.UNSUPPORTED
+        # Only one call — no escalation.
+        assert len(calls) == 1
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+
+    # ---- Telemetry accumulation ----
+
+    def test_telemetry_tier1_call_count_is_1(self, monkeypatch, tmp_path):
+        """Tier 1 (no escalation): llm_call_count=1, one model entry."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_spy([_VALID_PASS_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert data["llm_call_count"] == 1
+        assert len(data["models"]) == 1
+
+    def test_telemetry_tier2_call_count_accumulates_across_tiers(self, monkeypatch, tmp_path):
+        """Tier 2 (escalated): llm_call_count=4 (1 single + 3 consensus)."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = [self._UNSUPPORTED_JSON] + [_VALID_PASS_JSON] * 3
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        rule = self._rule(with_target_kind=True)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert data["llm_call_count"] == 4
+        assert len(data["models"]) == 4
+
+    def test_telemetry_latency_accumulates_across_tiers(self, monkeypatch, tmp_path):
+        """latency_ms_total sums Tier 1 and Tier 2 latencies."""
+        _patch_env(monkeypatch, self._ENV)
+        idx = {"i": 0}
+        responses = [self._UNSUPPORTED_JSON] + [_VALID_PASS_JSON] * 3
+
+        def _spy(api_key, system, user, model):
+            text = responses[idx["i"] % len(responses)]
+            idx["i"] += 1
+            return _stub_response(text, {"latency_ms": 100, "tokens_in": 100, "tokens_out": 20})
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy)
+        rule = self._rule(with_target_kind=True)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        # 4 calls × 100 ms = 400 ms total.
+        assert data["latency_ms_total"] == 400
+
+    def test_tier1_evidence_preserved_in_tier2(self, monkeypatch, tmp_path):
+        """When Tier 2 fires, Tier 1 evidence is nested under ``tier1_evidence``."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = [self._UNSUPPORTED_JSON] + [_VALID_PASS_JSON] * 3
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        rule = self._rule(with_target_kind=True)
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert "tier1_evidence" in data
+        t1 = data["tier1_evidence"]
+        assert t1["judgment"] == "unsupported"
+
+    # ---- unconfigured ----
+
+    def test_unconfigured_returns_unavailable_adaptive(self, monkeypatch, tmp_path):
+        """Adaptive path respects the unconfigured check the same as single."""
+        monkeypatch.setattr(llm_backend, "_load_env_file", lambda *_a, **_k: {})
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "llm_adaptive"

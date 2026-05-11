@@ -26,25 +26,24 @@ from gate_keeper.targets import TargetSpec
 name = "llm-rubric"
 
 # ---------------------------------------------------------------------------
-# Strategy registry (#183)
+# Strategy registry (#183 / #184 / #185 / #186)
 #
 # Strategy ids surface in the rule IR via ``rule.params["strategy"]``. The
 # default ``single`` preserves the pre-#183 behaviour byte-for-byte (one
-# provider call, one parsed judgment, one diagnostic) and is the only
-# concrete strategy shipped in this slice. ``consensus`` / ``review`` /
-# ``adaptive`` are reserved ids — declared in :data:`KNOWN_STRATEGIES` so
-# the rule IR can validate the value, but invoking them returns
-# ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence so callers
-# discover the gap explicitly rather than silently falling back to
-# ``single``. Higher-effort strategies are opt-in and experimental until
-# benchmarked; the seam exists so they can be plugged in without
-# duplicating provider-call code, not as a green-light to enable them in
-# CI.
+# provider call, one parsed judgment, one diagnostic).  All four ids in
+# :data:`KNOWN_STRATEGIES` are now concrete implementations:
+#   - ``single``   — one provider call (reference impl, #183)
+#   - ``consensus`` — majority-vote panel (#184)
+#   - ``review``   — two-pass primary+reviewer (#185)
+#   - ``adaptive`` — cheap single with optional consensus escalation (#186)
+# Higher-effort strategies are opt-in and experimental until benchmarked;
+# the seam exists so they can be composed without duplicating provider-call
+# code, not as a green-light to enable them in CI.
 # ---------------------------------------------------------------------------
 
-#: All strategy ids the IR layer recognises. Only ``single`` has a concrete
-#: implementation in this slice; the others are seam placeholders that
-#: dispatch to ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence.
+#: All strategy ids the IR layer recognises.  All four now have concrete
+#: implementations: ``single`` (#183), ``consensus`` (#184), ``review``
+#: (#185), ``adaptive`` (#186).
 KNOWN_STRATEGIES: frozenset[str] = frozenset({"single", "consensus", "review", "adaptive"})
 
 #: Default strategy id when ``rule.params["strategy"]`` is unset. Preserves
@@ -73,9 +72,9 @@ class JudgmentRequest:
 class StrategyTelemetry:
     """Aggregated per-strategy telemetry recorded into evidence (#183).
 
-    The ``single`` strategy fills these from one provider call. Future
-    multi-call strategies (``consensus`` / ``review`` / ``adaptive``)
-    aggregate across calls — ``call_count`` rises above 1, ``models``
+    The ``single`` strategy fills these from one provider call. Multi-call
+    strategies (``consensus`` / ``review`` / ``adaptive``) aggregate across
+    calls — ``call_count`` rises above 1, ``models``
     can carry distinct entries, ``cost_estimate_usd_total`` and
     ``latency_ms_total`` sum across calls. ``cost_estimate_usd_total``
     is ``None`` iff any individual call had unknown pricing (preserving
@@ -1717,12 +1716,13 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
 def _run_not_implemented_strategy(request: JudgmentRequest, strategy_id: str) -> Diagnostic:
     """Reserved-id placeholder (#183). Records the gap fail-closed.
 
-    ``adaptive`` is declared in :data:`KNOWN_STRATEGIES` so the rule IR
-    layer can validate the value before reaching the backend, but its
-    concrete body is out of scope for this slice. Invoking it returns
-    ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence rather than
-    silently falling back to ``single`` — a rule that asks for ``adaptive``
-    should not receive a single-call verdict in disguise.
+    All four strategy ids in :data:`KNOWN_STRATEGIES` are now concrete
+    implementations (#183–#186); this function is retained as a fallback for
+    any future reserved ids added to :data:`KNOWN_STRATEGIES` before their
+    concrete body is implemented. Invoking it returns ``UNAVAILABLE`` with
+    ``strategy_not_implemented`` evidence rather than silently falling back to
+    ``single`` — a rule that asks for a not-yet-implemented strategy should not
+    receive a single-call verdict in disguise.
     """
     rubric_input = _build_rubric_input(request.rule, request.target)
     return _strategy_unavailable(
@@ -2607,14 +2607,180 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
     )
 
 
-#: Concrete strategy registry (#183 / #184 / #185). Maps strategy id to its
-#: :class:`Strategy` callable. ``single``, ``consensus``, and ``review`` are
-#: implemented; ``adaptive`` is reserved and dispatches through
-#: ``_run_not_implemented_strategy`` so the gap is observable.
+# ---------------------------------------------------------------------------
+# Adaptive strategy (#186)
+# ---------------------------------------------------------------------------
+
+
+def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
+    """Evaluate *request* with adaptive single→consensus escalation (#186).
+
+    Two-tier escalation policy: start cheap (Tier 1: single judge), then
+    escalate to consensus (Tier 2: panel of 3) only when the Tier 1 outcome
+    is ambiguous.  Escalation triggers (slice 1):
+
+    - ``target_kind_mismatch`` evidence from Tier 1 → escalate.  The model
+      produced an ``unsupported`` LLM verdict (rule premise does not apply to
+      this artifact kind); a consensus panel may resolve the ambiguity.
+    - ``llm_quote_fabrication`` / ``provider_error`` / ``provider_unconfigured``
+      / ``strategy_unavailable`` evidence → **fail-closed without escalation**.
+      Consensus cannot recover malformed provider responses; surfacing the
+      Tier 1 failure directly is the correct action.
+    - ``llm_judgment`` (``pass`` / ``fail``) from Tier 1 → commit to verdict,
+      no escalation.
+
+    Evidence shape (``llm_adaptive`` kind on any concrete verdict path):
+
+    .. code-block:: json
+
+        {
+            "llm_strategy": "adaptive",
+            "adaptive_tier": 1,
+            "adaptive_escalation_reason": null,
+            "llm_call_count": 1,
+            "models": ["gpt-4o-mini"],
+            "cost_estimate_usd_total": 0.0001,
+            "latency_ms_total": 120
+        }
+
+    When escalation fires (``adaptive_tier: 2``):
+
+    .. code-block:: json
+
+        {
+            "llm_strategy": "adaptive",
+            "adaptive_tier": 2,
+            "adaptive_escalation_reason": "tier1_unsupported",
+            "llm_call_count": 4,
+            "models": ["gpt-4o-mini", "gpt-4o-mini", "gpt-4o-mini", "gpt-4o-mini"],
+            "cost_estimate_usd_total": 0.0004,
+            "latency_ms_total": 480
+        }
+
+    The ``llm_adaptive`` evidence dict wraps the inner strategy's evidence
+    dict so downstream consumers can inspect both the Tier 1 result and the
+    final escalated result when they differ.
+    """
+    # --- Tier 1: run single strategy ---
+    tier1_diag = _run_single_strategy(request)
+
+    # Extract tier-1 telemetry from the first evidence record (all single-
+    # strategy success/failure paths populate evidence[0]).
+    tier1_ev_data: dict[str, Any] = tier1_diag.evidence[0].data if tier1_diag.evidence else {}
+
+    tier1_call_count: int = int(tier1_ev_data.get("llm_call_count", 1))
+    tier1_models: list[str] = list(tier1_ev_data.get("models", []))  # type: ignore[arg-type]
+    tier1_cost: float | None = tier1_ev_data.get("cost_estimate_usd_total")  # type: ignore[assignment]
+    tier1_latency: int = int(tier1_ev_data.get("latency_ms_total", 0))
+
+    # Determine whether Tier 1 warrants escalation.
+    #
+    # Escalation gate: trigger iff the first evidence record has kind
+    # ``target_kind_mismatch`` — the model produced an LLM-level
+    # ``"unsupported"`` verdict (rule premise does not apply to this artifact
+    # kind).  All other outcomes are either conclusive (PASS/FAIL) or
+    # fail-closed (UNAVAILABLE, llm_quote_fabrication) — consensus cannot
+    # recover those and surfacing the Tier 1 result directly is correct.
+    tier1_ev_kind = tier1_diag.evidence[0].kind if tier1_diag.evidence else ""
+    should_escalate = tier1_ev_kind == "target_kind_mismatch"
+
+    if not should_escalate:
+        # Tier 1 is conclusive (PASS/FAIL) or already fail-closed (UNAVAILABLE).
+        # Re-emit with adaptive wrapper fields merged into evidence.
+        adaptive_overlay: dict[str, Any] = {
+            "llm_strategy": "adaptive",
+            "adaptive_tier": 1,
+            "adaptive_escalation_reason": None,
+            "llm_call_count": tier1_call_count,
+            "models": tier1_models,
+            "cost_estimate_usd_total": tier1_cost,
+            "latency_ms_total": tier1_latency,
+        }
+        # Build updated evidence list: overlay the first record, keep the rest.
+        updated_ev = [
+            Evidence(
+                kind="llm_adaptive",
+                data={**tier1_ev_data, **adaptive_overlay, "tier1_evidence": tier1_ev_data},
+            )
+        ] + list(tier1_diag.evidence[1:])
+        return Diagnostic(
+            rule_id=tier1_diag.rule_id,
+            source=tier1_diag.source,
+            backend=tier1_diag.backend,
+            status=tier1_diag.status,
+            severity=tier1_diag.severity,
+            message=tier1_diag.message,
+            evidence=updated_ev,
+            remediation=tier1_diag.remediation,
+        )
+
+    # --- Tier 2: escalate to consensus ---
+    # Build a consensus request with panel_size=3 (the default) by injecting
+    # consensus_panel_size into a copy of the rule params.
+    rule = request.rule
+    escalation_params = dict(rule.params)
+    escalation_params["strategy"] = "consensus"
+    escalation_params.setdefault("consensus_panel_size", 3)
+
+    escalation_rule = dataclasses.replace(rule, params=escalation_params)
+    escalation_request = JudgmentRequest(
+        rule=escalation_rule,
+        target=request.target,
+        artifact_kind=request.artifact_kind,
+    )
+    tier2_diag = _run_consensus_strategy(escalation_request)
+
+    tier2_ev_data: dict[str, Any] = tier2_diag.evidence[0].data if tier2_diag.evidence else {}
+
+    tier2_call_count: int = int(tier2_ev_data.get("llm_call_count", 3))
+    tier2_models: list[str] = list(tier2_ev_data.get("models", []))  # type: ignore[arg-type]
+    tier2_cost: float | None = tier2_ev_data.get("cost_estimate_usd_total")  # type: ignore[assignment]
+    tier2_latency: int = int(tier2_ev_data.get("latency_ms_total", 0))
+
+    # Aggregate telemetry across both tiers.
+    total_call_count = tier1_call_count + tier2_call_count
+    total_models = tier1_models + tier2_models
+    if tier1_cost is None or tier2_cost is None:
+        total_cost: float | None = None
+    else:
+        total_cost = tier1_cost + tier2_cost
+    total_latency = tier1_latency + tier2_latency
+
+    adaptive_overlay_t2: dict[str, Any] = {
+        "llm_strategy": "adaptive",
+        "adaptive_tier": 2,
+        "adaptive_escalation_reason": "tier1_unsupported",
+        "llm_call_count": total_call_count,
+        "models": total_models,
+        "cost_estimate_usd_total": total_cost,
+        "latency_ms_total": total_latency,
+        "tier1_evidence": tier1_ev_data,
+    }
+    updated_ev_t2 = [
+        Evidence(
+            kind="llm_adaptive",
+            data={**tier2_ev_data, **adaptive_overlay_t2},
+        )
+    ] + list(tier2_diag.evidence[1:])
+    return Diagnostic(
+        rule_id=tier2_diag.rule_id,
+        source=tier2_diag.source,
+        backend=tier2_diag.backend,
+        status=tier2_diag.status,
+        severity=tier2_diag.severity,
+        message=tier2_diag.message,
+        evidence=updated_ev_t2,
+        remediation=tier2_diag.remediation,
+    )
+
+
+#: Concrete strategy registry (#183 / #184 / #185 / #186). Maps strategy id to its
+#: :class:`Strategy` callable. All four known strategies are now concrete.
 _STRATEGIES: dict[str, Strategy] = {
     "single": _run_single_strategy,
     "consensus": _run_consensus_strategy,
     "review": _run_review_strategy,
+    "adaptive": _run_adaptive_strategy,
 }
 
 
@@ -2648,13 +2814,12 @@ def check(
     ``TargetSpec`` values are unwrapped to the underlying path so callers
     can mix CLI surfaces freely.
 
-    Strategy dispatch (#183 / #184 / #185). The judgment strategy is
+    Strategy dispatch (#183 / #184 / #185 / #186). The judgment strategy is
     selected from ``rule.params["strategy"]`` and defaults to
     :data:`DEFAULT_STRATEGY` (``"single"``) for backward compatibility.
-    ``"single"``, ``"consensus"``, and ``"review"`` are concrete
-    implementations; ``"adaptive"`` is reserved and returns
-    ``UNAVAILABLE`` with ``strategy_unavailable`` evidence so callers
-    discover the gap explicitly. Unknown ids likewise fail closed.
+    All four known strategy ids — ``"single"``, ``"consensus"``,
+    ``"review"``, and ``"adaptive"`` — are now concrete implementations.
+    Unknown ids fail closed with ``strategy_unavailable`` evidence.
     Strategy-aggregated metadata (``llm_strategy``, ``llm_call_count``,
     ``models``, ``cost_estimate_usd_total``, ``latency_ms_total``) is
     appended to every successful evidence dict; the legacy single-call
