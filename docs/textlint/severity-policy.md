@@ -58,7 +58,7 @@ not a per-finding mapping (the adapter inherits `rule.severity` per the
 |---|---|---|
 | `error` | `Severity.ERROR` | Direct mapping. textlint `error`-level rules are fail-closed; the adapter produces `Status.FAIL` diagnostics for violations. |
 | `warning` | `Severity.WARNING` | Direct mapping. textlint `warning`-level rules are advisory in intent; the adapter may produce `Status.FAIL` or a lighter status for violations — see §3. |
-| `info` | `Severity.ADVISORY` | Direct mapping. Informational rules: textlint's `severity: info` findings map to `Severity.ADVISORY` (non-gating diagnostics). Implemented in `src/gate_keeper/adapters/textlint.py` (`textlint_severity_to_gate_keeper`, line 56), originally tracked in #94 (closed). |
+| `info` | `Severity.ADVISORY` | Direct mapping. Informational rules: textlint's `severity: info` findings map to `Severity.ADVISORY` rule-level metadata. **In the shipped adapter (§7), any finding regardless of message-level severity integer produces `Status.FAIL` and blocks the gate**; `Severity.ADVISORY` records rule intent only and does not suppress blocking. Per-severity status differentiation is a future axis (see §7). Implemented in `src/gate_keeper/adapters/textlint.py` (`textlint_severity_to_gate_keeper`, line 56), originally tracked in #94 (closed). |
 
 **Rationale for direct mapping**: textlint's three-level schema aligns with
 gate-keeper's three-level schema. A one-to-one mapping avoids information loss
