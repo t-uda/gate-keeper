@@ -523,6 +523,94 @@ RUBRIC_SYSTEM_PROMPT = (
     "Respond with ONLY a JSON object matching the required schema. No prose outside the JSON."
 )
 
+# Multi-target variant of :data:`RUBRIC_PROMPT_TEMPLATE` (#182).
+# Replaces the ``## Target reference\n\n{target}`` heading+slot pair with a
+# single ``{target_artifacts_block}`` slot so that :func:`_build_multi_target_prompt`
+# can inject the ``## Target artifacts (multi)`` block directly without a
+# post-format string-replace that would silently break on whitespace changes.
+_RUBRIC_PROMPT_MULTI_TEMPLATE = """\
+You are a rubric evaluator. Your sole task is to judge whether the target \
+artifact satisfies the given rule.
+
+## Rule
+
+{rule_text}
+
+{target_artifacts_block}
+{target_kind_block}
+## Instructions
+
+1. Read the rule carefully. It describes a quality requirement.
+2. Read the entire target text — not only the opening lines. The strongest
+   evidence for or against the rule is often in the middle or later
+   sections (rationale paragraphs, body content, trailing details).
+3. Judge whether the target (identified by the reference above) satisfies it.
+4. If you cannot read the target's content directly, judge from the reference alone.
+{unsupported_instruction}\
+5. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
+
+## Required response schema
+
+{{
+  "judgment": "pass" | "fail" | "unsupported",
+  "primary_reason": "<one sentence>",
+  "supporting_evidence_quotes": ["<near-verbatim substring of the target>", ...],
+  "suggested_action": "<concrete step to fix>" | null
+}}
+
+Constraints:
+- `judgment` must be exactly `"pass"`, `"fail"`, or `"unsupported"`.
+- `"unsupported"` is reserved for the target-kind-mismatch case and is
+  ONLY valid when an `## Artifact kind` block is present above. If no
+  `## Artifact kind` block is rendered, return `"pass"` or `"fail"` only.
+- `primary_reason` must be a single sentence (no newlines).
+- `supporting_evidence_quotes` must contain **at least one entry** for
+  **every pass or fail verdict**. An empty list is invalid for `"pass"`
+  and `"fail"`. For an `"unsupported"` verdict the list may be empty:
+  when the rule does not address the artifact kind, no artifact
+  substring exists that could ground a verdict.
+- Each quote must be a **near-verbatim substring of the target text** —
+  copy the words from the artifact. Do **not** paraphrase
+  `primary_reason`, do **not** invent meta-statements about the artifact,
+  and do **not** quote the rule text. Minor whitespace or capitalisation
+  normalisation is acceptable; the test is whether a reader could locate
+  the quoted phrase in the artifact by ordinary search.
+- At least one quote must be **representative of the strongest evidence**
+  for or against the rule's predicate. When the artifact is long, do not
+  cite only the opening line or the subject; cite the body / rationale /
+  trailing content where the rule's predicate is most clearly satisfied
+  or violated.
+- The grounding requirement does not raise the bar for passing — if the
+  artifact plainly satisfies the rule, return `"pass"` and quote the
+  passage that demonstrates it.
+- `suggested_action` must be a non-empty string when `judgment` is `"fail"`;
+  must be `null` when `judgment` is `"pass"` or `"unsupported"`.
+
+## Examples of valid responses
+
+A passing verdict, grounded in the artifact:
+
+{{
+  "judgment": "pass",
+  "primary_reason": "The body explains the motivation by naming the failure mode and the reproducer.",
+  "supporting_evidence_quotes": [
+    "Discovered by the umbrella #164 dogfood orchestrator: 4 of 10 validate runs in tick 1 crashed"
+  ],
+  "suggested_action": null
+}}
+
+A failing verdict, grounded in the artifact:
+
+{{
+  "judgment": "fail",
+  "primary_reason": "The commit body restates the subject without explaining motivation.",
+  "supporting_evidence_quotes": [
+    "This commit fixes the bug. See the diff for details. Tests updated accordingly."
+  ],
+  "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
+}}{unsupported_example_block}\
+"""
+
 
 # ---------------------------------------------------------------------------
 # dotenv loader
@@ -781,18 +869,26 @@ def _parse_multi_targets(rule: Rule) -> list[MultiTargetSpec]:
         path_raw = entry.get("path")
         if path_raw is not None and not isinstance(path_raw, str):
             raise ValueError(f"{ctx}.path: expected str or null, got {type(path_raw).__name__}")
+        if path_raw is not None:
+            _p = Path(path_raw)
+            if ".." in _p.parts:
+                raise ValueError(f"{ctx}.path: path traversal ('..') is not allowed ({path_raw!r})")
         specs.append(MultiTargetSpec(id=spec_id, kind=kind, path=path_raw))
     return specs
 
 
-def _load_multi_target_texts(specs: list[MultiTargetSpec]) -> dict[str, str]:
-    """Return ``{id: text}`` for *specs*, reading each entry's ``path`` (#182).
+def _load_multi_target_texts(
+    specs: list[MultiTargetSpec],
+) -> tuple[dict[str, str], frozenset[str]]:
+    """Return ``({id: text}, placeholder_ids)`` for *specs* (#182).
 
-    For an entry whose ``path`` is ``None`` or does not resolve to a
-    readable file, the text falls back to ``"(no path declared)"`` or a
-    similar placeholder so the prompt rendering still succeeds — the
-    fabrication validator will then reject any quote that claims to come
-    from such an artifact, which is the correct fail-closed outcome.
+    ``texts`` maps every spec id to a display string — real file content
+    when the path resolves, or a human-readable placeholder otherwise.
+    ``placeholder_ids`` is the set of ids whose text is a placeholder
+    (path absent or unreadable).  Callers that need a grounding corpus
+    must **exclude** placeholder ids so the fabrication validator can
+    treat those artifacts as un-quotable (the correct fail-closed
+    outcome).
 
     Slice-1 scope intentionally keeps this simple: no caching, no
     base-directory enforcement (deferred to the dep-gates manifest
@@ -800,9 +896,11 @@ def _load_multi_target_texts(specs: list[MultiTargetSpec]) -> dict[str, str]:
     fallback beyond UTF-8.
     """
     texts: dict[str, str] = {}
+    placeholder_ids: set[str] = set()
     for spec in specs:
         if spec.path is None:
             texts[spec.id] = "(no path declared)"
+            placeholder_ids.add(spec.id)
             continue
         try:
             path_obj = Path(spec.path)
@@ -812,7 +910,8 @@ def _load_multi_target_texts(specs: list[MultiTargetSpec]) -> dict[str, str]:
         except (OSError, UnicodeDecodeError):
             pass
         texts[spec.id] = f"(unable to read artifact at {spec.path})"
-    return texts
+        placeholder_ids.add(spec.id)
+    return texts, frozenset(placeholder_ids)
 
 
 def _render_multi_target_block(specs: list[MultiTargetSpec], texts: dict[str, str]) -> str:
@@ -868,30 +967,20 @@ def _build_multi_target_prompt(
     ``rule.target_kind`` still controls those for multi-target rules
     (the per-artifact ``kind`` labels do not duplicate that mechanism).
     """
-    texts = _load_multi_target_texts(specs)
+    texts, _placeholder_ids = _load_multi_target_texts(specs)
     multi_block = _render_multi_target_block(specs, texts)
-    # The legacy template renders ``## Target reference\n\n{target}\n``;
-    # for multi-target we substitute the whole block, so we hand it a
-    # ``target`` string that *is* the multi-target block and we drop the
-    # ``## Target reference`` heading by inlining the new block directly.
-    user = RUBRIC_PROMPT_TEMPLATE.format(
+    # Use the dedicated multi-target template which has a ``{target_artifacts_block}``
+    # slot instead of ``## Target reference\n\n{target}``.  This avoids the
+    # brittle post-format string-replace that the single-target template would
+    # require (any whitespace change to RUBRIC_PROMPT_TEMPLATE would silently
+    # reintroduce the duplicate heading).
+    user = _RUBRIC_PROMPT_MULTI_TEMPLATE.format(
         rule_text=rule.text,
-        target=multi_block,
+        target_artifacts_block=multi_block,
         target_kind_block=_render_target_kind_block(rule.target_kind)
         + _render_multi_target_instruction_block(specs),
         unsupported_instruction=_render_unsupported_instruction(rule.target_kind),
         unsupported_example_block=_render_unsupported_example_block(rule.target_kind),
-    )
-    # The user template hard-codes ``## Target reference`` as the section
-    # heading.  For multi-target rules the inserted block already carries
-    # its own ``## Target artifacts (multi)`` heading, so we patch the
-    # rendered string to drop the redundant heading.  Doing this as a
-    # post-pass keeps the template constant unchanged and the patch
-    # localised — slice 2 may template-ise this once a second rendering
-    # branch lands.
-    user = user.replace(
-        "## Target reference\n\n## Target artifacts (multi)",
-        "## Target artifacts (multi)",
     )
     return RUBRIC_SYSTEM_PROMPT, user
 
@@ -1434,7 +1523,12 @@ def _resolve_artifact_texts_for_rule(
     """
     multi_targets = _parse_multi_targets(rule)
     if multi_targets:
-        return _load_multi_target_texts(multi_targets)
+        texts, placeholder_ids = _load_multi_target_texts(multi_targets)
+        # Exclude placeholder entries from the grounding corpus so the
+        # fabrication validator cannot accept a quote drawn from placeholder
+        # text like "(no path declared)" as satisfying the substring check.
+        # Artifacts whose paths could not be read are intentionally un-quotable.
+        return {sid: text for sid, text in texts.items() if sid not in placeholder_ids}
     return {_SINGLE_TARGET_SENTINEL_ID: _resolve_artifact_text(target, artifact_kind)}
 
 

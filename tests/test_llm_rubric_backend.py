@@ -4020,16 +4020,27 @@ class TestMultiTargetPromptRendering:
         assert "unique alpha marker phrase" in user
         assert "unique beta marker phrase" in user
 
-    def test_multi_target_missing_file_falls_back_to_placeholder(self):
+    def test_multi_target_missing_file_falls_back_to_placeholder(self, tmp_path):
+        # Use a path that does not exist so the loader falls back to the
+        # "(unable to read artifact)" placeholder.  We use a relative path
+        # inside tmp_path (rather than an absolute path to /nonexistent/...)
+        # to keep the test independent of the filesystem layout.
+        missing = str(tmp_path / "does_not_exist.md")
         rule = _multi_target_rule(
             [
-                {"id": "ghost", "kind": "documentation", "path": "/nonexistent/path.md"},
+                {"id": "ghost", "kind": "documentation", "path": missing},
             ]
         )
         _system, user = llm_backend._build_prompt(rule, "ignored")
         assert "## Target artifacts (multi)" in user
         assert "### Target ghost (kind: documentation)" in user
         assert "unable to read artifact" in user
+
+    def test_traversal_path_raises(self):
+        """``..`` components in a target path are rejected at parse time."""
+        rule = _multi_target_rule([{"id": "escape", "kind": "documentation", "path": "../secret.md"}])
+        with pytest.raises(ValueError, match=r"path traversal"):
+            llm_backend._parse_multi_targets(rule)
 
     def test_prompt_version_constant_is_v5(self):
         assert llm_backend.PROMPT_VERSION == "v5"
