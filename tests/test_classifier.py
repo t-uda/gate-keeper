@@ -661,3 +661,85 @@ class TestTextlintSuggestion:
         assert restored.suggested_backend == original.suggested_backend
         assert restored.suggestion_confidence == original.suggestion_confidence
         assert restored.suggestion_rationale == original.suggestion_rationale
+
+    # --- IR validation rejects out-of-range / non-finite confidence -----
+    # Codex review feedback on #227: ``suggestion_confidence`` must be a
+    # finite float in [0.0, 1.0]; hand-authored or transformed IR must not
+    # be able to smuggle invalid values past the loader.
+
+    @staticmethod
+    def _base_ir() -> dict[str, object]:
+        # Minimal valid Rule IR dict that tests can mutate.
+        return {
+            "id": "rule-test-L1",
+            "title": "t",
+            "source": {"path": "test.md", "line": 1},
+            "text": "x",
+            "kind": "semantic_rubric",
+            "severity": "warning",
+            "backend_hint": "llm-rubric",
+            "confidence": "low",
+            "params": {},
+        }
+
+    def test_suggestion_confidence_below_zero_rejected(self):
+        import pytest
+
+        data = self._base_ir()
+        data["suggestion_confidence"] = -0.1
+        with pytest.raises(ValueError, match=r"suggestion_confidence"):
+            Rule.from_dict(data)
+
+    def test_suggestion_confidence_above_one_rejected(self):
+        import pytest
+
+        data = self._base_ir()
+        data["suggestion_confidence"] = 1.7
+        with pytest.raises(ValueError, match=r"suggestion_confidence"):
+            Rule.from_dict(data)
+
+    def test_suggestion_confidence_nan_rejected(self):
+        import pytest
+
+        data = self._base_ir()
+        data["suggestion_confidence"] = float("nan")
+        with pytest.raises(ValueError, match=r"finite"):
+            Rule.from_dict(data)
+
+    def test_suggestion_confidence_inf_rejected(self):
+        import pytest
+
+        data = self._base_ir()
+        data["suggestion_confidence"] = float("inf")
+        with pytest.raises(ValueError, match=r"finite"):
+            Rule.from_dict(data)
+
+    def test_suggestion_confidence_boundary_zero_accepted(self):
+        data = self._base_ir()
+        data["suggestion_confidence"] = 0.0
+        rule = Rule.from_dict(data)
+        assert rule.suggestion_confidence == 0.0
+
+    def test_suggestion_confidence_boundary_one_accepted(self):
+        data = self._base_ir()
+        data["suggestion_confidence"] = 1.0
+        rule = Rule.from_dict(data)
+        assert rule.suggestion_confidence == 1.0
+
+    def test_suggestion_confidence_non_numeric_rejected(self):
+        import pytest
+
+        data = self._base_ir()
+        data["suggestion_confidence"] = "high"
+        with pytest.raises(ValueError, match=r"expected float"):
+            Rule.from_dict(data)
+
+    def test_suggestion_confidence_bool_rejected(self):
+        import pytest
+
+        data = self._base_ir()
+        # ``True`` is technically an ``int`` in Python, so the loader must
+        # reject it explicitly to avoid silently coercing to ``1.0``.
+        data["suggestion_confidence"] = True
+        with pytest.raises(ValueError, match=r"expected float"):
+            Rule.from_dict(data)

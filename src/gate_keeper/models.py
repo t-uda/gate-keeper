@@ -8,6 +8,7 @@ documented in docs/rule-ir.md and exemplified by tests/fixtures/ir/.
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -208,6 +209,10 @@ class Rule:
             target_kind = _coerce_enum(TargetKind, target_kind_raw, "Rule.target_kind")
 
         # ``suggestion_confidence`` is an optional float in [0.0, 1.0].
+        # Reject non-finite values (NaN/Inf) and out-of-range numbers up
+        # front so hand-authored or transformed IR cannot smuggle
+        # unnormalised confidence scores past the loader (codex review
+        # feedback on #227).
         suggestion_confidence_raw = data.get("suggestion_confidence")
         if suggestion_confidence_raw is None:
             suggestion_confidence: float | None = None
@@ -220,6 +225,16 @@ class Rule:
                     f"got {type(suggestion_confidence_raw).__name__}"
                 )
             suggestion_confidence = float(suggestion_confidence_raw)
+            if not math.isfinite(suggestion_confidence):
+                raise ValueError(
+                    f"Rule.suggestion_confidence: expected finite float in [0.0, 1.0], "
+                    f"got {suggestion_confidence_raw!r}"
+                )
+            if not (0.0 <= suggestion_confidence <= 1.0):
+                raise ValueError(
+                    f"Rule.suggestion_confidence: expected float in [0.0, 1.0], "
+                    f"got {suggestion_confidence_raw!r}"
+                )
 
         return cls(
             id=_expect_str(data["id"], "Rule.id"),
