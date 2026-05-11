@@ -63,6 +63,7 @@ def test_rule_kind_members():
         "github_threads_resolved",
         "github_non_author_approval",
         "github_changed_files_absent",
+        "changed_file_policy",
         "semantic_rubric",
         "external_check",
     }

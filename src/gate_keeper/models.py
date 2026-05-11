@@ -56,6 +56,7 @@ class RuleKind(str, enum.Enum):
     GITHUB_THREADS_RESOLVED = "github_threads_resolved"
     GITHUB_NON_AUTHOR_APPROVAL = "github_non_author_approval"
     GITHUB_CHANGED_FILES_ABSENT = "github_changed_files_absent"
+    CHANGED_FILE_POLICY = "changed_file_policy"
     SEMANTIC_RUBRIC = "semantic_rubric"
     EXTERNAL_CHECK = "external_check"
 

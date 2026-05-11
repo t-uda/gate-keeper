@@ -173,6 +173,91 @@ rules.md:3: error: [github/fail] no-workbook-outputs: PR owner/repo#43: 1 of 9 c
 
 ---
 
+## 4b. Manifest-backed changed-file policy — `github / changed_file_policy`
+
+A **deterministic changed-file policy check, not a semantic content
+review**. Evaluates changed files from a GitHub PR *or* a local git working
+tree against a repository-owned YAML manifest (issue #230). Useful for
+real-data intake repositories such as `uda-lab/spread-applicant-ai` that
+must prevent rights-constrained or private artifacts from being committed
+to public Git history.
+
+**Rule document (compile produces the IR; params are author-supplied):**
+
+```markdown
+## Path policy
+
+- PRs must not change paths forbidden by the project policy manifest.
+```
+
+**Compiled rule (JSON — params hand-authored against
+`policy-manifests/path-rules.yaml`):**
+
+```json
+{
+  "rules": [{
+    "id": "manifest-path-policy",
+    "text": "PRs must not change paths forbidden by the project policy manifest.",
+    "kind": "changed_file_policy",
+    "severity": "error",
+    "backend_hint": "github",
+    "params": {
+      "manifest_path": "policy-manifests/path-rules.yaml",
+      "changed_files_source": "github_pr"
+    }
+  }]
+}
+```
+
+**Sample run (PR target — fail on a forbidden output):**
+
+```
+$ gate-keeper validate rules.md --target owner/repo#42
+rules.md:3: error: [github/fail] manifest-path-policy: changed_file_policy: 1 of 9 changed file(s) violate manifest policy (policy-manifests/path-rules.yaml): ['outputs/foo.xlsx'].
+  remediation: Remove or move the following files before committing:
+    'outputs/foo.xlsx': matched forbidden pattern 'outputs/**/*.xlsx' (source: docs/policy.md#3)
+```
+
+**Sample run (local preflight — staged file is forbidden):**
+
+```json
+{
+  "params": {
+    "manifest_path": "policy-manifests/path-rules.yaml",
+    "changed_files_source": "local_git",
+    "local_git_mode": "staged_and_unstaged"
+  }
+}
+```
+
+```
+$ gate-keeper validate rules.md --target .
+rules.md:3: error: [github/fail] manifest-path-policy: changed_file_policy: 1 of 3 changed file(s) violate manifest policy (...): ['source/official/call.pdf'].
+```
+
+**Notes:**
+
+- `changed_files_source` selects `"github_pr"` (uses the existing PR
+  file-list machinery, identical to `github_changed_files_absent`) or
+  `"local_git"` (collects changed paths via `git diff` /
+  `git ls-files --others`).
+- `local_git_mode` (only used with `local_git`) chooses
+  `staged | unstaged | staged_and_unstaged | untracked | all`. Default
+  is `staged_and_unstaged`.
+- Manifest schema is strict: unknown top-level keys, unknown entry kinds,
+  and unknown entry fields all fail closed with `manifest_error`
+  evidence. Arbitrary YAML tags are not evaluated (`yaml.safe_load`).
+- The diagnostic identifies the exact manifest entry per finding
+  (`matched_pattern`, `manifest_source`, `stop_condition`).
+- This rule does **not** classify file contents, decide
+  rights/publication policy, or inspect file bodies. It enforces only
+  the path-level policy that the manifest already states.
+
+See [docs/rule-ir.md](rule-ir.md#changed_file_policy--manifest-backed-changed-file-policy)
+for the full schema and failure modes.
+
+---
+
 ## 5. Semantic rubric — `llm-rubric / semantic_rubric`
 
 **Rule document:**

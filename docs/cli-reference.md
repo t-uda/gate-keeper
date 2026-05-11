@@ -342,6 +342,15 @@ Each line: `path:line: severity: [backend/status] rule_id: message [evidence]`.
   generated workbook outputs"*) to this kind; ambiguous filesystem rules
   remain on the filesystem or semantic backends. See
   [docs/rule-ir.md](rule-ir.md) for the full params and evidence shape.
+- The `changed_file_policy` rule kind (issue #230) is a **deterministic
+  changed-file policy check, not a semantic content review**. It evaluates
+  changed files — from a GitHub PR or from a local git working tree —
+  against a repository-owned YAML manifest of forbidden path globs and
+  exception entries. File contents are never inspected or uploaded.
+  Required params: `manifest_path`, `changed_files_source`
+  (`"github_pr"` or `"local_git"`); for local mode, optional
+  `local_git_mode` and `repo_root`. See [docs/rule-ir.md](rule-ir.md) for
+  the full manifest schema and failure modes.
 
 ### Multi-target evaluation
 
