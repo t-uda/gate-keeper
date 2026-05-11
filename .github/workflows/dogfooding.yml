@@ -96,16 +96,20 @@ jobs:
         id: validate
         continue-on-error: true
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set +x
           # `--format json` so the post step can transform reliably; failures
           # are tolerated by continue-on-error and surface as a "no advisory"
           # log in the post step.
-          # `--target $PR_URL` matches the PR URL contract; if backend can't
-          # fetch the PR it falls back to deterministic-no-evidence path.
+          # Pass the actual PR body text as --target so the llm-rubric backend
+          # evaluates real prose rather than a URL literal (fixes #189).
+          # github.event.pull_request.body is null for body-less PRs; default
+          # to a single space to keep CLI arg parsing consistent. The rule will
+          # then produce an "insufficient content" evidence result naturally.
+          BODY="${PR_BODY:- }"
           uv run gate-keeper validate docs/dogfooding-rules.md \
-            --target "$PR_URL" \
+            --target "$BODY" \
             --artifact-kind pr_description \
             --backend llm-rubric \
             --format json \
