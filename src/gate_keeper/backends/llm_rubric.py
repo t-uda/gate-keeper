@@ -151,6 +151,22 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   downstream consumers can distinguish "rendered without a multi-target
 #   block because the rule did not declare one" from "rendered with the
 #   pre-v5 template that had no multi-target branch at all".
+# - v6 (#225, slice 2): harden multi-target quote attribution.  This bumps the
+#   prompt version because the multi-target instruction block changed in a
+#   model-facing way: the ``{target_id, quote}`` object form is now declared
+#   **required** for multi-target rules (slice 1 / v5 said it was preferred
+#   but tolerated plain-string entries).  Backend enforcement is also
+#   tightened in lockstep: a quote whose ``target_id=A`` must be a substring
+#   of artifact ``A``'s text specifically (not the concatenated prompt);
+#   unknown ``target_id`` values fail closed; missing ``target_id`` on a
+#   multi-target rule fails closed; placeholder text from unreadable artifacts
+#   cannot be quoted (the placeholder id is excluded from the corpus).  The
+#   version bump matters for reproducibility because v5 and v6 evidence are
+#   **not** interchangeable: a v5-era multi-target evidence record that shows
+#   ``supporting_evidence_quote_target_ids=["first_id", ...]`` may reflect the
+#   lenient slice-1 default attribution, whereas a v6 record only ever shows
+#   ids the model itself emitted (or ``null`` after the strict fabrication
+#   guard).  Baseline comparison runs must therefore filter on prompt_version.
 #
 # The ``PROMPT_VERSION`` constant is **not** bumped for #191. The rendered
 # template body (schema, instructions, constraints, examples) is unchanged;
@@ -160,7 +176,7 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 # file *path* (and the substring grounding check follows the same
 # substitution). Reproducibility records keyed on ``prompt_version``
 # continue to mean the same thing.
-PROMPT_VERSION = "v5"
+PROMPT_VERSION = "v6"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -935,9 +951,11 @@ _MULTI_TARGET_INSTRUCTION_BLOCK = """\
 the ``## Target artifacts (multi)`` block above). When you cite supporting \
 evidence, each entry of ``supporting_evidence_quotes`` MUST be an object of \
 the form ``{"target_id": "<id>", "quote": "<near-verbatim substring>"}`` \
-where ``<id>`` matches one of the labelled artifacts above. Plain-string \
-entries are tolerated for backward compatibility but you SHOULD prefer the \
-object form so quote attribution is unambiguous.
+where ``<id>`` matches one of the labelled artifact ids above. The \
+``target_id`` field is **required**: plain-string entries without a \
+``target_id`` are not accepted for multi-target rules. The ``quote`` value \
+must be a near-verbatim substring drawn from the artifact identified by \
+``target_id``; it must not be drawn from a different artifact.
 """
 
 
@@ -1483,17 +1501,16 @@ def _build_artifact_text_for_grounding(
 ) -> str:
     """Return the flat artifact text used for substring grounding (#182).
 
-    For a multi-target rule, concatenates every declared artifact's text
-    (separated by newlines so adjacent artifacts do not run together and
-    create accidental substring matches across artifact boundaries) and
-    returns the result.  A quote drawn from any declared artifact then
-    satisfies the substring check.  This is the slice-1 contract: per-
-    artifact substring attribution (rejecting a quote that claims
-    ``target_id=A`` but only matches artifact ``B``) is deferred to
-    slice 2.
-
     For a single-target rule, returns the legacy
     :func:`_resolve_artifact_text` output byte-for-byte.
+
+    For a multi-target rule, concatenates every declared non-placeholder
+    artifact's text (separated by newlines so adjacent artifacts do not run
+    together and create accidental substring matches across artifact
+    boundaries).  This flat-text form is retained for span resolution and
+    for the ``consensus`` strategy; the primary ``single`` strategy uses
+    :func:`_find_per_target_fabricated_quotes` for strict per-target
+    grounding (slice 2, #225).
     """
     texts_by_id = _resolve_artifact_texts_for_rule(rule, target, artifact_kind)
     if len(texts_by_id) == 1 and _SINGLE_TARGET_SENTINEL_ID in texts_by_id:
@@ -1548,7 +1565,7 @@ def _resolve_quote_target_ids(
 ) -> list[str] | None:
     """Return per-quote target ids for a multi-target rule, or ``None`` (#182).
 
-    Slice-1 contract:
+    Slice-1 lenient contract (preserved for backward compat):
 
     - When the rule does not declare ``params.targets`` (or the list is
       empty), returns ``None`` so the legacy v4 evidence shape is
@@ -1560,9 +1577,13 @@ def _resolve_quote_target_ids(
       used the object form ``{"target_id": "...", "quote": "..."}``) or
       the first declared target's id as the default attribution.  Unknown
       ids (a ``target_id`` not present in ``params.targets``) are also
-      remapped to the first declared target's id — the slice-1 backend
-      does not fail-close on this, but surfaces the attribution so a
-      downstream consumer can inspect the evidence.
+      remapped to the first declared target's id.
+
+    .. note::
+        This is the **lenient** (slice-1) resolver.  For the strict
+        grounding check introduced in slice 2 (#225), use
+        :func:`_resolve_quote_target_ids_strict` which fails closed on
+        unknown or missing ``target_id`` values.
     """
     specs = _parse_multi_targets(rule)
     if not specs:
@@ -1581,6 +1602,56 @@ def _resolve_quote_target_ids(
     return resolved
 
 
+#: Sentinel ``target_id`` used by :func:`_resolve_quote_target_ids_strict`
+#: when the model omitted ``target_id`` or supplied an unknown value on a
+#: multi-target rule.  The sentinel will never appear in ``texts_by_id``
+#: (which is keyed by the rule author's declared ids), so any quote mapped
+#: to it is guaranteed to be rejected as fabricated by
+#: :func:`_find_per_target_fabricated_quotes`.
+_UNKNOWN_TARGET_ID = "__unknown_target__"
+
+
+def _resolve_quote_target_ids_strict(
+    rule: Rule,
+    parsed: "LlmJudgment",
+) -> list[str] | None:
+    """Return per-quote target ids for a multi-target rule with strict validation (#225).
+
+    Slice-2 strict contract:
+
+    - When the rule does not declare ``params.targets`` (or the list is
+      empty), returns ``None`` — identical to the lenient function.
+    - When the rule declares ``params.targets``, returns a list whose
+      length equals ``len(parsed.supporting_evidence_quotes)``.
+
+    Unlike the lenient resolver, unknown or missing ``target_id`` values are
+    **not** remapped to the first declared target.  Instead:
+
+    1. **Unknown ``target_id``** — a value not in ``params.targets`` is
+       replaced by :data:`_UNKNOWN_TARGET_ID`, which is guaranteed to miss
+       the corpus lookup in :func:`_find_per_target_fabricated_quotes`.
+    2. **Missing ``target_id``** — model emitted plain-string form or
+       object form without ``target_id`` — also mapped to
+       :data:`_UNKNOWN_TARGET_ID`, so the quote fails closed rather than
+       defaulting to the first target.
+    """
+    specs = _parse_multi_targets(rule)
+    if not specs:
+        return None
+    known_ids = {spec.id for spec in specs}
+    model_ids = parsed.supporting_evidence_quote_target_ids
+    resolved: list[str] = []
+    for i in range(len(parsed.supporting_evidence_quotes)):
+        candidate: str | None = None
+        if model_ids is not None and i < len(model_ids):
+            candidate = model_ids[i]
+        if candidate is None or candidate not in known_ids:
+            resolved.append(_UNKNOWN_TARGET_ID)
+        else:
+            resolved.append(candidate)
+    return resolved
+
+
 def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
     """Return quotes from *quotes* that are NOT substrings of *artifact_text*.
 
@@ -1596,6 +1667,51 @@ def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
             fabricated.append(quote if isinstance(quote, str) else "")
             continue
         if _normalise_for_substring(quote) not in normalised_artifact:
+            fabricated.append(quote)
+    return fabricated
+
+
+def _find_per_target_fabricated_quotes(
+    quotes: list[str],
+    resolved_target_ids: list[str],
+    texts_by_id: dict[str, str],
+) -> list[str]:
+    """Return quotes that fail the strict per-target grounding check (#225).
+
+    For each quote, the corresponding ``resolved_target_ids[i]`` entry
+    determines which artifact's text is the grounding corpus.
+
+    A quote is considered fabricated (and returned in the result list) when
+    any of the following hold:
+
+    - The quote is empty / not a string (degenerate case).
+    - The resolved ``target_id`` is not present as a key in ``texts_by_id``
+      (i.e., the target was unreadable / a placeholder — excluded from the
+      corpus by :func:`_resolve_artifact_texts_for_rule`, or the sentinel
+      :data:`_UNKNOWN_TARGET_ID` was assigned because the model omitted or
+      supplied an unknown ``target_id``).
+    - The quote is not a normalised substring of the specific artifact
+      identified by ``target_id``.
+
+    The third condition enforces the slice-2 contract: a quote claiming
+    ``target_id=A`` must be found **within artifact A**, not merely anywhere
+    in the concatenated multi-artifact prompt.  This closes the gap left by
+    the slice-1 implementation which accepted cross-artifact substring matches.
+
+    *quotes* and *resolved_target_ids* must have the same length (both
+    derived from the same ``LlmJudgment.supporting_evidence_quotes``).
+    """
+    fabricated: list[str] = []
+    for quote, tid in zip(quotes, resolved_target_ids):
+        if not isinstance(quote, str) or not quote.strip():
+            fabricated.append(quote if isinstance(quote, str) else "")
+            continue
+        if tid not in texts_by_id:
+            # Target is a placeholder, unknown, or the sentinel → un-quotable.
+            fabricated.append(quote)
+            continue
+        artifact_text = texts_by_id[tid]
+        if _normalise_for_substring(quote) not in _normalise_for_substring(artifact_text):
             fabricated.append(quote)
     return fabricated
 
@@ -2137,13 +2253,30 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
     # ``_resolve_artifact_text`` returns the file content (mirroring what
     # ``_build_prompt`` injected). Quotes are validated against what the
     # model actually saw.
-    # #182 — multi-target rules concatenate every declared artifact's text
-    # for the substring-grounding check so a quote drawn from any
-    # declared artifact is accepted; per-artifact substring attribution
-    # (rejecting a quote that claims ``target_id=A`` but only matches
-    # artifact ``B``) is deferred to slice 2.
-    artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
-    fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
+    # #225 (slice 2) — multi-target rules now perform strict per-target
+    # grounding: a quote claiming ``target_id=A`` must be a substring of
+    # artifact A's text specifically, not merely of the concatenated prompt.
+    # Unknown or missing ``target_id`` values fail closed. The single-target
+    # path is unchanged.
+    multi_targets = _parse_multi_targets(rule)
+    if multi_targets:
+        # Strict per-target grounding path for multi-target rules.
+        texts_by_id = _resolve_artifact_texts_for_rule(rule, target, artifact_kind)
+        strict_target_ids = _resolve_quote_target_ids_strict(rule, parsed)
+        assert strict_target_ids is not None  # non-empty multi_targets guarantees this
+        fabricated = _find_per_target_fabricated_quotes(
+            parsed.supporting_evidence_quotes,
+            strict_target_ids,
+            texts_by_id,
+        )
+        # Flat text for span resolution (best-effort; per-artifact span
+        # attribution is deferred to a future slice).
+        artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
+    else:
+        # Single-target legacy path: flat substring check unchanged.
+        artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
+        fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
+        strict_target_ids = None
     if fabricated:
         return Diagnostic(
             rule_id=rule.id,
@@ -2205,15 +2338,15 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
         "cost_estimate_usd": cost,
         **strategy_meta,
     }
-    # #182 — when the rule declared ``params.targets``, surface a parallel
-    # ``supporting_evidence_quote_target_ids`` list on the evidence dict so
-    # downstream consumers can attribute each quote to a specific artifact.
-    # Missing per-quote ``target_id`` (model emitted plain strings or
-    # omitted the field) is defaulted to the first declared target's id
-    # per the slice-1 contract.
-    resolved_target_ids = _resolve_quote_target_ids(rule, parsed)
-    if resolved_target_ids is not None:
-        evidence_data["supporting_evidence_quote_target_ids"] = resolved_target_ids
+    # #225 — when the rule declared ``params.targets``, surface the strict
+    # resolved ``target_id`` list. Sentinels (_UNKNOWN_TARGET_ID) cannot
+    # appear here because their quotes were already rejected above; replace
+    # defensively with None for a clean wire format.
+    if strict_target_ids is not None:
+        clean_ids: list[str | None] = [
+            None if tid == _UNKNOWN_TARGET_ID else tid for tid in strict_target_ids
+        ]
+        evidence_data["supporting_evidence_quote_target_ids"] = clean_ids
     evidence = Evidence(kind="llm_judgment", data=evidence_data)
     if status is Status.PASS:
         return Diagnostic(
