@@ -1473,7 +1473,23 @@ def _parse_policy_manifest(
                 path=manifest_path,
                 entry_index=idx,
             )
+        # ``kind`` must be a string before we can membership-test it against
+        # the allowed set; an unhashable value (e.g. ``["forbidden_path_pattern"]``)
+        # would otherwise raise ``TypeError`` from the ``not in`` lookup and bypass
+        # the fail-closed contract (codex P1 / Copilot review on #232).
         kind_val = entry.get("kind")
+        if not isinstance(kind_val, str):
+            return {}, _manifest_error_diag(
+                rule,
+                (
+                    f"manifest {manifest_path}: entries[{idx}].kind must be a string, "
+                    f"got {type(kind_val).__name__}"
+                ),
+                path=manifest_path,
+                entry_index=idx,
+                field="kind",
+                actual_type=type(kind_val).__name__,
+            )
         if kind_val not in _MANIFEST_ALLOWED_KINDS:
             return {}, _manifest_error_diag(
                 rule,
@@ -1513,6 +1529,33 @@ def _parse_policy_manifest(
                 kind=kind_val,
                 unknown_fields=sorted(unknown),
             )
+
+        # Per-kind value-type validation. Every required field (and the
+        # optional ``note`` when present) must be a non-empty string;
+        # without this check a malformed manifest with the right *keys* but
+        # wrong *value types* (e.g. ``pattern: 7``) would later crash in
+        # ``_glob_to_regex`` / ``_match_glob`` rather than surfacing as a
+        # ``manifest_error`` diagnostic (codex P1 / Copilot review on
+        # #232).
+        string_fields = required_fields | (optional_fields & {"note"})
+        for field in sorted(string_fields):
+            if field not in entry:
+                continue  # already validated as required-or-present
+            value = entry[field]
+            if not isinstance(value, str) or not value:
+                return {}, _manifest_error_diag(
+                    rule,
+                    (
+                        f"manifest {manifest_path}: entries[{idx}] (kind={kind_val!r}) "
+                        f"field {field!r} must be a non-empty string, "
+                        f"got {type(value).__name__}"
+                    ),
+                    path=manifest_path,
+                    entry_index=idx,
+                    kind=kind_val,
+                    field=field,
+                    actual_type=type(value).__name__,
+                )
 
     return doc, None
 
@@ -1629,6 +1672,7 @@ def _evaluate_manifest_policy(
     manifest: dict,
     manifest_path: str,
     source_label: str,
+    pagination_metadata: dict | None = None,
 ) -> Diagnostic:
     """Evaluate *filenames* against the policy manifest entries.
 
@@ -1645,6 +1689,11 @@ def _evaluate_manifest_policy(
           (exception.pattern must match the file AND exception.exempts_pattern
           must match the forbidden pattern that triggered).
        c. If not exempted → violation.
+
+    *pagination_metadata*: when supplied, merged into the evidence payload
+    so PR-mode runs carry the same ``page_count`` / ``pagination_complete``
+    parity that ``github_changed_files_absent`` exposes (Copilot review on
+    #232).  Local-git runs pass ``None`` because no pagination occurs.
     """
     entries = manifest.get("entries", [])
 
@@ -1688,6 +1737,8 @@ def _evaluate_manifest_policy(
         "forbidden_pattern_count": len(forbidden),
         "exception_count": len(exceptions),
     }
+    if pagination_metadata is not None:
+        evidence_data.update(pagination_metadata)
     evidence = [Evidence(kind="changed_file_policy", data=evidence_data)]
 
     if not violations:
@@ -1828,9 +1879,21 @@ def _check_changed_file_policy_pr(rule: Rule, pr: PrTarget) -> Diagnostic:
     if fetch_diag is not None:
         return fetch_diag
     assert filenames is not None
+    assert page_count is not None
 
     source_label = f"github_pr:{pr.owner}/{pr.repo}#{pr.number}"
-    return _evaluate_manifest_policy(rule, filenames, manifest, manifest_path, source_label)
+    pagination_metadata = {
+        "pagination_complete": True,
+        "page_count": page_count,
+    }
+    return _evaluate_manifest_policy(
+        rule,
+        filenames,
+        manifest,
+        manifest_path,
+        source_label,
+        pagination_metadata=pagination_metadata,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1899,15 +1962,21 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
         target = target.paths[0] if target.paths else ""
     target_str = str(target)
 
-    # ``changed_file_policy`` with ``changed_files_source='local_git'`` must
-    # skip PR resolution entirely — the target is a directory path (or cwd).
-    # Route it before the resolve_target() call so a non-PR target string does
-    # not produce a spurious UNAVAILABLE.
+    # ``changed_file_policy`` must validate its params *before* PR
+    # resolution.  Otherwise a missing/invalid ``changed_files_source``
+    # plus a non-PR target string (e.g. ``--target .``) would fall through
+    # to ``resolve_target()`` and surface as ``target_parse_error`` instead
+    # of the documented ``params_error`` (codex P2 / Copilot review on
+    # #232).  Validated params → dispatch by source; invalid → return the
+    # ``params_error`` diagnostic verbatim.
     if rule.kind is RuleKind.CHANGED_FILE_POLICY:
-        cfs = rule.params.get("changed_files_source", "")
+        validated = _validate_changed_file_policy_params(rule)
+        if isinstance(validated, Diagnostic):
+            return validated
+        _manifest_path, cfs, _local_git_mode, _repo_root = validated
         if cfs == "local_git":
             return _check_changed_file_policy_local(rule, target_str)
-        # For ``github_pr`` source: fall through to normal PR resolution below.
+        # ``cfs == "github_pr"`` — fall through to PR resolution below.
 
     pr, diag = resolve_target(rule, target_str)
     if diag is not None:

@@ -348,6 +348,176 @@ class TestManifestParser:
         assert ev.kind == "manifest_error"
         assert "bonus_field" in ev.data["unknown_fields"]
 
+    # ----- Per-kind value-type validation (codex P1 / Copilot review on #232) -----
+
+    def test_entry_kind_non_string_unavailable(self, monkeypatch, tmp_path):
+        """A list-valued ``kind`` would crash the ``not in`` membership test."""
+        p = tmp_path / "kind-not-string.yaml"
+        p.write_text(
+            dedent(
+                """\
+                version: 1
+                entries:
+                  - kind: [forbidden_path_pattern]
+                    pattern: "outputs/**"
+                    stop_condition: fail_closed_never_commit
+                    source: docs/policy.md
+                """
+            ),
+            encoding="utf-8",
+        )
+        rule = _make_rule(manifest_path=str(p))
+        _patch_with_pages(monkeypatch, _ok(_RESOLVE_OK), [])
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        ev = diag.evidence[0]
+        assert ev.kind == "manifest_error"
+        assert ev.data["field"] == "kind"
+        assert ev.data["actual_type"] == "list"
+
+    def test_entry_pattern_non_string_unavailable(self, monkeypatch, tmp_path):
+        """A non-string ``pattern`` would otherwise crash ``_match_glob``."""
+        p = tmp_path / "pattern-not-string.yaml"
+        p.write_text(
+            dedent(
+                """\
+                version: 1
+                entries:
+                  - kind: forbidden_path_pattern
+                    pattern: 7
+                    stop_condition: fail_closed_never_commit
+                    source: docs/policy.md
+                """
+            ),
+            encoding="utf-8",
+        )
+        rule = _make_rule(manifest_path=str(p))
+        _patch_with_pages(monkeypatch, _ok(_RESOLVE_OK), [])
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        ev = diag.evidence[0]
+        assert ev.kind == "manifest_error"
+        assert ev.data["field"] == "pattern"
+        assert ev.data["actual_type"] == "int"
+
+    def test_entry_pattern_empty_string_unavailable(self, monkeypatch, tmp_path):
+        """Empty string ``pattern`` would match every path; fail closed."""
+        p = tmp_path / "pattern-empty.yaml"
+        p.write_text(
+            dedent(
+                """\
+                version: 1
+                entries:
+                  - kind: forbidden_path_pattern
+                    pattern: ""
+                    stop_condition: fail_closed_never_commit
+                    source: docs/policy.md
+                """
+            ),
+            encoding="utf-8",
+        )
+        rule = _make_rule(manifest_path=str(p))
+        _patch_with_pages(monkeypatch, _ok(_RESOLVE_OK), [])
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        ev = diag.evidence[0]
+        assert ev.kind == "manifest_error"
+        assert ev.data["field"] == "pattern"
+
+    def test_extension_non_string_unavailable(self, monkeypatch, tmp_path):
+        """Per-kind type check covers ``generated_output_extension.extension``."""
+        p = tmp_path / "extension-not-string.yaml"
+        p.write_text(
+            dedent(
+                """\
+                version: 1
+                entries:
+                  - kind: generated_output_extension
+                    extension: 7
+                    source: docs/policy.md
+                """
+            ),
+            encoding="utf-8",
+        )
+        rule = _make_rule(manifest_path=str(p))
+        _patch_with_pages(monkeypatch, _ok(_RESOLVE_OK), [])
+        diag = gh_backend.check(rule, "owner/repo#42")
+        assert diag.status is Status.UNAVAILABLE
+        ev = diag.evidence[0]
+        assert ev.kind == "manifest_error"
+        assert ev.data["field"] == "extension"
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher param-precedence (codex P2 / Copilot review on #232)
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherParamPrecedence:
+    def test_missing_changed_files_source_with_directory_target_unavailable(self, tmp_path):
+        """``--target .`` with missing source must surface ``params_error``, not ``target_parse_error``."""
+        rule = _make_rule(manifest_path="any.yaml", omit_source=True)
+        diag = gh_backend.check(rule, str(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        ev = diag.evidence[0]
+        # Must be params_error, NOT target_parse_error.
+        assert ev.kind == "params_error"
+        assert ev.data["missing"] == "changed_files_source"
+
+    def test_invalid_changed_files_source_with_directory_target_unavailable(self, tmp_path):
+        rule = _make_rule(
+            manifest_path="any.yaml",
+            changed_files_source="bogus",
+        )
+        diag = gh_backend.check(rule, str(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        ev = diag.evidence[0]
+        assert ev.kind == "params_error"
+        assert ev.data["field"] == "changed_files_source"
+
+
+# ---------------------------------------------------------------------------
+# Pagination metadata in PR-mode evidence (Copilot review on #232)
+# ---------------------------------------------------------------------------
+
+
+class TestPaginationMetadata:
+    def test_pr_evidence_carries_page_count_and_pagination_complete(self, monkeypatch, manifest_file):
+        """PR mode must surface ``page_count`` and ``pagination_complete``.
+
+        Parity with ``github_changed_files_absent`` (Copilot review on #232).
+        """
+        _patch_with_pages(
+            monkeypatch,
+            _ok(_RESOLVE_OK),
+            [_ok(_files_response(["README.md"]))],
+        )
+        rule = _make_rule(manifest_path=str(manifest_file))
+        diag = gh_backend.check(rule, "owner/repo#42")
+        ev = diag.evidence[0]
+        assert ev.data["pagination_complete"] is True
+        assert ev.data["page_count"] == 1
+
+    def test_local_mode_evidence_omits_pagination_keys(self, tmp_path: Path):
+        """Local mode does not paginate; the keys must be absent for honesty."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text(_SAMPLE_MANIFEST, encoding="utf-8")
+
+        rule = _make_rule(
+            manifest_path=str(manifest),
+            changed_files_source="local_git",
+            local_git_mode="staged",
+            repo_root=str(repo),
+        )
+        diag = gh_backend.check(rule, str(repo))
+        ev = diag.evidence[0]
+        assert "page_count" not in ev.data
+        assert "pagination_complete" not in ev.data
+
 
 # ---------------------------------------------------------------------------
 # GitHub PR mode — pass and fail paths via the existing PR file-list machinery
