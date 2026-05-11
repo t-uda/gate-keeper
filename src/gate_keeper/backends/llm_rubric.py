@@ -1717,12 +1717,12 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
 def _run_not_implemented_strategy(request: JudgmentRequest, strategy_id: str) -> Diagnostic:
     """Reserved-id placeholder (#183). Records the gap fail-closed.
 
-    ``review`` / ``adaptive`` are declared in :data:`KNOWN_STRATEGIES` so
-    the rule IR layer can validate the value before reaching the backend,
-    but their concrete bodies are out of scope for this slice. Invoking
-    one returns ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence
-    rather than silently falling back to ``single`` — a rule that asks for
-    ``review`` should not receive a single-call verdict in disguise.
+    ``adaptive`` is declared in :data:`KNOWN_STRATEGIES` so the rule IR
+    layer can validate the value before reaching the backend, but its
+    concrete body is out of scope for this slice. Invoking it returns
+    ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence rather than
+    silently falling back to ``single`` — a rule that asks for ``adaptive``
+    should not receive a single-call verdict in disguise.
     """
     rubric_input = _build_rubric_input(request.rule, request.target)
     return _strategy_unavailable(
@@ -2062,13 +2062,539 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
     )
 
 
-#: Concrete strategy registry (#183 / #184). Maps strategy id to its
-#: :class:`Strategy` callable. ``single`` and ``consensus`` are implemented;
-#: ``review`` and ``adaptive`` are reserved and dispatch through
+# ---------------------------------------------------------------------------
+# Review strategy (#185)
+# ---------------------------------------------------------------------------
+
+# Reviewer prompt template.  The primary judgment is presented to a second
+# model call whose sole task is to audit the primary's fidelity to the
+# artifact text — checking quote grounding, reasoning soundness, and
+# verdict consistency.  The reviewer returns a structured audit object
+# (``review_verdict``) whose outcome drives aggregation:
+#
+#   agree                    → emit primary verdict unchanged.
+#   disagree-pass-should-fail/disagree-fail-should-pass → downgrade to
+#       UNSUPPORTED with ``review_disagreement`` evidence (fail-closed).
+#   abstain                  → emit primary verdict with
+#       ``reviewer_abstained: True`` in evidence (advisory).
+#
+# The reviewer only audits; it cannot silently rewrite the primary verdict
+# (slice 1 conservative design from issue #185).
+
+REVIEW_PROMPT_TEMPLATE = """\
+You are a judgment auditor. A primary judge has evaluated whether an artifact \
+satisfies a rule. Your sole task is to audit the primary judgment for fidelity \
+— check whether the verdict, reason, and supporting quotes are supported by \
+the artifact text.
+
+## Rule
+
+{rule}
+
+## Artifact
+
+{target}
+
+## Primary judgment to audit
+
+Verdict: {primary_judgment}
+Reason: {primary_reason}
+Supporting quotes:
+{primary_quotes}
+
+## Your audit task
+
+1. Read the rule and the full artifact carefully.
+2. Inspect each supporting quote: is it a verbatim or near-verbatim substring
+   of the artifact above? Is it representative of the strongest evidence?
+3. Inspect the primary reason: does it accurately describe what the artifact
+   says (or omits) relative to the rule's predicate?
+4. Decide whether the primary judgment is adequately grounded:
+   - If the primary judgment is well-supported → return ``"agree"``.
+   - If the primary said "pass" but the artifact clearly fails the rule
+     → return ``"disagree-pass-should-fail"``.
+   - If the primary said "fail" but the artifact clearly satisfies the rule
+     → return ``"disagree-fail-should-pass"``.
+   - If you cannot determine either way (insufficient evidence, ambiguous
+     rule predicate, or the artifact is partially out of scope)
+     → return ``"abstain"``.
+5. Respond with **only** a JSON object matching the schema below.
+
+## Required response schema
+
+{{
+  "review_verdict": "agree" | "disagree-pass-should-fail" | "disagree-fail-should-pass" | "abstain",
+  "review_reason": "<one-sentence explanation of your audit finding>"
+}}
+
+Constraints:
+- ``review_verdict`` must be exactly one of the four values above.
+- ``review_reason`` must be a single non-empty sentence.
+- Do not return any prose outside the JSON object.
+- Do not attempt to rewrite the primary judgment; only audit it.
+"""
+
+REVIEW_SYSTEM_PROMPT = (
+    "You are a judgment auditor. Your task is to check whether a primary LLM "
+    "judgment is grounded in the artifact text and internally consistent. "
+    "Respond with ONLY a JSON object matching the required schema."
+)
+
+_REVIEW_VALID_VERDICTS = frozenset(
+    {"agree", "disagree-pass-should-fail", "disagree-fail-should-pass", "abstain"}
+)
+
+
+@dataclass(frozen=True)
+class _ReviewerResponse:
+    """Parsed reviewer audit response."""
+
+    review_verdict: str
+    review_reason: str
+
+
+@dataclass(frozen=True)
+class _ReviewerParseError:
+    """Carries reviewer parse failure information."""
+
+    failure_mode: str
+    detail: str
+    raw_response_excerpt: str
+
+
+def _parse_reviewer_response(text: str) -> _ReviewerResponse | _ReviewerParseError:
+    """Parse the reviewer model's structured audit response.
+
+    Returns :class:`_ReviewerParseError` (never raises) for any failure.
+    """
+    excerpt = text[:200]
+
+    if not text.strip():
+        return _ReviewerParseError(
+            failure_mode="empty_response",
+            detail="Reviewer returned an empty string.",
+            raw_response_excerpt=excerpt,
+        )
+
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return _ReviewerParseError(
+            failure_mode="invalid_json",
+            detail=f"Reviewer response is not valid JSON: {exc}",
+            raw_response_excerpt=excerpt,
+        )
+
+    if not isinstance(obj, dict):
+        return _ReviewerParseError(
+            failure_mode="invalid_json",
+            detail="Reviewer response is not a JSON object.",
+            raw_response_excerpt=excerpt,
+        )
+
+    verdict = obj.get("review_verdict")
+    if verdict not in _REVIEW_VALID_VERDICTS:
+        return _ReviewerParseError(
+            failure_mode="invalid_review_verdict",
+            detail=(f"review_verdict must be one of {sorted(_REVIEW_VALID_VERDICTS)}, got {verdict!r}."),
+            raw_response_excerpt=excerpt,
+        )
+
+    reason = obj.get("review_reason", "")
+    if not isinstance(reason, str) or not reason.strip():
+        return _ReviewerParseError(
+            failure_mode="missing_field",
+            detail="review_reason must be a non-empty string.",
+            raw_response_excerpt=excerpt,
+        )
+
+    return _ReviewerResponse(review_verdict=str(verdict), review_reason=reason)
+
+
+def _build_review_prompt(
+    rule: Rule,
+    target: str | Path,
+    primary: LlmJudgment,
+    artifact_kind: TargetKind | None,
+) -> tuple[str, str]:
+    """Render the system + user messages for the reviewer pass (#185)."""
+    artifact_input = _resolve_artifact_input(target, artifact_kind)
+    quotes_block = (
+        "\n".join(f"  - {q}" for q in primary.supporting_evidence_quotes)
+        if primary.supporting_evidence_quotes
+        else "  (none)"
+    )
+    user = REVIEW_PROMPT_TEMPLATE.format(
+        rule=rule.text,
+        target=artifact_input,
+        primary_judgment=primary.judgment,
+        primary_reason=primary.primary_reason,
+        primary_quotes=quotes_block,
+    )
+    return REVIEW_SYSTEM_PROMPT, user
+
+
+def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
+    """Evaluate *request* with a two-pass primary+reviewer workflow (#185).
+
+    Pass 1 (primary judge): identical to ``_run_single_strategy`` — one
+    provider call using the v4 rubric prompt.  Pass 2 (reviewer): one
+    provider call using :data:`REVIEW_PROMPT_TEMPLATE` with the primary
+    judgment embedded.  The reviewer audits fidelity (quote grounding,
+    reasoning soundness, verdict consistency) and returns one of four
+    outcomes:
+
+    - ``agree`` → emit primary verdict unchanged.
+    - ``disagree-pass-should-fail`` / ``disagree-fail-should-pass`` →
+      emit :data:`Status.UNSUPPORTED` with ``review_disagreement`` evidence
+      (fail-closed safety).
+    - ``abstain`` → emit primary verdict with ``reviewer_abstained: True``
+      in evidence (advisory).
+
+    If the reviewer response fails to parse (provider error or invalid JSON),
+    the strategy treats it as an ``abstain`` so the primary verdict is still
+    surfaced — a parse-only reviewer failure should not silently discard a
+    valid primary judgment.
+
+    Evidence shape (``llm_review`` kind on success paths, ``review_disagreement``
+    on disagreement path):
+
+    .. code-block:: json
+
+        {
+            "llm_strategy": "review",
+            "review_primary_judgment": {
+                "judgment": "pass",
+                "primary_reason": "...",
+                "quotes": [...]
+            },
+            "review_reviewer_verdict": "agree",
+            "review_disagreement": false,
+            "reviewer_abstained": false,
+            "primary_model": "gpt-4o-mini",
+            "reviewer_model": "gpt-4o-mini",
+            "prompt_version": "v4",
+            "llm_call_count": 2,
+            "models": ["gpt-4o-mini", "gpt-4o-mini"],
+            "cost_estimate_usd_total": 0.0003,
+            "latency_ms_total": 250,
+            "supporting_evidence_quotes": ["..."],
+            "suggested_action": null
+        }
+    """
+    rule = request.rule
+    target = request.target
+    artifact_kind = request.artifact_kind
+
+    rubric_input = _build_rubric_input(rule, target)
+
+    env = _load_env_file()
+    if not _is_configured(env):
+        return _unavailable_unconfigured(rule, rubric_input)
+
+    provider = env["GATE_KEEPER_LLM_PROVIDER"]
+    model = _resolve_model(provider, env)
+
+    # ---- Pass 1: primary judge (same prompt as single strategy) ----
+    system, user = _build_prompt(rule, target, artifact_kind)
+
+    try:
+        if provider == "anthropic":
+            primary_text, primary_telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
+        else:
+            primary_text, primary_telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable_provider_error(rule, rubric_input, provider, type(exc).__name__, str(exc))
+
+    assert primary_telemetry.keys() >= {"latency_ms", "tokens_in", "tokens_out"}, (
+        f"provider helper returned incomplete telemetry: {sorted(primary_telemetry.keys())}"
+    )
+
+    primary_cost = _estimate_cost(model, primary_telemetry["tokens_in"], primary_telemetry["tokens_out"])
+
+    primary_parsed = _parse_llm_judgment(primary_text)
+    if isinstance(primary_parsed, LlmJudgmentParseError):
+        return _unavailable_provider_error(
+            rule, rubric_input, provider, "unparseable_response", primary_parsed.detail
+        )
+
+    # Apply the same unsupported / fabrication guards as single strategy.
+    if primary_parsed.judgment == "unsupported":
+        if rule.target_kind is TargetKind.UNSPECIFIED:
+            return _unavailable_provider_error(
+                rule,
+                rubric_input,
+                provider,
+                "unsupported_without_target_kind",
+                (
+                    "Model returned 'unsupported' but the rule carries no "
+                    "target_kind annotation; the artifact-kind block was "
+                    "never injected into the prompt, so the verdict has "
+                    "no grounding. Treat as provider error."
+                ),
+            )
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=primary_parsed.primary_reason,
+            evidence=[
+                Evidence(
+                    kind="target_kind_mismatch",
+                    data={
+                        "model": model,
+                        "prompt_version": PROMPT_VERSION,
+                        "judgment": primary_parsed.judgment,
+                        "primary_reason": primary_parsed.primary_reason,
+                        "supporting_evidence_quotes": primary_parsed.supporting_evidence_quotes,
+                        "suggested_action": primary_parsed.suggested_action,
+                        "rule_target_kind": rule.target_kind.value,
+                        "latency_ms": primary_telemetry["latency_ms"],
+                        "tokens_in": primary_telemetry["tokens_in"],
+                        "tokens_out": primary_telemetry["tokens_out"],
+                        "cost_estimate_usd": primary_cost,
+                        "llm_strategy": "review",
+                        "llm_call_count": 1,
+                        "models": [model],
+                        "cost_estimate_usd_total": primary_cost,
+                        "latency_ms_total": primary_telemetry["latency_ms"],
+                    },
+                )
+            ],
+            remediation=(
+                "The rule's premise does not apply to this artifact kind. "
+                "Either evaluate the rule against an artifact whose kind "
+                f"matches its `target_kind` ({rule.target_kind.value}), or "
+                "remove / change the `target_kind` annotation on the rule."
+            ),
+        )
+
+    artifact_text = _resolve_artifact_text(target, artifact_kind)
+    fabricated = _find_fabricated_quotes(primary_parsed.supporting_evidence_quotes, artifact_text)
+    if fabricated:
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=(
+                "LLM rubric verdict rejected: the model returned "
+                f"{len(fabricated)} of {len(primary_parsed.supporting_evidence_quotes)} "
+                "supporting quotes that are not substrings of the artifact "
+                "(quote fabrication)."
+            ),
+            evidence=[
+                Evidence(
+                    kind="llm_quote_fabrication",
+                    data={
+                        "model": model,
+                        "prompt_version": PROMPT_VERSION,
+                        "claimed_judgment": primary_parsed.judgment,
+                        "primary_reason": primary_parsed.primary_reason,
+                        "supporting_evidence_quotes": primary_parsed.supporting_evidence_quotes,
+                        "fabricated_quotes": fabricated,
+                        "suggested_action": primary_parsed.suggested_action,
+                        "latency_ms": primary_telemetry["latency_ms"],
+                        "tokens_in": primary_telemetry["tokens_in"],
+                        "tokens_out": primary_telemetry["tokens_out"],
+                        "cost_estimate_usd": primary_cost,
+                        "llm_strategy": "review",
+                        "llm_call_count": 1,
+                        "models": [model],
+                        "cost_estimate_usd_total": primary_cost,
+                        "latency_ms_total": primary_telemetry["latency_ms"],
+                    },
+                )
+            ],
+            remediation=(
+                "The model violated the substring-grounding contract for "
+                "supporting_evidence_quotes (v2 prompt, #168). Re-run the "
+                "rule; if the failure persists, investigate prompt drift or "
+                "switch model. Do not act on this verdict."
+            ),
+        )
+
+    # ---- Pass 2: reviewer ----
+    rev_system, rev_user = _build_review_prompt(rule, target, primary_parsed, artifact_kind)
+
+    reviewer_text: str | None = None
+    reviewer_telemetry: dict[str, int] | None = None
+    reviewer_cost: float | None = None
+    reviewer_parse_error: str | None = None
+
+    try:
+        if provider == "anthropic":
+            reviewer_text, reviewer_telemetry = _call_anthropic(
+                env["ANTHROPIC_API_KEY"], rev_system, rev_user, model
+            )
+        else:
+            reviewer_text, reviewer_telemetry = _call_openai(
+                env["OPENAI_API_KEY"], rev_system, rev_user, model
+            )
+    except Exception as exc:  # noqa: BLE001
+        # Reviewer call failed: treat as abstain so primary verdict is preserved.
+        reviewer_parse_error = f"reviewer provider error: {type(exc).__name__}: {exc}"[:500]
+
+    reviewer_verdict: str
+    reviewer_reason: str
+    reviewer_abstained: bool = False
+
+    if reviewer_parse_error is not None:
+        # Provider error on reviewer — treat as abstain.
+        reviewer_verdict = "abstain"
+        reviewer_reason = reviewer_parse_error
+        reviewer_abstained = True
+    elif reviewer_telemetry is None:
+        # Should not happen, but guard defensively.
+        reviewer_verdict = "abstain"
+        reviewer_reason = "reviewer telemetry unavailable"
+        reviewer_abstained = True
+    else:
+        assert reviewer_telemetry.keys() >= {"latency_ms", "tokens_in", "tokens_out"}, (
+            f"reviewer helper returned incomplete telemetry: {sorted(reviewer_telemetry.keys())}"
+        )
+        reviewer_cost = _estimate_cost(
+            model, reviewer_telemetry["tokens_in"], reviewer_telemetry["tokens_out"]
+        )
+        assert reviewer_text is not None
+        reviewer_parsed = _parse_reviewer_response(reviewer_text)
+        if isinstance(reviewer_parsed, _ReviewerParseError):
+            # Parse failure on reviewer — treat as abstain.
+            reviewer_verdict = "abstain"
+            reviewer_reason = (
+                f"reviewer parse error ({reviewer_parsed.failure_mode}): {reviewer_parsed.detail}"
+            )
+            reviewer_abstained = True
+        else:
+            reviewer_verdict = reviewer_parsed.review_verdict
+            reviewer_reason = reviewer_parsed.review_reason
+            if reviewer_verdict == "abstain":
+                reviewer_abstained = True
+
+    # ---- Aggregate reviewer + primary telemetry ----
+    total_latency_ms = primary_telemetry["latency_ms"]
+    if reviewer_telemetry is not None:
+        total_latency_ms += reviewer_telemetry["latency_ms"]
+
+    if primary_cost is None or reviewer_cost is None:
+        total_cost: float | None = None
+    else:
+        total_cost = primary_cost + reviewer_cost
+
+    # When reviewer call was skipped (provider error / abstain without
+    # telemetry), the cost total cannot include the reviewer cost.
+    if reviewer_telemetry is None and reviewer_parse_error is not None:
+        total_cost = None
+
+    models_used = [model, model]
+    call_count = 2 if reviewer_telemetry is not None else 1
+
+    primary_judgment_record: dict[str, object] = {
+        "judgment": primary_parsed.judgment,
+        "primary_reason": primary_parsed.primary_reason,
+        "quotes": primary_parsed.supporting_evidence_quotes,
+    }
+
+    # ---- Aggregation: route by reviewer_verdict ----
+    review_disagreement = reviewer_verdict in (
+        "disagree-pass-should-fail",
+        "disagree-fail-should-pass",
+    )
+
+    if review_disagreement:
+        # Fail-closed: reviewer disagrees → UNSUPPORTED with review_disagreement evidence.
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=(f"Reviewer disagreed with primary judgment ({reviewer_verdict}): {reviewer_reason}"),
+            evidence=[
+                Evidence(
+                    kind="review_disagreement",
+                    data={
+                        "llm_strategy": "review",
+                        "review_primary_judgment": primary_judgment_record,
+                        "review_reviewer_verdict": reviewer_verdict,
+                        "review_disagreement": True,
+                        "reviewer_abstained": False,
+                        "review_reason": reviewer_reason,
+                        "primary_model": model,
+                        "reviewer_model": model,
+                        "prompt_version": PROMPT_VERSION,
+                        "llm_call_count": call_count,
+                        "models": models_used,
+                        "cost_estimate_usd_total": total_cost,
+                        "latency_ms_total": total_latency_ms,
+                        "supporting_evidence_quotes": [],
+                        "suggested_action": None,
+                    },
+                )
+            ],
+            remediation=(
+                "The reviewer pass flagged the primary judgment as unsupported. "
+                "Inspect review_disagreement evidence for details. "
+                "Re-run with strategy: single and a stronger model, or review manually."
+            ),
+        )
+
+    # agree or abstain: emit primary verdict.
+    status = Status.PASS if primary_parsed.judgment == "pass" else Status.FAIL
+    spans = _resolve_quote_spans(primary_parsed.supporting_evidence_quotes, artifact_text)
+    evidence_data: dict[str, object] = {
+        "llm_strategy": "review",
+        "review_primary_judgment": primary_judgment_record,
+        "review_reviewer_verdict": reviewer_verdict,
+        "review_disagreement": False,
+        "reviewer_abstained": reviewer_abstained,
+        "review_reason": reviewer_reason,
+        "primary_model": model,
+        "reviewer_model": model,
+        "prompt_version": PROMPT_VERSION,
+        "llm_call_count": call_count,
+        "models": models_used,
+        "cost_estimate_usd_total": total_cost,
+        "latency_ms_total": total_latency_ms,
+        "supporting_evidence_quotes": primary_parsed.supporting_evidence_quotes,
+        "supporting_evidence_spans": [span.to_dict() for span in spans],
+        "suggested_action": primary_parsed.suggested_action,
+    }
+    evidence = Evidence(kind="llm_review", data=evidence_data)
+
+    if status is Status.PASS:
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=status,
+            severity=rule.severity,
+            message=primary_parsed.primary_reason,
+            evidence=[evidence],
+        )
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=status,
+        severity=rule.severity,
+        message=primary_parsed.primary_reason,
+        evidence=[evidence],
+        remediation=primary_parsed.suggested_action,
+    )
+
+
+#: Concrete strategy registry (#183 / #184 / #185). Maps strategy id to its
+#: :class:`Strategy` callable. ``single``, ``consensus``, and ``review`` are
+#: implemented; ``adaptive`` is reserved and dispatches through
 #: ``_run_not_implemented_strategy`` so the gap is observable.
 _STRATEGIES: dict[str, Strategy] = {
     "single": _run_single_strategy,
     "consensus": _run_consensus_strategy,
+    "review": _run_review_strategy,
 }
 
 
@@ -2102,17 +2628,16 @@ def check(
     ``TargetSpec`` values are unwrapped to the underlying path so callers
     can mix CLI surfaces freely.
 
-    Strategy dispatch (#183). The judgment strategy is selected from
-    ``rule.params["strategy"]`` and defaults to :data:`DEFAULT_STRATEGY`
-    (``"single"``) for backward compatibility. Only ``"single"`` is
-    implemented in this slice; reserved ids (``"consensus"`` /
-    ``"review"`` / ``"adaptive"``) and unknown ids return
+    Strategy dispatch (#183 / #184 / #185). The judgment strategy is
+    selected from ``rule.params["strategy"]`` and defaults to
+    :data:`DEFAULT_STRATEGY` (``"single"``) for backward compatibility.
+    ``"single"``, ``"consensus"``, and ``"review"`` are concrete
+    implementations; ``"adaptive"`` is reserved and returns
     ``UNAVAILABLE`` with ``strategy_unavailable`` evidence so callers
-    discover the gap explicitly. Strategy-aggregated metadata
-    (``llm_strategy``, ``llm_call_count``, ``models``,
-    ``cost_estimate_usd_total``, ``latency_ms_total``) is appended to
-    every successful ``llm_judgment`` / ``target_kind_mismatch`` /
-    ``llm_quote_fabrication`` evidence dict; the legacy single-call
+    discover the gap explicitly. Unknown ids likewise fail closed.
+    Strategy-aggregated metadata (``llm_strategy``, ``llm_call_count``,
+    ``models``, ``cost_estimate_usd_total``, ``latency_ms_total``) is
+    appended to every successful evidence dict; the legacy single-call
     fields (``latency_ms``, ``tokens_in``, ``tokens_out``,
     ``cost_estimate_usd``) remain unchanged so existing consumers keep
     working.

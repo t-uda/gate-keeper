@@ -2906,21 +2906,24 @@ class TestStrategySeam:
         assert llm_backend._resolve_strategy_id(rule) == "consensus"
 
     def test_strategies_registry_contains_single(self):
-        """Only ``single`` is implemented in the #183 slice."""
+        """``single`` is the reference implementation in the #183 slice."""
         assert "single" in llm_backend._STRATEGIES
         assert callable(llm_backend._STRATEGIES["single"])
 
     def test_strategies_registry_omits_reserved_ids(self):
         """Reserved-but-unimplemented ids must not appear in the live registry.
 
-        ``consensus`` is now implemented (#184) and lives in the registry.
-        ``review`` and ``adaptive`` remain reserved (unimplemented) and must
-        not silently dispatch to a single-call strategy in disguise.
+        ``consensus`` is now implemented (#184) and ``review`` is now
+        implemented (#185); both live in the registry. ``adaptive`` remains
+        reserved (unimplemented) and must not silently dispatch to a single-
+        call strategy in disguise.
         """
-        for reserved in ("review", "adaptive"):
+        for reserved in ("adaptive",):
             assert reserved not in llm_backend._STRATEGIES
         # consensus IS implemented in #184.
         assert "consensus" in llm_backend._STRATEGIES
+        # review IS implemented in #185.
+        assert "review" in llm_backend._STRATEGIES
 
     def test_default_pass_evidence_carries_strategy_metadata(self, monkeypatch, tmp_path):
         """Issue #183 acceptance: success evidence advertises strategy fields."""
@@ -2969,15 +2972,15 @@ class TestStrategySeam:
         assert diag.evidence[0].data["llm_strategy"] == "single"
         assert diag.evidence[0].data["llm_call_count"] == 1
 
-    @pytest.mark.parametrize("strategy_id", ["review", "adaptive"])
+    @pytest.mark.parametrize("strategy_id", ["adaptive"])
     def test_reserved_strategy_returns_unavailable(self, monkeypatch, tmp_path, strategy_id):
         """Still-reserved ids dispatch through ``strategy_not_implemented``.
 
-        ``consensus`` is now implemented (#184) and removed from this
-        parametrize. ``review`` and ``adaptive`` remain unimplemented.
-        Provider stubs are still wired so a regression where the seam
-        silently falls back to ``single`` would surface as a PASS
-        verdict; the assertion catches that.
+        ``consensus`` is now implemented (#184) and ``review`` is now
+        implemented (#185); both are removed from this parametrize.
+        ``adaptive`` remains unimplemented. Provider stubs are still wired
+        so a regression where the seam silently falls back to ``single``
+        would surface as a PASS verdict; the assertion catches that.
         """
         _patch_env(monkeypatch, self._ENV)
         provider_called: dict[str, int] = {"n": 0}
@@ -3313,6 +3316,275 @@ class TestConsensusStrategy:
         """Consensus path respects the unconfigured check the same as single."""
         # Force unconfigured state regardless of the host environment by
         # returning an empty env dict from _load_env_file.
+        monkeypatch.setattr(llm_backend, "_load_env_file", lambda *_a, **_k: {})
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_unconfigured"
+
+
+class TestReviewStrategy:
+    """Issue #185 — two-pass primary+reviewer strategy.
+
+    All tests use fake provider stubs; no live LLM calls are made.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    def _rule(self) -> "Rule":
+        return Rule(
+            id="stub-review-rule",
+            title="Stub review rule",
+            source=SourceLocation(path="rules.md", line=1),
+            text="The documentation should be clear and comprehensive",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params={"strategy": "review"},
+        )
+
+    def _make_two_call_spy(self, primary_response: str, reviewer_response: str) -> "tuple[list[str], object]":
+        """Return (call_log, spy) for two sequential provider calls."""
+        calls: list[str] = []
+        responses = [primary_response, reviewer_response]
+        idx = {"i": 0}
+
+        def _spy(api_key, system, user, model):
+            calls.append(system[:40])
+            text = responses[idx["i"] % len(responses)]
+            idx["i"] += 1
+            return _stub_response(text, {"latency_ms": 100, "tokens_in": 200, "tokens_out": 50})
+
+        return calls, _spy
+
+    # ---- reviewer agree JSON helpers ----
+
+    @staticmethod
+    def _reviewer_agree(reason: str = "The primary judgment is well-grounded.") -> str:
+        return json.dumps({"review_verdict": "agree", "review_reason": reason})
+
+    @staticmethod
+    def _reviewer_disagree_pass_should_fail(reason: str = "The artifact clearly fails.") -> str:
+        return json.dumps({"review_verdict": "disagree-pass-should-fail", "review_reason": reason})
+
+    @staticmethod
+    def _reviewer_disagree_fail_should_pass(reason: str = "The artifact clearly passes.") -> str:
+        return json.dumps({"review_verdict": "disagree-fail-should-pass", "review_reason": reason})
+
+    @staticmethod
+    def _reviewer_abstain(reason: str = "Cannot determine either way.") -> str:
+        return json.dumps({"review_verdict": "abstain", "review_reason": reason})
+
+    # ---- dispatcher routing ----
+
+    def test_review_routes_to_review_strategy(self, monkeypatch, tmp_path):
+        """``params.strategy=review`` dispatches to ``_run_review_strategy``."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        # Two provider calls should have been made (primary + reviewer).
+        assert len(calls) == 2
+        assert diag.evidence[0].kind == "llm_review"
+        assert diag.evidence[0].data["llm_strategy"] == "review"
+
+    # ---- reviewer agree → primary verdict ----
+
+    def test_reviewer_agree_primary_pass_returns_pass(self, monkeypatch, tmp_path):
+        """Reviewer agrees with a pass → PASS with llm_review evidence."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["review_reviewer_verdict"] == "agree"
+        assert data["review_disagreement"] is False
+        assert data["reviewer_abstained"] is False
+        assert data["llm_strategy"] == "review"
+
+    def test_reviewer_agree_primary_fail_returns_fail(self, monkeypatch, tmp_path):
+        """Reviewer agrees with a fail → FAIL with llm_review evidence."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_FAIL_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["review_reviewer_verdict"] == "agree"
+        assert data["review_disagreement"] is False
+        assert diag.remediation is not None
+
+    # ---- reviewer disagree → UNSUPPORTED (fail-closed) ----
+
+    def test_reviewer_disagree_pass_should_fail_returns_unsupported(self, monkeypatch, tmp_path):
+        """Reviewer disagrees (pass-should-fail) → UNSUPPORTED with review_disagreement."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_disagree_pass_should_fail())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "review_disagreement"
+        data = diag.evidence[0].data
+        assert data["review_disagreement"] is True
+        assert data["review_reviewer_verdict"] == "disagree-pass-should-fail"
+        assert data["supporting_evidence_quotes"] == []
+        assert diag.remediation is not None
+
+    def test_reviewer_disagree_fail_should_pass_returns_unsupported(self, monkeypatch, tmp_path):
+        """Reviewer disagrees (fail-should-pass) → UNSUPPORTED with review_disagreement."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_FAIL_JSON, self._reviewer_disagree_fail_should_pass())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "review_disagreement"
+        data = diag.evidence[0].data
+        assert data["review_disagreement"] is True
+        assert data["review_reviewer_verdict"] == "disagree-fail-should-pass"
+
+    # ---- reviewer abstain → primary verdict + flag ----
+
+    def test_reviewer_abstain_primary_pass_returns_pass_with_flag(self, monkeypatch, tmp_path):
+        """Reviewer abstains → primary PASS emitted with reviewer_abstained=True."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_abstain())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["reviewer_abstained"] is True
+        assert data["review_disagreement"] is False
+        assert data["review_reviewer_verdict"] == "abstain"
+
+    def test_reviewer_abstain_primary_fail_returns_fail_with_flag(self, monkeypatch, tmp_path):
+        """Reviewer abstains → primary FAIL emitted with reviewer_abstained=True."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_FAIL_JSON, self._reviewer_abstain())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["reviewer_abstained"] is True
+        assert data["review_disagreement"] is False
+
+    # ---- reviewer parse failure → treated as abstain ----
+
+    def test_reviewer_parse_failure_treated_as_abstain(self, monkeypatch, tmp_path):
+        """A reviewer response that fails to parse is treated as abstain (primary preserved)."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, "not-valid-json")
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        # Primary verdict is preserved when reviewer cannot be parsed.
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["reviewer_abstained"] is True
+
+    # ---- telemetry ----
+
+    def test_telemetry_call_count_is_2(self, monkeypatch, tmp_path):
+        """``llm_call_count`` is 2 for the review strategy (primary + reviewer)."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert len(calls) == 2
+        assert diag.evidence[0].data["llm_call_count"] == 2
+
+    def test_telemetry_models_list_has_two_entries(self, monkeypatch, tmp_path):
+        """``models`` list has two entries (primary model + reviewer model)."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert len(diag.evidence[0].data["models"]) == 2
+
+    def test_telemetry_latency_is_sum_of_both_calls(self, monkeypatch, tmp_path):
+        """``latency_ms_total`` sums primary and reviewer latencies."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        # Each stub call returns latency_ms=100; total should be 200.
+        assert diag.evidence[0].data["latency_ms_total"] == 200
+
+    def test_telemetry_cost_is_sum_of_both_calls(self, monkeypatch, tmp_path):
+        """``cost_estimate_usd_total`` equals the sum of primary and reviewer costs."""
+        _patch_env(monkeypatch, self._ENV)
+        stub_telem = {"latency_ms": 100, "tokens_in": 200, "tokens_out": 50}
+
+        def _spy(*_a, **_k):
+            return _stub_response(_VALID_PASS_JSON, stub_telem)
+
+        # We need primary to return PASS, reviewer to return agree.
+        responses = [_VALID_PASS_JSON, self._reviewer_agree()]
+        idx = {"i": 0}
+
+        def _spy2(api_key, system, user, model):
+            text = responses[idx["i"] % len(responses)]
+            idx["i"] += 1
+            return _stub_response(text, stub_telem)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy2)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        single_cost = llm_backend._estimate_cost(
+            llm_backend.OPENAI_DEFAULT_MODEL,
+            stub_telem["tokens_in"],
+            stub_telem["tokens_out"],
+        )
+        assert single_cost is not None
+        expected_total = single_cost * 2
+        assert abs(diag.evidence[0].data["cost_estimate_usd_total"] - expected_total) < 1e-10
+
+    def test_primary_model_and_reviewer_model_recorded(self, monkeypatch, tmp_path):
+        """Both ``primary_model`` and ``reviewer_model`` are recorded in evidence."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert data["primary_model"] == llm_backend.OPENAI_DEFAULT_MODEL
+        assert data["reviewer_model"] == llm_backend.OPENAI_DEFAULT_MODEL
+
+    # ---- primary judgment record in evidence ----
+
+    def test_evidence_carries_primary_judgment_record(self, monkeypatch, tmp_path):
+        """Evidence includes the primary judgment nested under ``review_primary_judgment``."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        pj = data["review_primary_judgment"]
+        assert pj["judgment"] == "pass"
+        assert isinstance(pj["primary_reason"], str)
+        assert isinstance(pj["quotes"], list)
+
+    def test_evidence_quotes_come_from_primary_on_agree(self, monkeypatch, tmp_path):
+        """On reviewer agree, supporting_evidence_quotes are taken from the primary."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_agree())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert len(data["supporting_evidence_quotes"]) >= 1
+
+    def test_evidence_quotes_empty_on_disagree(self, monkeypatch, tmp_path):
+        """On reviewer disagreement, supporting_evidence_quotes is empty (fail-closed)."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, self._reviewer_disagree_pass_should_fail())
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].data["supporting_evidence_quotes"] == []
+
+    # ---- unconfigured ----
+
+    def test_unconfigured_returns_unavailable(self, monkeypatch, tmp_path):
+        """Review path respects the unconfigured check the same as single."""
         monkeypatch.setattr(llm_backend, "_load_env_file", lambda *_a, **_k: {})
         diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.UNAVAILABLE
