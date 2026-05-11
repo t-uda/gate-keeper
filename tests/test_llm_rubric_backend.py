@@ -3484,6 +3484,37 @@ class TestReviewStrategy:
         data = diag.evidence[0].data
         assert data["reviewer_abstained"] is True
 
+    def test_reviewer_fenced_json_is_parsed(self, monkeypatch, tmp_path):
+        """Reviewer response wrapped in a markdown code fence is parsed correctly (#217 P1)."""
+        _patch_env(monkeypatch, self._ENV)
+        fenced = "```json\n" + self._reviewer_agree() + "\n```"
+        _, spy = self._make_two_call_spy(_VALID_PASS_JSON, fenced)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        # Fenced reviewer agree → primary verdict preserved, not abstained.
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["reviewer_abstained"] is False
+
+    def test_reviewer_provider_error_call_count_is_2(self, monkeypatch, tmp_path):
+        """``llm_call_count`` is 2 even when the reviewer provider call raises (#217 P2)."""
+        _patch_env(monkeypatch, self._ENV)
+        call_log: list[str] = []
+
+        def _spy_raise_on_second(api_key, system, user, model):
+            call_log.append("call")
+            if len(call_log) == 1:
+                telem = {"latency_ms": 100, "tokens_in": 200, "tokens_out": 50}
+                return _stub_response(_VALID_PASS_JSON, telem)
+            raise RuntimeError("simulated reviewer provider error")
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy_raise_on_second)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert len(call_log) == 2
+        data = diag.evidence[0].data
+        assert data["llm_call_count"] == 2
+        assert data["reviewer_abstained"] is True
+
     # ---- telemetry ----
 
     def test_telemetry_call_count_is_2(self, monkeypatch, tmp_path):

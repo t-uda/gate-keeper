@@ -2166,6 +2166,11 @@ def _parse_reviewer_response(text: str) -> _ReviewerResponse | _ReviewerParseErr
     """Parse the reviewer model's structured audit response.
 
     Returns :class:`_ReviewerParseError` (never raises) for any failure.
+
+    When the primary ``json.loads`` fails (e.g. because the model wrapped the
+    JSON in a markdown code fence), a secondary extraction pass via
+    :func:`_extract_json_candidate` strips the fence and retries — mirroring
+    the same fallback used in :func:`_parse_llm_judgment` (#217).
     """
     excerpt = text[:200]
 
@@ -2179,11 +2184,23 @@ def _parse_reviewer_response(text: str) -> _ReviewerResponse | _ReviewerParseErr
     try:
         obj = json.loads(text)
     except json.JSONDecodeError as exc:
-        return _ReviewerParseError(
-            failure_mode="invalid_json",
-            detail=f"Reviewer response is not valid JSON: {exc}",
-            raw_response_excerpt=excerpt,
-        )
+        # Secondary pass: strip a surrounding code fence and retry.
+        candidate = _extract_json_candidate(text)
+        if candidate is not None:
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError as exc2:
+                return _ReviewerParseError(
+                    failure_mode="invalid_json",
+                    detail=f"Reviewer response is not valid JSON: {exc2}",
+                    raw_response_excerpt=excerpt,
+                )
+        else:
+            return _ReviewerParseError(
+                failure_mode="invalid_json",
+                detail=f"Reviewer response is not valid JSON: {exc}",
+                raw_response_excerpt=excerpt,
+            )
 
     if not isinstance(obj, dict):
         return _ReviewerParseError(
@@ -2489,8 +2506,11 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
     if reviewer_telemetry is None and reviewer_parse_error is not None:
         total_cost = None
 
+    # The reviewer pass is always attempted; count it regardless of whether
+    # the call raised (provider error) or returned telemetry.  ``models_used``
+    # stays length-2 to match (#217).
     models_used = [model, model]
-    call_count = 2 if reviewer_telemetry is not None else 1
+    call_count = 2
 
     primary_judgment_record: dict[str, object] = {
         "judgment": primary_parsed.judgment,
