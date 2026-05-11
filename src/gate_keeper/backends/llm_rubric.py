@@ -1717,13 +1717,12 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
 def _run_not_implemented_strategy(request: JudgmentRequest, strategy_id: str) -> Diagnostic:
     """Reserved-id placeholder (#183). Records the gap fail-closed.
 
-    ``consensus`` / ``review`` / ``adaptive`` are declared in
-    :data:`KNOWN_STRATEGIES` so the rule IR layer can validate the value
-    before reaching the backend, but their concrete bodies are out of
-    scope for this slice. Invoking one returns ``UNAVAILABLE`` with
-    ``strategy_not_implemented`` evidence rather than silently falling
-    back to ``single`` — a rule that asks for ``consensus`` should not
-    receive a single-call verdict in disguise.
+    ``review`` / ``adaptive`` are declared in :data:`KNOWN_STRATEGIES` so
+    the rule IR layer can validate the value before reaching the backend,
+    but their concrete bodies are out of scope for this slice. Invoking
+    one returns ``UNAVAILABLE`` with ``strategy_not_implemented`` evidence
+    rather than silently falling back to ``single`` — a rule that asks for
+    ``review`` should not receive a single-call verdict in disguise.
     """
     rubric_input = _build_rubric_input(request.rule, request.target)
     return _strategy_unavailable(
@@ -1739,12 +1738,337 @@ def _run_not_implemented_strategy(request: JudgmentRequest, strategy_id: str) ->
     )
 
 
-#: Concrete strategy registry (#183). Maps strategy id to its
-#: :class:`Strategy` callable. Only ``single`` is implemented in this
-#: slice; reserved ids are absent here and dispatch through
+# ---------------------------------------------------------------------------
+# Consensus strategy (#184)
+# ---------------------------------------------------------------------------
+
+_CONSENSUS_PANEL_SIZE_DEFAULT = 3
+_CONSENSUS_PANEL_SIZE_MIN = 2
+_CONSENSUS_PANEL_SIZE_MAX = 5
+
+
+def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
+    """Evaluate *request* with N independent judges and aggregate by majority vote (#184).
+
+    Design choices (slice 1):
+    - **Aggregation**: simple majority (>= ceil(N/2) votes). No extra LLM
+      chair call — deterministic aggregation keeps cost predictable.
+    - **Tie handling** (N=2 with 1-1 split): return ``UNSUPPORTED`` with
+      ``consensus_tie`` evidence — fail-closed safety; the caller should
+      re-run with odd N or promote to ``single`` with a stronger model.
+    - **Panel size**: read from ``rule.params["consensus_panel_size"]``
+      (default 3, range 2–5). Values outside the range are clamped and
+      recorded in evidence so rule authors can observe the adjustment.
+    - **Quote merging**: supporting quotes from majority-voting judges are
+      merged and deduplicated by exact string match.
+    - **Per-judge parse/fabrication failures**: any judge that returns a
+      parse error or quote-fabrication rejection contributes an
+      ``"unsupported"`` vote (fail-closed); the failure detail is recorded
+      in ``judge_results``.
+    - **Chair-LLM aggregation** is deferred to slice 2 if simple majority
+      is insufficient for production use cases.
+
+    Evidence shape (``llm_consensus`` kind):
+
+    .. code-block:: json
+
+        {
+            "llm_strategy": "consensus",
+            "consensus_panel_size": 3,
+            "consensus_votes": {"pass": 2, "fail": 1, "unsupported": 0},
+            "majority_verdict": "pass",
+            "primary_reason": "<from first majority judge>",
+            "supporting_evidence_quotes": ["<merged from majority judges>"],
+            "prompt_version": "v4",
+            "cost_estimate_usd_total": 0.0003,
+            "latency_ms_total": 450,
+            "models": ["gpt-4o-mini", "gpt-4o-mini", "gpt-4o-mini"],
+            "llm_call_count": 3,
+            "judge_results": [...]
+        }
+    """
+    rule = request.rule
+    target = request.target
+    artifact_kind = request.artifact_kind
+
+    rubric_input = _build_rubric_input(rule, target)
+
+    # Load provider config once; if unconfigured bail early.
+    env = _load_env_file()
+    if not _is_configured(env):
+        return _unavailable_unconfigured(rule, rubric_input)
+
+    provider = env["GATE_KEEPER_LLM_PROVIDER"]
+    model = _resolve_model(provider, env)
+
+    # Resolve panel size from rule.params, clamp to valid range.
+    raw_panel_size = rule.params.get("consensus_panel_size", _CONSENSUS_PANEL_SIZE_DEFAULT)
+    try:
+        panel_size = int(raw_panel_size)
+    except (TypeError, ValueError):
+        panel_size = _CONSENSUS_PANEL_SIZE_DEFAULT
+    panel_size = max(_CONSENSUS_PANEL_SIZE_MIN, min(_CONSENSUS_PANEL_SIZE_MAX, panel_size))
+
+    system, user = _build_prompt(rule, target, artifact_kind)
+    artifact_text = _resolve_artifact_text(target, artifact_kind)
+
+    # --- Run N independent provider calls ---
+    judge_results: list[dict[str, object]] = []
+    total_cost: float | None = 0.0
+    total_latency_ms: int = 0
+    models_used: list[str] = []
+
+    for judge_index in range(panel_size):
+        try:
+            if provider == "anthropic":
+                response_text, telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
+            else:
+                response_text, telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
+        except Exception as exc:  # noqa: BLE001
+            judge_results.append(
+                {
+                    "judge_index": judge_index,
+                    "model": model,
+                    "verdict": "unsupported",
+                    "failure_mode": "provider_error",
+                    "detail": f"{type(exc).__name__}: {exc}"[:500],
+                }
+            )
+            models_used.append(model)
+            # Cost/latency unknown for failed call; set total to None (fail-closed).
+            total_cost = None
+            continue
+
+        assert telemetry.keys() >= {"latency_ms", "tokens_in", "tokens_out"}, (
+            f"provider helper returned incomplete telemetry: {sorted(telemetry.keys())}"
+        )
+
+        call_cost = _estimate_cost(model, telemetry["tokens_in"], telemetry["tokens_out"])
+        if call_cost is None:
+            total_cost = None
+        elif total_cost is not None:
+            total_cost += call_cost
+
+        total_latency_ms += telemetry["latency_ms"]
+        models_used.append(model)
+
+        parsed = _parse_llm_judgment(response_text)
+        if isinstance(parsed, LlmJudgmentParseError):
+            judge_results.append(
+                {
+                    "judge_index": judge_index,
+                    "model": model,
+                    "verdict": "unsupported",
+                    "failure_mode": "parse_error",
+                    "detail": parsed.detail[:500],
+                    "latency_ms": telemetry["latency_ms"],
+                    "tokens_in": telemetry["tokens_in"],
+                    "tokens_out": telemetry["tokens_out"],
+                    "cost_estimate_usd": call_cost,
+                }
+            )
+            continue
+
+        # Quote-fabrication check per judge.
+        fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
+        if fabricated:
+            judge_results.append(
+                {
+                    "judge_index": judge_index,
+                    "model": model,
+                    "verdict": "unsupported",
+                    "failure_mode": "quote_fabrication",
+                    "claimed_judgment": parsed.judgment,
+                    "fabricated_quotes": fabricated,
+                    "latency_ms": telemetry["latency_ms"],
+                    "tokens_in": telemetry["tokens_in"],
+                    "tokens_out": telemetry["tokens_out"],
+                    "cost_estimate_usd": call_cost,
+                }
+            )
+            continue
+
+        # Mirror the single-strategy contract: an "unsupported" verdict on a
+        # rule without ``target_kind`` is a contract violation — the
+        # artifact-kind block was never injected, so the model had no basis to
+        # claim a mismatch.  Record as a provider error so it counts as an
+        # unsupported vote rather than silently aggregating as a valid judgment.
+        if parsed.judgment == "unsupported" and rule.target_kind is TargetKind.UNSPECIFIED:
+            judge_results.append(
+                {
+                    "judge_index": judge_index,
+                    "model": model,
+                    "verdict": "unsupported",
+                    "failure_mode": "unsupported_without_target_kind",
+                    "detail": (
+                        "Model returned 'unsupported' but the rule carries no "
+                        "target_kind annotation; the artifact-kind block was "
+                        "never injected into the prompt, so the verdict has "
+                        "no grounding. Treat as provider error."
+                    ),
+                    "latency_ms": telemetry["latency_ms"],
+                    "tokens_in": telemetry["tokens_in"],
+                    "tokens_out": telemetry["tokens_out"],
+                    "cost_estimate_usd": call_cost,
+                }
+            )
+            continue
+
+        judge_results.append(
+            {
+                "judge_index": judge_index,
+                "model": model,
+                "verdict": parsed.judgment,
+                "primary_reason": parsed.primary_reason,
+                "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+                "suggested_action": parsed.suggested_action,
+                "latency_ms": telemetry["latency_ms"],
+                "tokens_in": telemetry["tokens_in"],
+                "tokens_out": telemetry["tokens_out"],
+                "cost_estimate_usd": call_cost,
+            }
+        )
+
+    # --- Aggregate ---
+    verdicts = [r["verdict"] for r in judge_results]
+    pass_count = verdicts.count("pass")
+    fail_count = verdicts.count("fail")
+    unsupported_count = verdicts.count("unsupported")
+    votes = {"pass": pass_count, "fail": fail_count, "unsupported": unsupported_count}
+
+    # Strict majority: a verdict requires more than half the panel (> panel_size/2),
+    # not just >= ceil(panel_size/2).  For even N, ceil(N/2) == N/2, so the old
+    # threshold allowed a single judge out of two to carry a PASS or FAIL when
+    # the other voted unsupported — which is not a majority.  Using > panel_size/2
+    # means exactly half is not enough (those cases fall through to tie/unsupported).
+    threshold = panel_size / 2
+    # Determine majority verdict (fail-closed on tie).
+    if pass_count > threshold and pass_count > fail_count:
+        majority_verdict: str = "pass"
+    elif fail_count > threshold and fail_count > pass_count:
+        majority_verdict = "fail"
+    elif pass_count == fail_count and unsupported_count == 0:
+        # Exact tie between pass and fail (e.g. N=2 → 1-1).
+        majority_verdict = "tie"
+    else:
+        # Plurality is unsupported or no clear majority.
+        majority_verdict = "unsupported"
+
+    # Merge supporting quotes from majority judges (dedup by exact match).
+    majority_quotes: list[str] = []
+    seen_quotes: set[str] = set()
+    majority_primary_reason: str = ""
+    majority_suggested_action: str | None = None
+    for r in judge_results:
+        if r["verdict"] != majority_verdict:
+            continue
+        if not majority_primary_reason:
+            majority_primary_reason = str(r.get("primary_reason", ""))
+            majority_suggested_action = r.get("suggested_action")  # type: ignore[assignment]
+        for q in r.get("supporting_evidence_quotes", []):  # type: ignore[union-attr]
+            if isinstance(q, str) and q not in seen_quotes:
+                seen_quotes.add(q)
+                majority_quotes.append(q)
+
+    consensus_evidence_base: dict[str, object] = {
+        "llm_strategy": "consensus",
+        "consensus_panel_size": panel_size,
+        "consensus_votes": votes,
+        "majority_verdict": majority_verdict,
+        "prompt_version": PROMPT_VERSION,
+        "cost_estimate_usd_total": total_cost,
+        "latency_ms_total": total_latency_ms,
+        "models": models_used,
+        "llm_call_count": panel_size,
+        "judge_results": judge_results,
+    }
+
+    if majority_verdict == "tie":
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=(
+                f"Consensus panel produced a tie ({pass_count} pass vs {fail_count} fail "
+                f"with N={panel_size}); verdict is indeterminate."
+            ),
+            evidence=[
+                Evidence(
+                    kind="consensus_tie",
+                    data={**consensus_evidence_base},
+                )
+            ],
+            remediation=(
+                "Re-run with an odd panel size (e.g. consensus_panel_size: 3) to avoid "
+                "ties, or switch to strategy: single with a stronger model."
+            ),
+        )
+
+    if majority_verdict == "unsupported":
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNSUPPORTED,
+            severity=rule.severity,
+            message=(
+                f"Consensus panel did not reach a pass/fail majority "
+                f"(pass={pass_count}, fail={fail_count}, unsupported={unsupported_count}, N={panel_size})."
+            ),
+            evidence=[
+                Evidence(
+                    kind="consensus_no_majority",
+                    data={**consensus_evidence_base},
+                )
+            ],
+            remediation=(
+                "Check judge_results in evidence for per-judge failure modes "
+                "(parse errors, quote fabrication, target-kind mismatch). "
+                "Consider increasing panel size or switching to a more reliable model."
+            ),
+        )
+
+    # pass or fail majority — build final diagnostic.
+    status = Status.PASS if majority_verdict == "pass" else Status.FAIL
+    evidence_data: dict[str, object] = {
+        **consensus_evidence_base,
+        "primary_reason": majority_primary_reason,
+        "supporting_evidence_quotes": majority_quotes,
+        "suggested_action": majority_suggested_action,
+    }
+    evidence = Evidence(kind="llm_consensus", data=evidence_data)
+
+    if status is Status.PASS:
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=status,
+            severity=rule.severity,
+            message=majority_primary_reason,
+            evidence=[evidence],
+        )
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=status,
+        severity=rule.severity,
+        message=majority_primary_reason,
+        evidence=[evidence],
+        remediation=majority_suggested_action,
+    )
+
+
+#: Concrete strategy registry (#183 / #184). Maps strategy id to its
+#: :class:`Strategy` callable. ``single`` and ``consensus`` are implemented;
+#: ``review`` and ``adaptive`` are reserved and dispatch through
 #: ``_run_not_implemented_strategy`` so the gap is observable.
 _STRATEGIES: dict[str, Strategy] = {
     "single": _run_single_strategy,
+    "consensus": _run_consensus_strategy,
 }
 
 
