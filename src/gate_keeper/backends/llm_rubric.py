@@ -1787,8 +1787,6 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
             "judge_results": [...]
         }
     """
-    import math as _math
-
     rule = request.rule
     target = request.target
     artifact_kind = request.artifact_kind
@@ -1890,6 +1888,32 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
             )
             continue
 
+        # Mirror the single-strategy contract: an "unsupported" verdict on a
+        # rule without ``target_kind`` is a contract violation — the
+        # artifact-kind block was never injected, so the model had no basis to
+        # claim a mismatch.  Record as a provider error so it counts as an
+        # unsupported vote rather than silently aggregating as a valid judgment.
+        if parsed.judgment == "unsupported" and rule.target_kind is TargetKind.UNSPECIFIED:
+            judge_results.append(
+                {
+                    "judge_index": judge_index,
+                    "model": model,
+                    "verdict": "unsupported",
+                    "failure_mode": "unsupported_without_target_kind",
+                    "detail": (
+                        "Model returned 'unsupported' but the rule carries no "
+                        "target_kind annotation; the artifact-kind block was "
+                        "never injected into the prompt, so the verdict has "
+                        "no grounding. Treat as provider error."
+                    ),
+                    "latency_ms": telemetry["latency_ms"],
+                    "tokens_in": telemetry["tokens_in"],
+                    "tokens_out": telemetry["tokens_out"],
+                    "cost_estimate_usd": call_cost,
+                }
+            )
+            continue
+
         judge_results.append(
             {
                 "judge_index": judge_index,
@@ -1912,11 +1936,16 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
     unsupported_count = verdicts.count("unsupported")
     votes = {"pass": pass_count, "fail": fail_count, "unsupported": unsupported_count}
 
-    threshold = _math.ceil(panel_size / 2)
+    # Strict majority: a verdict requires more than half the panel (> panel_size/2),
+    # not just >= ceil(panel_size/2).  For even N, ceil(N/2) == N/2, so the old
+    # threshold allowed a single judge out of two to carry a PASS or FAIL when
+    # the other voted unsupported — which is not a majority.  Using > panel_size/2
+    # means exactly half is not enough (those cases fall through to tie/unsupported).
+    threshold = panel_size / 2
     # Determine majority verdict (fail-closed on tie).
-    if pass_count >= threshold and pass_count > fail_count:
+    if pass_count > threshold and pass_count > fail_count:
         majority_verdict: str = "pass"
-    elif fail_count >= threshold and fail_count > pass_count:
+    elif fail_count > threshold and fail_count > pass_count:
         majority_verdict = "fail"
     elif pass_count == fail_count and unsupported_count == 0:
         # Exact tie between pass and fail (e.g. N=2 → 1-1).
