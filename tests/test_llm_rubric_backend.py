@@ -195,6 +195,7 @@ class TestLlmRubricBackendStub:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.dotenv_loader
 class TestDotenvLoader:
     def test_returns_empty_when_file_absent(self, tmp_path):
         missing = tmp_path / "no-such.env"
