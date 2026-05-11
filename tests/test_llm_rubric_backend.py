@@ -3843,7 +3843,11 @@ class TestAdaptiveStrategy:
         assert data["latency_ms_total"] == 400
 
     def test_tier1_evidence_preserved_in_tier2(self, monkeypatch, tmp_path):
-        """When Tier 2 fires, Tier 1 evidence is nested under ``tier1_evidence``."""
+        """When Tier 2 fires, Tier 1 evidence is nested under ``tier1_evidence``.
+
+        The nested value is ``{kind, data}`` so the original evidence kind is
+        auditable alongside the inner evidence payload.
+        """
         _patch_env(monkeypatch, self._ENV)
         responses = [self._UNSUPPORTED_JSON] + [_VALID_PASS_JSON] * 3
         _, spy = self._make_spy(responses)
@@ -3853,7 +3857,10 @@ class TestAdaptiveStrategy:
         data = diag.evidence[0].data
         assert "tier1_evidence" in data
         t1 = data["tier1_evidence"]
-        assert t1["judgment"] == "unsupported"
+        # tier1_evidence is now {kind, data} to preserve the original evidence kind.
+        assert "kind" in t1
+        assert "data" in t1
+        assert t1["data"]["judgment"] == "unsupported"
 
     # ---- unconfigured ----
 

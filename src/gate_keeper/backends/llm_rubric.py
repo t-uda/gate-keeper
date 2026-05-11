@@ -2668,7 +2668,11 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
     # strategy success/failure paths populate evidence[0]).
     tier1_ev_data: dict[str, Any] = tier1_diag.evidence[0].data if tier1_diag.evidence else {}
 
-    tier1_call_count: int = int(tier1_ev_data.get("llm_call_count", 1))
+    # Default llm_call_count to 0, not 1: pre-call failure paths
+    # (provider_unconfigured, provider_error, etc.) do not execute any LLM
+    # request, so their evidence records omit llm_call_count.  Using 1 as a
+    # fallback would inflate call/cost telemetry for those paths.
+    tier1_call_count: int = int(tier1_ev_data.get("llm_call_count", 0))
     tier1_models: list[str] = list(tier1_ev_data.get("models", []))  # type: ignore[arg-type]
     tier1_cost: float | None = tier1_ev_data.get("cost_estimate_usd_total")  # type: ignore[assignment]
     tier1_latency: int = int(tier1_ev_data.get("latency_ms_total", 0))
@@ -2697,10 +2701,17 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
             "latency_ms_total": tier1_latency,
         }
         # Build updated evidence list: overlay the first record, keep the rest.
+        # Nest tier1 evidence as {kind, data} so the original evidence kind
+        # (e.g. provider_unconfigured, llm_quote_fabrication) is preserved for
+        # downstream programmatic inspection.
         updated_ev = [
             Evidence(
                 kind="llm_adaptive",
-                data={**tier1_ev_data, **adaptive_overlay, "tier1_evidence": tier1_ev_data},
+                data={
+                    **tier1_ev_data,
+                    **adaptive_overlay,
+                    "tier1_evidence": {"kind": tier1_ev_kind, "data": tier1_ev_data},
+                },
             )
         ] + list(tier1_diag.evidence[1:])
         return Diagnostic(
@@ -2732,10 +2743,13 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
 
     tier2_ev_data: dict[str, Any] = tier2_diag.evidence[0].data if tier2_diag.evidence else {}
 
-    tier2_call_count: int = int(tier2_ev_data.get("llm_call_count", 3))
+    # Default llm_call_count to 0 for the same reason as Tier 1: if consensus
+    # returns early (e.g. provider_unconfigured), no LLM calls were made.
+    tier2_call_count: int = int(tier2_ev_data.get("llm_call_count", 0))
     tier2_models: list[str] = list(tier2_ev_data.get("models", []))  # type: ignore[arg-type]
     tier2_cost: float | None = tier2_ev_data.get("cost_estimate_usd_total")  # type: ignore[assignment]
     tier2_latency: int = int(tier2_ev_data.get("latency_ms_total", 0))
+    tier2_ev_kind: str = tier2_diag.evidence[0].kind if tier2_diag.evidence else ""
 
     # Aggregate telemetry across both tiers.
     total_call_count = tier1_call_count + tier2_call_count
@@ -2746,6 +2760,9 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
         total_cost = tier1_cost + tier2_cost
     total_latency = tier1_latency + tier2_latency
 
+    # Nest both tier evidence objects as {kind, data} so the original inner
+    # evidence kinds (e.g. llm_consensus, consensus_tie, provider_unconfigured)
+    # are preserved for downstream programmatic inspection.
     adaptive_overlay_t2: dict[str, Any] = {
         "llm_strategy": "adaptive",
         "adaptive_tier": 2,
@@ -2754,7 +2771,8 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
         "models": total_models,
         "cost_estimate_usd_total": total_cost,
         "latency_ms_total": total_latency,
-        "tier1_evidence": tier1_ev_data,
+        "tier1_evidence": {"kind": tier1_ev_kind, "data": tier1_ev_data},
+        "tier2_evidence": {"kind": tier2_ev_kind, "data": tier2_ev_data},
     }
     updated_ev_t2 = [
         Evidence(
