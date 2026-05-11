@@ -209,8 +209,8 @@ order and stop at the first match.
 **Step 1 — Deterministic file, path, or existence check?**
 If the rule can be fully evaluated by checking whether a file exists, whether a
 GitHub field is set, whether a label is present, or any other machine-verifiable
-predicate, route to a **deterministic backend** (`filesystem`, `github-check`,
-or a `command` adapter script).
+predicate, route to a **deterministic backend** (`filesystem`, `github`,
+or a `command` adapter under `Backend.EXTERNAL`).
 
 - Examples: "The PR has at least one reviewer assigned", "A `CHANGELOG.md` file
   exists at the repository root", "The commit SHA resolves to a signed tag".
@@ -225,7 +225,7 @@ that keyword or pattern — route to **`external+textlint`**
 
 - Examples: "The PR description must contain the word 'Testing'", "Each commit
   message must start with a conventional-commit type prefix (`feat:`, `fix:`,
-  …)", "The changelog entry must not use passive voice" (textlint rule exists).
+  …)", "The changelog entry must not use passive voice" (requires a passive-voice textlint rule in your config).
 - textlint handles mechanical prose constraints deterministically. If the rule
   passes with a regular expression or a vocabulary list, it does not need an LLM.
 
@@ -260,8 +260,8 @@ evaluate a single in-scope artefact, or split it into one rule per artefact.
 |---|---|
 | **Candidate rule** | "The PR description must mention testing." |
 | **Backend** | `external+textlint` |
-| **Rationale** | This is a keyword-presence check. A textlint vocabulary rule or a regular expression adapter can determine pass/fail without any semantic judgment. Routing to `llm-rubric` would be overengineering — the criterion is fully captured by "does the word 'testing' or 'tested' appear?" (or a richer synonym list). |
-| **IR shape** | `kind=external_check`, `params.tool="textlint"`, `params.config=".textlintrc"` |
+| **Rationale** | This is a keyword-presence check. A textlint vocabulary rule (or a `command` adapter running a keyword script) can determine pass/fail without any semantic judgment. Routing to `llm-rubric` would be overengineering — the criterion is fully captured by "does the word 'testing' or 'tested' appear?" (or a richer synonym list). |
+| **IR shape** | `kind=external_check`, `backend_hint=external`, `params.tool="textlint"`, `params.config=".textlintrc"` |
 
 #### Example B — "The error message must be actionable"
 
@@ -277,9 +277,9 @@ evaluate a single in-scope artefact, or split it into one rule per artefact.
 | | |
 |---|---|
 | **Candidate rule** | "All public Python functions and methods have type annotations on all parameters and return values." |
-| **Backend** | Deterministic AST check (`command` adapter or `github-check`) |
+| **Backend** | Deterministic AST check (`command` adapter under `Backend.EXTERNAL`, or a `github` rule kind) |
 | **Rationale** | Type-annotation presence is a machine-verifiable predicate. A `mypy --disallow-untyped-defs` or `pyright` invocation, or a custom AST script wired via the `command` adapter, gives a deterministic pass/fail with precise evidence. LLM evaluation of this rule would be unreliable and expensive compared to a static-analysis tool that has full visibility into the source tree. |
-| **IR shape** | `kind=external_check`, `params.tool="command"`, `params.argv=["python", "scripts/check_annotations.py"]` (requires `--allow-command-adapter`) |
+| **IR shape** | `kind=external_check`, `backend_hint=external`, `params.tool="command"`, `params.argv=["python", "scripts/check_annotations.py"]` (requires `--allow-command-adapter`) |
 
 #### Example D — "The PR description and changelog entry describe the same change"
 
@@ -294,7 +294,7 @@ evaluate a single in-scope artefact, or split it into one rule per artefact.
 
 | Signal | Backend | Doc |
 |--------|---------|-----|
-| File/path/existence predicate | `filesystem` / `github-check` | — |
+| File/path/existence predicate | `filesystem` / `github` | — |
 | Keyword or structural prose pattern | `external+textlint` | [`docs/backend-external.md`](backend-external.md) |
 | Quality judgment (clarity, completeness, justification, tone) | `llm-rubric` | [`docs/llm-rubric.md`](llm-rubric.md) |
 | Cross-file or multi-artefact comparison | Multi-target slice (#182) | — |
