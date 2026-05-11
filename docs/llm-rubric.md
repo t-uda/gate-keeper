@@ -178,7 +178,7 @@ context passed to the model:
 
 ### Structured judgment schema (`LlmJudgment`)
 
-The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v5"`)
+The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v6"`)
 to respond with a JSON object matching the `LlmJudgment` dataclass:
 
 ```json
@@ -588,6 +588,24 @@ Reference history:
   `tests/fixtures/semantic/entries/multi-target-01-…` but
   `baseline.json` is left at the v4 capture until the slice-2 prompt
   evaluation runs).
+- v6 (#225, slice 2): hardens multi-target quote attribution. The
+  multi-target instruction block now declares the `{target_id, quote}`
+  object form **required** for multi-target rules (slice 1 said it was
+  preferred but tolerated plain-string entries). Backend enforcement is
+  tightened in lockstep: a quote whose `target_id=A` must be a substring
+  of artifact A's text specifically (the concatenated-text grounding
+  used in slice 1 is replaced by per-target grounding); unknown
+  `target_id` values fail closed; missing `target_id` on a multi-target
+  rule fails closed; placeholder text from unreadable artifacts cannot
+  be quoted (the placeholder ID is excluded from the corpus). The
+  single-target path (rules without `params.targets`) is unchanged
+  from v5. v5 and v6 evidence are **not** interchangeable — a v5-era
+  multi-target evidence record showing
+  `supporting_evidence_quote_target_ids=["first_id", ...]` may reflect
+  the lenient slice-1 default attribution, whereas a v6 record only
+  ever shows IDs the model itself emitted (or `null` after the strict
+  fabrication guard). Baseline comparison runs must filter on
+  `prompt_version`.
 
 ### Per-model dispatch accuracy (#175)
 

@@ -1906,7 +1906,11 @@ class TestPromptVersion:
         # #182 bumped v4 → v5 to introduce the multi-target rendering
         # branch (``## Target artifacts (multi)``). Single-target rules
         # render byte-identical text to v4; only the constant changes.
-        assert llm_backend.PROMPT_VERSION == "v5"
+        # #225 bumped v5 → v6 because the multi-target instruction block
+        # now declares the {target_id, quote} object form **required**
+        # (slice 1 said preferred) and backend enforcement is tightened
+        # in lockstep — v5 and v6 evidence are not interchangeable.
+        assert llm_backend.PROMPT_VERSION == "v6"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -1919,8 +1923,8 @@ class TestPromptVersion:
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
-        # #182 — PROMPT_VERSION is now v5.
-        assert diag.evidence[0].data["prompt_version"] == "v5"
+        # #225 — PROMPT_VERSION is now v6.
+        assert diag.evidence[0].data["prompt_version"] == "v6"
 
 
 # ---------------------------------------------------------------------------
@@ -2336,8 +2340,8 @@ class TestUnsupportedDispatch:
         assert diag.evidence[0].kind == "target_kind_mismatch"
         assert diag.evidence[0].data["judgment"] == "unsupported"
         assert diag.evidence[0].data["rule_target_kind"] == "pr_description"
-        # #182 — PROMPT_VERSION is now v5.
-        assert diag.evidence[0].data["prompt_version"] == "v5"
+        # #225 — PROMPT_VERSION is now v6.
+        assert diag.evidence[0].data["prompt_version"] == "v6"
 
     def test_unsupported_remediation_explains_mismatch(self, monkeypatch):
         from gate_keeper.models import TargetKind
@@ -4042,8 +4046,8 @@ class TestMultiTargetPromptRendering:
         with pytest.raises(ValueError, match=r"path traversal"):
             llm_backend._parse_multi_targets(rule)
 
-    def test_prompt_version_constant_is_v5(self):
-        assert llm_backend.PROMPT_VERSION == "v5"
+    def test_prompt_version_constant_is_v6(self):
+        assert llm_backend.PROMPT_VERSION == "v6"
 
 
 class TestMultiTargetQuoteParsing:

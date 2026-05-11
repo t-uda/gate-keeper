@@ -151,18 +151,22 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   downstream consumers can distinguish "rendered without a multi-target
 #   block because the rule did not declare one" from "rendered with the
 #   pre-v5 template that had no multi-target branch at all".
-# - v5 (#225, slice 2): harden multi-target quote attribution. For multi-target
-#   rules the grounding check is now performed **per-artifact**: a quote whose
-#   ``target_id=A`` must be a substring of artifact ``A``'s text, not merely of
-#   the concatenated multi-artifact prompt.  Unknown ``target_id`` values fail
-#   closed (rejected as fabricated rather than remapped to the first target).
-#   Missing ``target_id`` on a multi-target rule also fails closed: the stricter
-#   contract requires every quote to carry a known ``target_id``.  Placeholder
-#   text (``"(no path declared)"`` / ``"(unable to read artifact…)"``) can never
-#   satisfy the substring check because placeholder ids are excluded from the
-#   quotable corpus.  The ``PROMPT_VERSION`` constant is NOT bumped for this
-#   slice — the prompt template is unchanged; only server-side enforcement is
-#   tightened.
+# - v6 (#225, slice 2): harden multi-target quote attribution.  This bumps the
+#   prompt version because the multi-target instruction block changed in a
+#   model-facing way: the ``{target_id, quote}`` object form is now declared
+#   **required** for multi-target rules (slice 1 / v5 said it was preferred
+#   but tolerated plain-string entries).  Backend enforcement is also
+#   tightened in lockstep: a quote whose ``target_id=A`` must be a substring
+#   of artifact ``A``'s text specifically (not the concatenated prompt);
+#   unknown ``target_id`` values fail closed; missing ``target_id`` on a
+#   multi-target rule fails closed; placeholder text from unreadable artifacts
+#   cannot be quoted (the placeholder id is excluded from the corpus).  The
+#   version bump matters for reproducibility because v5 and v6 evidence are
+#   **not** interchangeable: a v5-era multi-target evidence record that shows
+#   ``supporting_evidence_quote_target_ids=["first_id", ...]`` may reflect the
+#   lenient slice-1 default attribution, whereas a v6 record only ever shows
+#   ids the model itself emitted (or ``null`` after the strict fabrication
+#   guard).  Baseline comparison runs must therefore filter on prompt_version.
 #
 # The ``PROMPT_VERSION`` constant is **not** bumped for #191. The rendered
 # template body (schema, instructions, constraints, examples) is unchanged;
@@ -172,7 +176,7 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 # file *path* (and the substring grounding check follows the same
 # substitution). Reproducibility records keyed on ``prompt_version``
 # continue to mean the same thing.
-PROMPT_VERSION = "v5"
+PROMPT_VERSION = "v6"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
