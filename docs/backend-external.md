@@ -143,7 +143,9 @@ These adapters ship with gate-keeper and self-register at CLI entry
 
 ## Out of scope for the foundation
 
-- Concrete adapter implementations (textlint, vale, …).
+- Concrete adapter implementations (textlint, vale, …). See
+  [Authoring new adapters](#authoring-new-adapters) below for the skeleton
+  and worked examples.
 - Subprocess invocation conventions, version pinning, or tool installation.
 - Classifier rules that route Markdown text to `external_check` — the
   classifier still has no `external` branch; rules use `external_check`
@@ -153,3 +155,293 @@ These adapters ship with gate-keeper and self-register at CLI entry
   for symmetry with the other backends, but the foundation has no adapters
   registered, so every rule routed there returns `unsupported` /
   `adapter_unknown` until #80 lands at least one adapter.
+
+---
+
+## Authoring new adapters
+
+This section is a practical guide for adding a new adapter (e.g. Vale,
+ESLint, shellcheck). It covers the skeleton contract, subprocess patterns,
+evidence-kind naming, and a checklist of error cases you must handle.
+
+### Adapter skeleton
+
+Every adapter must satisfy the `ExternalAdapter` protocol
+(`src/gate_keeper/backends/external.py`):
+
+```python
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from gate_keeper.backends._cli import failure_diag, run_cli
+from gate_keeper.backends.external import register
+from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
+
+
+def _diag(
+    rule: Rule,
+    status: Status,
+    message: str,
+    evidence: list[Evidence],
+    remediation: str | None = None,
+) -> Diagnostic:
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.EXTERNAL,
+        status=status,
+        severity=rule.severity,
+        message=message,
+        evidence=evidence,
+        remediation=remediation,
+    )
+
+
+class MyToolAdapter:
+    name = "my-tool"   # must match params.tool in the rule document
+
+    def check(self, rule: Rule, target: str | Path) -> Diagnostic:
+        target_str = str(target)
+        result = run_cli("my-tool", ["--format", "json", target_str],
+                         timeout=float(rule.params.get("timeout", 60)))
+
+        if not result.ok:
+            # Delegates to shared CLI-failure builders (missing / timeout / OS error).
+            return failure_diag(rule, Backend.EXTERNAL, "my-tool", result)
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return _diag(rule, Status.UNAVAILABLE, "my-tool produced unparseable JSON",
+                         [Evidence(kind="parse_error",
+                                   data={"stdout_excerpt": result.stdout[:300]})])
+
+        findings = _extract_findings(payload)   # tool-specific; see examples below
+        if not findings:
+            return _diag(rule, Status.PASS,
+                         f"my-tool reported no findings against {target_str}", [])
+
+        evidence = [_finding_evidence(f) for f in findings]
+        return _diag(rule, Status.FAIL,
+                     f"my-tool reported {len(findings)} finding(s)", evidence,
+                     remediation="Run `my-tool --fix <file>` where applicable.")
+
+
+register(MyToolAdapter())
+```
+
+Call `register(MyToolAdapter())` at application setup, mirroring how the
+textlint adapter is registered in `gate_keeper.cli.main()`.
+
+### Subprocess invocation patterns
+
+Use `run_cli` from `gate_keeper.backends._cli` — it never raises and returns
+a `CliResult` with `ok`, `stdout`, `stderr`, `returncode`, `binary_missing`,
+and `timed_out` flags.
+
+| Tool output format | Parse strategy |
+| --- | --- |
+| **JSON** | `json.loads(result.stdout)`; validate shape before accessing keys. |
+| **JSON-per-line (NDJSON)** | Split on newlines, `json.loads` each non-empty line, collect failures. |
+| **Plain-text** | Parse line-by-line; use a regular expression to capture file/line/column/message. |
+| **Severity-coded** | Map tool severity strings to gate-keeper `Severity` values; store the raw string in evidence for forensics. |
+
+Always test the parsed shape before trusting it. A non-zero exit code does
+not always mean the run failed — many linters exit non-zero when violations
+exist but stdout still contains the JSON report (textlint does this; check
+your tool's documentation).
+
+### Evidence-kind naming convention
+
+Evidence kinds are free strings; keep them scoped to the adapter with a
+`<tool>_` prefix so evidence records are self-describing in JSON reports.
+
+| Situation | Recommended kind |
+| --- | --- |
+| One lint finding | `<tool>_finding` |
+| Findings list was truncated | `<tool>_truncated` |
+| Subprocess binary absent | `cli_missing` _(shared, from `failure_diag`)_ |
+| Subprocess timed out | `cli_timeout` _(shared)_ |
+| OS error spawning subprocess | `cli_os_error` _(shared)_ |
+| Non-zero exit with no useful output | `cli_failure` _(shared)_ |
+| Malformed / unexpected JSON shape | `parse_error` |
+| Required `params` key absent | `params_error` |
+
+The shared `cli_*` kinds are produced by `failure_diag` / the individual
+`cli_*_diag` builders in `backends/_cli.py`; you get them for free by
+calling `failure_diag` on a failed `CliResult`.
+
+### Error-case handling checklist
+
+Before marking an adapter complete, verify every branch below returns a
+well-formed `Diagnostic` and never raises:
+
+- [ ] Tool binary is not on PATH → `UNAVAILABLE` / `cli_missing`
+- [ ] Tool exits non-zero with empty stdout (runtime crash) → `UNAVAILABLE` / `cli_failure`
+- [ ] Tool exits non-zero but stdout contains valid JSON (linter-style) → parse normally
+- [ ] Subprocess times out → `ERROR` / `cli_timeout`
+- [ ] Subprocess raises `OSError` (permissions, bad interpreter) → `ERROR` / `cli_os_error`
+- [ ] stdout is non-empty but not valid JSON → `UNAVAILABLE` / `parse_error`
+- [ ] stdout is valid JSON but wrong shape (not expected list/dict) → `UNAVAILABLE` / `parse_error`
+- [ ] `params.tool` or a required adapter param is missing → `UNAVAILABLE` / `params_error`
+- [ ] Findings list is very large (>50 items) → cap evidence entries; add a `<tool>_truncated` entry
+- [ ] `target` path does not exist (passed through to tool) → let the tool report it; surface as a finding or `cli_failure`
+
+### Example: Vale adapter (prose style linting)
+
+Vale lints prose against style guide rules and exits non-zero when violations
+exist. Its `--output=JSON` flag emits a `{"<file>": [{...}, ...]}` map.
+
+```python
+"""Vale adapter — prose style guide linting via Backend.EXTERNAL."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from gate_keeper.backends._cli import failure_diag, run_cli
+from gate_keeper.backends.external import register
+from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
+
+_FINDINGS_LIMIT = 50
+
+
+def _diag(rule, status, message, evidence, remediation=None):
+    return Diagnostic(rule_id=rule.id, source=rule.source, backend=Backend.EXTERNAL,
+                      status=status, severity=rule.severity, message=message,
+                      evidence=evidence, remediation=remediation)
+
+
+class ValeAdapter:
+    name = "vale"
+
+    def check(self, rule: Rule, target: str | Path) -> Diagnostic:
+        target_str = str(target)
+        style = rule.params.get("style")          # e.g. "Google" or "Microsoft"
+        args = ["--output=JSON"]
+        if style:
+            args += [f"--config=/dev/null", f"--filter=Style=={style}"]
+        args.append(target_str)
+
+        result = run_cli("vale", args, timeout=float(rule.params.get("timeout", 60)))
+        # Vale exits 1 when violations exist; stdout still has JSON.
+        if not result.ok and result.binary_missing:
+            return failure_diag(rule, Backend.EXTERNAL, "vale", result)
+
+        try:
+            payload: dict = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return _diag(rule, Status.UNAVAILABLE, "vale produced unparseable JSON",
+                         [Evidence(kind="parse_error",
+                                   data={"stdout_excerpt": result.stdout[:300]})])
+
+        evidence: list[Evidence] = []
+        total = truncated = 0
+        for file_path, findings in payload.items():
+            for f in (findings or []):
+                total += 1
+                if len(evidence) >= _FINDINGS_LIMIT:
+                    truncated += 1
+                    continue
+                evidence.append(Evidence(kind="vale_finding", data={
+                    "file": file_path, "line": f.get("Line"), "check": f.get("Check"),
+                    "severity": f.get("Severity"), "message": f.get("Message"),
+                }))
+        if truncated:
+            evidence.append(Evidence(kind="vale_truncated", data={"omitted": truncated}))
+
+        if total == 0:
+            return _diag(rule, Status.PASS, f"vale reported no findings in {target_str}", [])
+        return _diag(rule, Status.FAIL, f"vale reported {total} finding(s)", evidence,
+                     remediation="Correct prose issues flagged in evidence.")
+
+
+register(ValeAdapter())
+```
+
+### Example: ESLint adapter (JavaScript / TypeScript linting)
+
+ESLint's `--format=json` flag emits a list of file-result objects, each with
+a `messages` array. It exits non-zero when errors are found.
+
+```python
+"""ESLint adapter — JS/TS static analysis via Backend.EXTERNAL."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from gate_keeper.backends._cli import failure_diag, run_cli
+from gate_keeper.backends.external import register
+from gate_keeper.models import Backend, Diagnostic, Evidence, Rule, Status
+
+_FINDINGS_LIMIT = 50
+_SEVERITY_MAP = {1: "warning", 2: "error"}
+
+
+def _diag(rule, status, message, evidence, remediation=None):
+    return Diagnostic(rule_id=rule.id, source=rule.source, backend=Backend.EXTERNAL,
+                      status=status, severity=rule.severity, message=message,
+                      evidence=evidence, remediation=remediation)
+
+
+class ESLintAdapter:
+    name = "eslint"
+
+    def check(self, rule: Rule, target: str | Path) -> Diagnostic:
+        target_str = str(target)
+        config = rule.params.get("config")        # optional --config path
+        args = ["--format=json"]
+        if config:
+            args += ["--config", config]
+        args.append(target_str)
+
+        result = run_cli("npx", ["--no", "eslint"] + args,
+                         timeout=float(rule.params.get("timeout", 60)))
+        # ESLint exits 1 on lint errors, 2 on internal failure.
+        # exit 1 with JSON stdout is normal; exit 2 or binary missing is not.
+        if not result.ok and (result.binary_missing or result.timed_out
+                               or result.returncode == 2):
+            return failure_diag(rule, Backend.EXTERNAL, "eslint", result)
+
+        try:
+            file_reports: list[dict] = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            return _diag(rule, Status.UNAVAILABLE, "eslint produced unparseable JSON",
+                         [Evidence(kind="parse_error",
+                                   data={"stdout_excerpt": result.stdout[:300]})])
+
+        if not isinstance(file_reports, list):
+            return _diag(rule, Status.UNAVAILABLE, "eslint JSON has unexpected shape",
+                         [Evidence(kind="parse_error",
+                                   data={"stdout_excerpt": result.stdout[:300]})])
+
+        evidence: list[Evidence] = []
+        total = truncated = 0
+        for file_report in file_reports:
+            file_path = str(file_report.get("filePath") or target_str)
+            for msg in (file_report.get("messages") or []):
+                total += 1
+                if len(evidence) >= _FINDINGS_LIMIT:
+                    truncated += 1
+                    continue
+                evidence.append(Evidence(kind="eslint_violation", data={
+                    "file": file_path, "line": msg.get("line"), "column": msg.get("column"),
+                    "rule_id": msg.get("ruleId"), "severity": _SEVERITY_MAP.get(msg.get("severity"), "unknown"),
+                    "message": msg.get("message"),
+                }))
+        if truncated:
+            evidence.append(Evidence(kind="eslint_truncated", data={"omitted": truncated}))
+
+        if total == 0:
+            return _diag(rule, Status.PASS, f"eslint reported no violations in {target_str}", [])
+        return _diag(rule, Status.FAIL, f"eslint reported {total} violation(s)", evidence,
+                     remediation="Run `npx eslint --fix <file>` where auto-fix applies.")
+
+
+register(ESLintAdapter())
+```
