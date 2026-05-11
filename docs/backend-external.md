@@ -204,16 +204,30 @@ class MyToolAdapter:
 
     def check(self, rule: Rule, target: str | Path) -> Diagnostic:
         target_str = str(target)
-        result = run_cli("my-tool", ["--format", "json", target_str],
-                         timeout=float(rule.params.get("timeout", 60)))
-
-        if not result.ok:
-            # Delegates to shared CLI-failure builders (missing / timeout / OS error).
-            return failure_diag(rule, Backend.EXTERNAL, "my-tool", result)
-
         try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError:
+            timeout = float(rule.params.get("timeout", 60))
+        except (TypeError, ValueError):
+            timeout = 60.0
+        result = run_cli("my-tool", ["--format", "json", target_str],
+                         timeout=timeout)
+
+        # Many linters exit non-zero when findings exist but still emit valid
+        # JSON on stdout.  Attempt to parse stdout first; only treat a non-zero
+        # exit as a hard failure when stdout is empty/unparseable and the result
+        # indicates a real execution problem (missing binary, timeout, OS error,
+        # or non-zero exit with no report).
+        payload = None
+        if result.stdout:
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                pass
+
+        if payload is None:
+            if not result.ok:
+                # Real execution failure: missing binary, timeout, OS error, or
+                # non-zero exit with no usable output.
+                return failure_diag(rule, Backend.EXTERNAL, "my-tool", result)
             return _diag(rule, Status.UNAVAILABLE, "my-tool produced unparseable JSON",
                          [Evidence(kind="parse_error",
                                    data={"stdout_excerpt": result.stdout[:300]})])
@@ -229,7 +243,12 @@ class MyToolAdapter:
                      remediation="Run `my-tool --fix <file>` where applicable.")
 
 
-register(MyToolAdapter())
+# Register inside _register_default_adapters() in gate_keeper/cli.py rather
+# than at module import time, so that test isolation helpers (clear_adapters /
+# snapshot_adapters) can control the registry without import-order side effects.
+# See how the textlint adapter is wired in gate_keeper.cli._register_default_adapters().
+#
+# register(MyToolAdapter())
 ```
 
 Call `register(MyToolAdapter())` at application setup, mirroring how the
@@ -246,7 +265,7 @@ and `timed_out` flags.
 | **JSON** | `json.loads(result.stdout)`; validate shape before accessing keys. |
 | **JSON-per-line (NDJSON)** | Split on newlines, `json.loads` each non-empty line, collect failures. |
 | **Plain-text** | Parse line-by-line; use a regular expression to capture file/line/column/message. |
-| **Severity-coded** | Map tool severity strings to gate-keeper `Severity` values; store the raw string in evidence for forensics. |
+| **Severity-coded** | Store tool-native severity strings in `Evidence.data` for forensics. Do not map them to `Diagnostic.severity` — that field must always mirror `rule.severity` so that rule-level enforcement policy is preserved. |
 
 Always test the parsed shape before trusting it. A non-zero exit code does
 not always mean the run failed — many linters exit non-zero when violations
@@ -326,14 +345,29 @@ class ValeAdapter:
             args += [f"--config=/dev/null", f"--filter=Style=={style}"]
         args.append(target_str)
 
-        result = run_cli("vale", args, timeout=float(rule.params.get("timeout", 60)))
-        # Vale exits 1 when violations exist; stdout still has JSON.
-        if not result.ok and result.binary_missing:
-            return failure_diag(rule, Backend.EXTERNAL, "vale", result)
-
         try:
-            payload: dict = json.loads(result.stdout or "{}")
-        except json.JSONDecodeError:
+            timeout = float(rule.params.get("timeout", 60))
+        except (TypeError, ValueError):
+            timeout = 60.0
+        result = run_cli("vale", args, timeout=timeout)
+
+        # Vale exits 1 when violations exist; stdout still contains the JSON
+        # report.  Attempt to parse stdout first; only treat a non-zero exit
+        # as a hard failure when stdout is absent or unparseable.
+        payload: dict | None = None
+        if result.stdout:
+            try:
+                parsed = json.loads(result.stdout)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                pass
+
+        if payload is None:
+            if not result.ok:
+                # Real execution failure: binary missing, timeout, OS error, or
+                # non-zero exit with no usable JSON output.
+                return failure_diag(rule, Backend.EXTERNAL, "vale", result)
             return _diag(rule, Status.UNAVAILABLE, "vale produced unparseable JSON",
                          [Evidence(kind="parse_error",
                                    data={"stdout_excerpt": result.stdout[:300]})])
@@ -359,7 +393,9 @@ class ValeAdapter:
                      remediation="Correct prose issues flagged in evidence.")
 
 
-register(ValeAdapter())
+# Wire ValeAdapter inside gate_keeper.cli._register_default_adapters() rather
+# than at module import time — see skeleton note above.
+# register(ValeAdapter())
 ```
 
 ### Example: ESLint adapter (JavaScript / TypeScript linting)
@@ -400,22 +436,28 @@ class ESLintAdapter:
             args += ["--config", config]
         args.append(target_str)
 
-        result = run_cli("npx", ["--no", "eslint"] + args,
-                         timeout=float(rule.params.get("timeout", 60)))
+        try:
+            timeout = float(rule.params.get("timeout", 60))
+        except (TypeError, ValueError):
+            timeout = 60.0
+        result = run_cli("npx", ["--no", "eslint"] + args, timeout=timeout)
+
         # ESLint exits 1 on lint errors, 2 on internal failure.
         # exit 1 with JSON stdout is normal; exit 2 or binary missing is not.
-        if not result.ok and (result.binary_missing or result.timed_out
-                               or result.returncode == 2):
-            return failure_diag(rule, Backend.EXTERNAL, "eslint", result)
+        # Parse stdout first; only treat non-zero as a hard failure when no
+        # usable JSON report was produced.
+        file_reports: list[dict] | None = None
+        if result.stdout:
+            try:
+                parsed = json.loads(result.stdout)
+                if isinstance(parsed, list):
+                    file_reports = parsed
+            except json.JSONDecodeError:
+                pass
 
-        try:
-            file_reports: list[dict] = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError:
-            return _diag(rule, Status.UNAVAILABLE, "eslint produced unparseable JSON",
-                         [Evidence(kind="parse_error",
-                                   data={"stdout_excerpt": result.stdout[:300]})])
-
-        if not isinstance(file_reports, list):
+        if file_reports is None:
+            if not result.ok:
+                return failure_diag(rule, Backend.EXTERNAL, "eslint", result)
             return _diag(rule, Status.UNAVAILABLE, "eslint JSON has unexpected shape",
                          [Evidence(kind="parse_error",
                                    data={"stdout_excerpt": result.stdout[:300]})])
@@ -423,6 +465,11 @@ class ESLintAdapter:
         evidence: list[Evidence] = []
         total = truncated = 0
         for file_report in file_reports:
+            if not isinstance(file_report, dict):
+                return _diag(rule, Status.UNAVAILABLE,
+                             "eslint JSON element has unexpected type",
+                             [Evidence(kind="parse_error",
+                                       data={"stdout_excerpt": result.stdout[:300]})])
             file_path = str(file_report.get("filePath") or target_str)
             for msg in (file_report.get("messages") or []):
                 total += 1
@@ -443,5 +490,7 @@ class ESLintAdapter:
                      remediation="Run `npx eslint --fix <file>` where auto-fix applies.")
 
 
-register(ESLintAdapter())
+# Wire ESLintAdapter inside gate_keeper.cli._register_default_adapters() rather
+# than at module import time — see skeleton note above.
+# register(ESLintAdapter())
 ```
