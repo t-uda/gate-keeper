@@ -189,3 +189,112 @@ routing decision once that work lands.
 benchmark fixtures in `tests/fixtures/semantic/entries/`. The worked examples in
 §3 above use exactly those categories so that rule authors can cross-reference
 the fixture entries as concrete ground-truth specimens of each category.
+
+---
+
+## 5. Choosing the right backend
+
+This appendix answers the authoring-time question: *which backend should this
+rule use?* Use the four-step decision tree below. Work through the steps in
+order and stop at the first match.
+
+> Routing logic is tracked in #95 / #80. This section is authoring guidance
+> only — it does not describe how the classifier currently routes rules.
+> Cross-links: [`docs/backend-external.md`](backend-external.md) (adapter
+> pattern for `external+textlint`) and [`docs/llm-rubric.md`](llm-rubric.md)
+> (LLM rubric backend).
+
+### 5.1 Decision tree
+
+**Step 1 — Deterministic file, path, or existence check?**
+If the rule can be fully evaluated by checking whether a file exists, whether a
+GitHub field is set, whether a label is present, or any other machine-verifiable
+predicate, route to a **deterministic backend** (`filesystem`, `github-check`,
+or a `command` adapter script).
+
+- Examples: "The PR has at least one reviewer assigned", "A `CHANGELOG.md` file
+  exists at the repository root", "The commit SHA resolves to a signed tag".
+- Deterministic gates are authoritative for merge decisions. Use them whenever
+  the predicate can be expressed without reading prose content.
+
+**Step 2 — Stable-keyword prose pattern?**
+If the rule checks whether a specific word, phrase, or structural pattern is
+present or absent in a prose artefact — and the criterion is fully expressed by
+that keyword or pattern — route to **`external+textlint`**
+(see [`docs/backend-external.md`](backend-external.md)).
+
+- Examples: "The PR description must contain the word 'Testing'", "Each commit
+  message must start with a conventional-commit type prefix (`feat:`, `fix:`,
+  …)", "The changelog entry must not use passive voice" (textlint rule exists).
+- textlint handles mechanical prose constraints deterministically. If the rule
+  passes with a regular expression or a vocabulary list, it does not need an LLM.
+
+**Step 3 — Judgment of completeness, clarity, justification, or tone?**
+If evaluating the rule requires reading the artefact and forming an opinion about
+*whether* it satisfies a quality criterion — not merely *whether* a keyword
+appears — route to **`llm-rubric`**
+(see [`docs/llm-rubric.md`](llm-rubric.md)).
+
+- Examples: "The PR description explains the user-visible impact", "The error
+  message is actionable", "The changelog entry explains the reason for the
+  change, not just what changed".
+- Before routing here, check that the rule text satisfies the phrasing
+  requirements in §1 above. Abstract rules (`is clear`, `is good`) should be
+  rewritten into concrete observables first.
+- LLM-rubric results are **advisory** by default; see
+  [`docs/llm-rubric.md`](llm-rubric.md) § "Advisory status" before promoting
+  a semantic rule to `severity=error`.
+
+**Step 4 — Spans multiple artefacts or files?**
+If the rule requires comparing or aggregating evidence across more than one file
+or artefact (e.g. "API docs match the function signatures", "all public modules
+export a `__version__`"), the rule is a candidate for a **multi-target slice**
+(tracked in #182, not yet shipped). Until that work lands, rewrite the rule to
+evaluate a single in-scope artefact, or split it into one rule per artefact.
+
+### 5.2 Worked examples
+
+#### Example A — "The PR description must mention testing"
+
+| | |
+|---|---|
+| **Candidate rule** | "The PR description must mention testing." |
+| **Backend** | `external+textlint` |
+| **Rationale** | This is a keyword-presence check. A textlint vocabulary rule or a regular expression adapter can determine pass/fail without any semantic judgment. Routing to `llm-rubric` would be overengineering — the criterion is fully captured by "does the word 'testing' or 'tested' appear?" (or a richer synonym list). |
+| **IR shape** | `kind=external_check`, `params.tool="textlint"`, `params.config=".textlintrc"` |
+
+#### Example B — "The error message must be actionable"
+
+| | |
+|---|---|
+| **Candidate rule** | "Each error message states the file path and the failing predicate." |
+| **Backend** | `llm-rubric` |
+| **Rationale** | "Actionable" requires semantic judgment: the model must read the error text and decide whether it gives enough information to act. No keyword pattern can reliably capture this. The rule has been rewritten here as a concrete observable (states file path + predicate) per §1 — which is the stable form to supply to the rubric backend. |
+| **IR shape** | `kind=semantic_rubric`, `backend_hint=llm-rubric` |
+
+#### Example C — "All public Python APIs must be type-annotated"
+
+| | |
+|---|---|
+| **Candidate rule** | "All public Python functions and methods have type annotations on all parameters and return values." |
+| **Backend** | Deterministic AST check (`command` adapter or `github-check`) |
+| **Rationale** | Type-annotation presence is a machine-verifiable predicate. A `mypy --disallow-untyped-defs` or `pyright` invocation, or a custom AST script wired via the `command` adapter, gives a deterministic pass/fail with precise evidence. LLM evaluation of this rule would be unreliable and expensive compared to a static-analysis tool that has full visibility into the source tree. |
+| **IR shape** | `kind=external_check`, `params.tool="command"`, `params.argv=["python", "scripts/check_annotations.py"]` (requires `--allow-command-adapter`) |
+
+#### Example D — "The PR description and changelog entry describe the same change"
+
+| | |
+|---|---|
+| **Candidate rule** | "The PR description and the changelog entry describe the same user-visible change." |
+| **Backend** | Multi-target slice (#182, not yet shipped) |
+| **Rationale** | This rule requires reading two distinct artefacts — the PR body and a changelog file — and comparing them. A single `llm-rubric` call only receives one `target`. Until #182 ships, split this into two independent rules: one that evaluates the PR description in isolation, and one that evaluates the changelog entry. Each can be routed to `llm-rubric` with a well-formed single-artefact rule text. |
+| **IR shape** | Two `semantic_rubric` rules until #182; then a multi-target slice. |
+
+### 5.3 Quick-reference table
+
+| Signal | Backend | Doc |
+|--------|---------|-----|
+| File/path/existence predicate | `filesystem` / `github-check` | — |
+| Keyword or structural prose pattern | `external+textlint` | [`docs/backend-external.md`](backend-external.md) |
+| Quality judgment (clarity, completeness, justification, tone) | `llm-rubric` | [`docs/llm-rubric.md`](llm-rubric.md) |
+| Cross-file or multi-artefact comparison | Multi-target slice (#182) | — |
