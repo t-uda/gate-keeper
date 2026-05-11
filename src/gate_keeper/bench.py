@@ -46,6 +46,7 @@ from gate_keeper.models import (
     Status,
     TargetKind,
 )
+from gate_keeper.validator import target_kind_mismatch_diagnostic
 
 # ---------------------------------------------------------------------------
 # Entry loader
@@ -202,6 +203,11 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
                 f"BenchEntry({source_path.name}).artifact_kind: "
                 f"{artifact_kind_value!r} is not a valid TargetKind; expected one of {valid}"
             ) from exc
+        if artifact_kind is TargetKind.UNSPECIFIED:
+            raise ValueError(
+                f"BenchEntry({source_path.name}).artifact_kind: "
+                "'unspecified' is not a valid value; use null/absent to mean 'no kind override'"
+            )
 
     return BenchEntry(
         id=source_path.stem,
@@ -382,9 +388,7 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
         and rule.target_kind is not TargetKind.UNSPECIFIED
         and rule.target_kind is not entry.artifact_kind
     ):
-        from gate_keeper.validator import _target_kind_mismatch_diagnostic  # noqa: PLC0415
-
-        diag = _target_kind_mismatch_diagnostic(rule, entry.artifact_kind)
+        diag = target_kind_mismatch_diagnostic(rule, entry.artifact_kind)
         matched = entry.expected_judgment == "unsupported"
         return PerRuleResult(
             id=entry.id,

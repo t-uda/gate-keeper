@@ -171,7 +171,13 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
     if artifact_kind_value is None:
         artifact_kind: RuleTargetKind | None = None
     else:
-        artifact_kind = _coerce_enum(RuleTargetKind, artifact_kind_value, "artifact_kind")
+        coerced = _coerce_enum(RuleTargetKind, artifact_kind_value, "artifact_kind")
+        if coerced is RuleTargetKind.UNSPECIFIED:
+            raise ValueError(
+                f"FixtureEntry({source_path.name}).artifact_kind: "
+                "'unspecified' is not a valid value; use null/absent to mean 'no kind override'"
+            )
+        artifact_kind = coerced
     return FixtureEntry(
         id=source_path.stem,
         rule_text=_expect_str(obj["rule_text"], "rule_text"),
