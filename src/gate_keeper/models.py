@@ -8,6 +8,7 @@ documented in docs/rule-ir.md and exemplified by tests/fixtures/ir/.
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -170,6 +171,16 @@ class Rule:
     confidence: Confidence
     params: dict[str, Any]
     target_kind: TargetKind = TargetKind.UNSPECIFIED
+    # Non-binding suggestion fields populated by the classifier when a
+    # textlint-suitable pattern is detected (issue #215).  They are advisory
+    # output only — they do NOT change effective routing (``backend_hint`` /
+    # ``kind`` remain the source of truth for the validator).  Authors adopt
+    # the suggestion by setting ``backend_hint="external"`` and
+    # ``kind="external_check"`` in the rule IR explicitly; see
+    # ``docs/backend-external.md``.
+    suggested_backend: str | None = None
+    suggestion_confidence: float | None = None
+    suggestion_rationale: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> Rule:
@@ -184,13 +195,47 @@ class Rule:
             "confidence",
             "params",
         }
-        optional = {"target_kind"}
+        optional = {
+            "target_kind",
+            "suggested_backend",
+            "suggestion_confidence",
+            "suggestion_rationale",
+        }
         _require_keys(data, required, optional, "Rule")
         target_kind_raw = data.get("target_kind")
         if target_kind_raw is None:
             target_kind = TargetKind.UNSPECIFIED
         else:
             target_kind = _coerce_enum(TargetKind, target_kind_raw, "Rule.target_kind")
+
+        # ``suggestion_confidence`` is an optional float in [0.0, 1.0].
+        # Reject non-finite values (NaN/Inf) and out-of-range numbers up
+        # front so hand-authored or transformed IR cannot smuggle
+        # unnormalised confidence scores past the loader (codex review
+        # feedback on #227).
+        suggestion_confidence_raw = data.get("suggestion_confidence")
+        if suggestion_confidence_raw is None:
+            suggestion_confidence: float | None = None
+        else:
+            if isinstance(suggestion_confidence_raw, bool) or not isinstance(
+                suggestion_confidence_raw, (int, float)
+            ):
+                raise ValueError(
+                    f"Rule.suggestion_confidence: expected float, "
+                    f"got {type(suggestion_confidence_raw).__name__}"
+                )
+            suggestion_confidence = float(suggestion_confidence_raw)
+            if not math.isfinite(suggestion_confidence):
+                raise ValueError(
+                    f"Rule.suggestion_confidence: expected finite float in [0.0, 1.0], "
+                    f"got {suggestion_confidence_raw!r}"
+                )
+            if not (0.0 <= suggestion_confidence <= 1.0):
+                raise ValueError(
+                    f"Rule.suggestion_confidence: expected float in [0.0, 1.0], "
+                    f"got {suggestion_confidence_raw!r}"
+                )
+
         return cls(
             id=_expect_str(data["id"], "Rule.id"),
             title=_expect_str(data["title"], "Rule.title"),
@@ -202,6 +247,11 @@ class Rule:
             confidence=_coerce_enum(Confidence, data["confidence"], "Rule.confidence"),
             params=dict(_expect_dict(data["params"], "Rule.params")),
             target_kind=target_kind,
+            suggested_backend=_expect_optional_str(data.get("suggested_backend"), "Rule.suggested_backend"),
+            suggestion_confidence=suggestion_confidence,
+            suggestion_rationale=_expect_optional_str(
+                data.get("suggestion_rationale"), "Rule.suggestion_rationale"
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -220,6 +270,14 @@ class Rule:
         # IR fixtures remain byte-identical and the field stays opt-in.
         if self.target_kind is not TargetKind.UNSPECIFIED:
             result["target_kind"] = self.target_kind.value
+        # Suggestion fields are advisory output and omitted when absent so
+        # existing IR fixtures remain byte-identical.
+        if self.suggested_backend is not None:
+            result["suggested_backend"] = self.suggested_backend
+        if self.suggestion_confidence is not None:
+            result["suggestion_confidence"] = self.suggestion_confidence
+        if self.suggestion_rationale is not None:
+            result["suggestion_rationale"] = self.suggestion_rationale
         return result
 
 

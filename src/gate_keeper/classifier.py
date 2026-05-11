@@ -152,6 +152,100 @@ _NORMATIVE_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
+# Textlint suggestion heuristics (non-binding, issue #215)
+#
+# These patterns detect rules that are likely better served by textlint than
+# by the LLM rubric, and populate the advisory ``suggested_backend``,
+# ``suggestion_confidence``, and ``suggestion_rationale`` fields on the Rule.
+# They do NOT change the effective backend (``backend_hint`` / ``kind``).
+#
+# Precision over recall: only patterns with very low false-positive risk are
+# included.  Authors adopt the suggestion by explicitly setting
+# ``backend_hint="external"`` / ``kind="external_check"`` in the rule IR.
+# See ``docs/backend-external.md`` for the opt-in workflow.
+# ---------------------------------------------------------------------------
+
+# Cue 1 — Concrete term-substitution / terminology enforcement.
+# Matches: "use X instead of Y", "must not use the term", "correct term is".
+_TEXTLINT_TERM_SUB_RE = re.compile(
+    r"\buse\b.{1,60}\binstead\s+of\b"
+    r"|\bcorrect(?:ly\s+spell(?:ed)?|ly\s+capitaliz(?:ed)?|ed\s+as)\b"
+    r"|\bcorrect\s+term\s+is\b"
+    r"|\bmust\s+not\s+use\s+the\s+(?:term|word)\b"
+    r"|\bshould\s+not\s+use\s+the\s+(?:term|word)\b",
+    re.IGNORECASE,
+)
+
+# Cue 2 — Named prose-style constraint (passive voice, first-person pronouns,
+# sentence length).  These map directly to well-known textlint rules
+# (e.g. textlint-rule-no-passive-voice, textlint-rule-max-comma).
+_TEXTLINT_STYLE_RE = re.compile(
+    r"\bpassive\s+voice\b"
+    r"|\bfirst.person\s+pronouns?\b"
+    r"|\bsentence\s+length\b"
+    r"|\bno\s+more\s+than\s+\d+\s+words?\b"
+    r"|\bfewer\s+than\s+\d+\s+words?\b"
+    r"|\bmust\s+not\s+exceed\s+\d+\s+(?:words?|sentences?)\b",
+    re.IGNORECASE,
+)
+
+# Cue 3 — Capitalisation / spelling enforcement for prose terms or brand names.
+# "must be capitalized as X", "correct spelling/capitalization", etc.
+_TEXTLINT_CAPITALISE_RE = re.compile(
+    r"\bmust\s+be\s+(?:written|spelled|capitaliz(?:ed))\s+as\b"
+    r"|\bcorrect\s+(?:spelling|capitaliz(?:ation))\b"
+    r"|\bcapitaliz(?:ed|ation)\s+as\s+defined\b",
+    re.IGNORECASE,
+)
+
+
+def _suggest_textlint(rule: Rule) -> Rule:
+    """Annotate *rule* with a non-binding textlint suggestion when a heuristic matches.
+
+    Returns a new Rule with ``suggested_backend``, ``suggestion_confidence``,
+    and ``suggestion_rationale`` populated.  The effective backend
+    (``backend_hint`` / ``kind``) is left unchanged — the suggestion is
+    advisory output only.
+    """
+    text = rule.text
+
+    if _TEXTLINT_TERM_SUB_RE.search(text):
+        return replace(
+            rule,
+            suggested_backend="external+textlint",
+            suggestion_confidence=0.8,
+            suggestion_rationale=(
+                "term-substitution or terminology-enforcement pattern detected; "
+                "consider textlint-rule-terminology or textlint-rule-prh"
+            ),
+        )
+
+    if _TEXTLINT_STYLE_RE.search(text):
+        return replace(
+            rule,
+            suggested_backend="external+textlint",
+            suggestion_confidence=0.85,
+            suggestion_rationale=(
+                "named prose-style constraint detected (passive voice / first-person "
+                "pronouns / sentence length); consider a textlint style rule"
+            ),
+        )
+
+    if _TEXTLINT_CAPITALISE_RE.search(text):
+        return replace(
+            rule,
+            suggested_backend="external+textlint",
+            suggestion_confidence=0.75,
+            suggestion_rationale=(
+                "capitalisation or spelling-enforcement pattern detected; "
+                "consider textlint-rule-terminology or textlint-rule-prh"
+            ),
+        )
+
+    return rule
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -360,11 +454,21 @@ def _classify_rule(rule: Rule) -> Rule:
 # ---------------------------------------------------------------------------
 
 
+def _classify_and_annotate(rule: Rule) -> Rule:
+    """Apply routing classification, then annotate with non-binding suggestions.
+
+    The textlint suggestion is layered on top of the effective routing
+    decision so it never changes the effective backend.  Authors adopt a
+    suggestion by editing the rule IR (see ``docs/backend-external.md``).
+    """
+    return _suggest_textlint(_classify_rule(rule))
+
+
 def classify(ruleset: RuleSet) -> RuleSet:
     """Classify all rules in *ruleset*, returning a new RuleSet with updated kind/backend/confidence."""
-    return RuleSet(rules=[_classify_rule(rule) for rule in ruleset.rules])
+    return RuleSet(rules=[_classify_and_annotate(rule) for rule in ruleset.rules])
 
 
 def classify_rule(rule: Rule) -> Rule:
     """Classify a single rule, returning a new Rule with updated kind/backend/confidence."""
-    return _classify_rule(rule)
+    return _classify_and_annotate(rule)
