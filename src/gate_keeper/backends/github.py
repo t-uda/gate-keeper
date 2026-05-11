@@ -1236,6 +1236,667 @@ def _check_changed_files_absent(rule: Rule, pr: PrTarget) -> Diagnostic:
 
 
 # ---------------------------------------------------------------------------
+# Changed-file policy handler (issue #230 — changed_file_policy)
+# ---------------------------------------------------------------------------
+#
+# This rule kind evaluates changed files — from a GitHub PR *or* from a local
+# git working tree — against a YAML policy manifest.  It is deterministic: no
+# LLM calls.  The manifest schema is a strict subset of the contract defined in
+# ``spread-applicant-ai/policy-manifests/path-rules.yaml``.
+#
+# Param contract (rule.params):
+#   manifest_path          str    Required. Path to the policy manifest YAML,
+#                                 relative to the working directory or absolute.
+#   changed_files_source   str    Required. One of: "github_pr" | "local_git".
+#   local_git_mode         str    Optional (only relevant when source="local_git").
+#                                 One of: "staged" | "unstaged" |
+#                                 "staged_and_unstaged" | "untracked" | "all".
+#                                 Defaults to "staged_and_unstaged".
+#   repo_root              str    Optional. Directory to run git commands in
+#                                 when source="local_git". Defaults to cwd.
+#
+# Manifest schema (strict; unknown top-level keys and unknown entry fields
+# are rejected):
+#   version: 1
+#   entries:
+#     - kind: forbidden_path_pattern
+#       pattern: <glob>
+#       stop_condition: <str>
+#       source: <str>
+#       note: <str>          # optional
+#     - kind: known_allowed_exception
+#       pattern: <glob>
+#       exempts_pattern: <glob>
+#       authorising_issue: <str>
+#       source: <str>
+#     - kind: generated_output_extension
+#       extension: <str>
+#       source: <str>
+#       note: <str>          # optional
+#     - kind: authored_text_extension
+#       extension: <str>
+#       source: <str>
+#   Optional top-level keys (informational, not evaluated):
+#     source_documents, allowed_kinds, allowed_stop_conditions,
+#     known_allowed_exceptions_note, default_unknown_extension,
+#     default_unknown_path
+#
+# Evidence kind: ``changed_file_policy``
+
+# Allowed manifest entry kinds.
+_MANIFEST_ALLOWED_KINDS = frozenset(
+    [
+        "forbidden_path_pattern",
+        "known_allowed_exception",
+        "generated_output_extension",
+        "authored_text_extension",
+    ]
+)
+
+# Required / optional fields per entry kind.
+_MANIFEST_ENTRY_SCHEMA: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "forbidden_path_pattern": (
+        frozenset(["kind", "pattern", "stop_condition", "source"]),
+        frozenset(["note"]),
+    ),
+    "known_allowed_exception": (
+        frozenset(["kind", "pattern", "exempts_pattern", "authorising_issue", "source"]),
+        frozenset([]),
+    ),
+    "generated_output_extension": (
+        frozenset(["kind", "extension", "source"]),
+        frozenset(["note"]),
+    ),
+    "authored_text_extension": (
+        frozenset(["kind", "extension", "source"]),
+        frozenset([]),
+    ),
+}
+
+# Optional informational top-level keys (not evaluated; kept to avoid
+# rejecting well-formed consumer manifests).
+_MANIFEST_OPTIONAL_TOP_KEYS = frozenset(
+    [
+        "source_documents",
+        "allowed_kinds",
+        "allowed_stop_conditions",
+        "known_allowed_exceptions_note",
+        "default_unknown_extension",
+        "default_unknown_path",
+    ]
+)
+
+# Allowed values for local_git_mode.
+_LOCAL_GIT_MODES = frozenset(["staged", "unstaged", "staged_and_unstaged", "untracked", "all"])
+
+
+def _manifest_error_diag(rule: Rule, reason: str, **extra: object) -> Diagnostic:
+    """Build an UNAVAILABLE diagnostic with ``manifest_error`` evidence."""
+    data: dict[str, object] = {"rule_id": rule.id, "reason": reason}
+    data.update(extra)
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.GITHUB,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=f"rule {rule.id!r}: {reason}",
+        evidence=[Evidence(kind="manifest_error", data=data)],
+    )
+
+
+def _policy_params_error_diag(rule: Rule, reason: str, **extra: object) -> Diagnostic:
+    """Build an UNAVAILABLE diagnostic with ``params_error`` evidence (policy variant)."""
+    data: dict[str, object] = {"rule_id": rule.id, "reason": reason}
+    data.update(extra)
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.GITHUB,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=f"rule {rule.id!r} has invalid params for changed_file_policy: {reason}",
+        evidence=[Evidence(kind="params_error", data=data)],
+    )
+
+
+def _local_git_error_diag(rule: Rule, reason: str, **extra: object) -> Diagnostic:
+    """Build an UNAVAILABLE diagnostic with ``local_git_error`` evidence."""
+    data: dict[str, object] = {"rule_id": rule.id, "reason": reason}
+    data.update(extra)
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.GITHUB,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=f"rule {rule.id!r}: {reason}",
+        evidence=[Evidence(kind="local_git_error", data=data)],
+    )
+
+
+def _parse_policy_manifest(
+    rule: Rule,
+    manifest_path: str,
+) -> "tuple[dict, Diagnostic | None]":
+    """Load and validate the policy manifest YAML at *manifest_path*.
+
+    Returns ``(manifest_dict, None)`` on success or ``({}, diag)`` on any
+    failure.  Unknown top-level keys and unknown/malformed entry fields are
+    rejected (fail-closed).
+    """
+    try:
+        import yaml  # local import — keeps PyYAML out of the import graph until needed
+    except ImportError as exc:
+        return {}, _manifest_error_diag(
+            rule,
+            f"PyYAML is required but is not importable: {exc}",
+            package="pyyaml",
+        )
+
+    path = Path(manifest_path)
+    if not path.exists():
+        return {}, _manifest_error_diag(
+            rule,
+            f"manifest file not found: {manifest_path}",
+            path=manifest_path,
+        )
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, _manifest_error_diag(
+            rule,
+            f"cannot read manifest file {manifest_path}: {exc}",
+            path=manifest_path,
+        )
+
+    try:
+        doc = yaml.safe_load(raw_text)
+    except yaml.YAMLError as exc:
+        return {}, _manifest_error_diag(
+            rule,
+            f"YAML parse error in manifest {manifest_path}: {exc}",
+            path=manifest_path,
+            error=str(exc),
+        )
+
+    if not isinstance(doc, dict):
+        return {}, _manifest_error_diag(
+            rule,
+            f"manifest {manifest_path}: expected a YAML mapping at top level",
+            path=manifest_path,
+        )
+
+    # Validate version field.
+    version = doc.get("version")
+    if version != 1:
+        return {}, _manifest_error_diag(
+            rule,
+            f"manifest {manifest_path}: unsupported or missing version (got {version!r}); expected 1",
+            path=manifest_path,
+            version=version,
+        )
+
+    # Reject unknown top-level keys (beyond version, entries, and the
+    # known informational keys).
+    allowed_top = frozenset(["version", "entries"]) | _MANIFEST_OPTIONAL_TOP_KEYS
+    unknown_top = set(doc.keys()) - allowed_top
+    if unknown_top:
+        return {}, _manifest_error_diag(
+            rule,
+            f"manifest {manifest_path}: unknown top-level keys: {sorted(unknown_top)}",
+            path=manifest_path,
+            unknown_keys=sorted(unknown_top),
+        )
+
+    # Validate entries array.
+    entries_raw = doc.get("entries")
+    if entries_raw is None:
+        return {}, _manifest_error_diag(
+            rule,
+            f"manifest {manifest_path}: missing required 'entries' key",
+            path=manifest_path,
+        )
+    if not isinstance(entries_raw, list):
+        return {}, _manifest_error_diag(
+            rule,
+            f"manifest {manifest_path}: 'entries' must be a list",
+            path=manifest_path,
+        )
+
+    for idx, entry in enumerate(entries_raw):
+        if not isinstance(entry, dict):
+            return {}, _manifest_error_diag(
+                rule,
+                f"manifest {manifest_path}: entries[{idx}] is not a mapping",
+                path=manifest_path,
+                entry_index=idx,
+            )
+        # ``kind`` must be a string before we can membership-test it against
+        # the allowed set; an unhashable value (e.g. ``["forbidden_path_pattern"]``)
+        # would otherwise raise ``TypeError`` from the ``not in`` lookup and bypass
+        # the fail-closed contract (codex P1 / Copilot review on #232).
+        kind_val = entry.get("kind")
+        if not isinstance(kind_val, str):
+            return {}, _manifest_error_diag(
+                rule,
+                (
+                    f"manifest {manifest_path}: entries[{idx}].kind must be a string, "
+                    f"got {type(kind_val).__name__}"
+                ),
+                path=manifest_path,
+                entry_index=idx,
+                field="kind",
+                actual_type=type(kind_val).__name__,
+            )
+        if kind_val not in _MANIFEST_ALLOWED_KINDS:
+            return {}, _manifest_error_diag(
+                rule,
+                (
+                    f"manifest {manifest_path}: entries[{idx}].kind {kind_val!r} is not valid; "
+                    f"allowed: {sorted(_MANIFEST_ALLOWED_KINDS)}"
+                ),
+                path=manifest_path,
+                entry_index=idx,
+                kind=kind_val,
+            )
+        required_fields, optional_fields = _MANIFEST_ENTRY_SCHEMA[kind_val]
+        entry_keys = set(entry.keys())
+        missing = required_fields - entry_keys
+        if missing:
+            return {}, _manifest_error_diag(
+                rule,
+                (
+                    f"manifest {manifest_path}: entries[{idx}] (kind={kind_val!r}) "
+                    f"is missing required fields: {sorted(missing)}"
+                ),
+                path=manifest_path,
+                entry_index=idx,
+                kind=kind_val,
+                missing_fields=sorted(missing),
+            )
+        unknown = entry_keys - required_fields - optional_fields
+        if unknown:
+            return {}, _manifest_error_diag(
+                rule,
+                (
+                    f"manifest {manifest_path}: entries[{idx}] (kind={kind_val!r}) "
+                    f"has unknown fields: {sorted(unknown)}"
+                ),
+                path=manifest_path,
+                entry_index=idx,
+                kind=kind_val,
+                unknown_fields=sorted(unknown),
+            )
+
+        # Per-kind value-type validation. Every required field (and the
+        # optional ``note`` when present) must be a non-empty string;
+        # without this check a malformed manifest with the right *keys* but
+        # wrong *value types* (e.g. ``pattern: 7``) would later crash in
+        # ``_glob_to_regex`` / ``_match_glob`` rather than surfacing as a
+        # ``manifest_error`` diagnostic (codex P1 / Copilot review on
+        # #232).
+        string_fields = required_fields | (optional_fields & {"note"})
+        for field in sorted(string_fields):
+            if field not in entry:
+                continue  # already validated as required-or-present
+            value = entry[field]
+            if not isinstance(value, str) or not value:
+                return {}, _manifest_error_diag(
+                    rule,
+                    (
+                        f"manifest {manifest_path}: entries[{idx}] (kind={kind_val!r}) "
+                        f"field {field!r} must be a non-empty string, "
+                        f"got {type(value).__name__}"
+                    ),
+                    path=manifest_path,
+                    entry_index=idx,
+                    kind=kind_val,
+                    field=field,
+                    actual_type=type(value).__name__,
+                )
+
+    return doc, None
+
+
+def _collect_local_git_files(
+    rule: Rule,
+    mode: str,
+    repo_root: str,
+) -> "tuple[list[str] | None, Diagnostic | None]":
+    """Collect changed file paths from the local git working tree.
+
+    Returns ``(filenames, None)`` on success or ``(None, diag)`` on failure.
+
+    Git command mapping per mode:
+    - staged:               ``git diff --cached --name-only``
+    - unstaged:             ``git diff --name-only``
+    - staged_and_unstaged:  both staged + unstaged, deduplicated
+    - untracked:            ``git ls-files --others --exclude-standard``
+    - all:                  staged + unstaged + untracked
+    """
+    import subprocess  # noqa: PLC0415 — deferred to avoid import cost when not used
+
+    root = Path(repo_root) if repo_root else Path.cwd()
+
+    def _run_git(args: list[str]) -> "tuple[str | None, str | None]":
+        """Run a git command in *root*; return (stdout, error_msg)."""
+        try:
+            result = subprocess.run(
+                ["git"] + args,
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            return None, "git binary not found"
+        except subprocess.TimeoutExpired:
+            return None, "git command timed out after 30 seconds"
+        except OSError as exc:
+            return None, f"git command failed: {exc}"
+
+        if result.returncode != 0:
+            stderr_excerpt = result.stderr.strip()[:200]
+            return None, f"git exited with code {result.returncode}: {stderr_excerpt}"
+        return result.stdout, None
+
+    def _parse_names(stdout: str) -> list[str]:
+        return [line for line in stdout.splitlines() if line.strip()]
+
+    if mode == "staged":
+        out, err = _run_git(["diff", "--cached", "--name-only"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect staged files: {err}", mode=mode)
+        return _parse_names(out or ""), None
+
+    if mode == "unstaged":
+        out, err = _run_git(["diff", "--name-only"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect unstaged files: {err}", mode=mode)
+        return _parse_names(out or ""), None
+
+    if mode == "staged_and_unstaged":
+        staged_out, err = _run_git(["diff", "--cached", "--name-only"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect staged files: {err}", mode=mode)
+        unstaged_out, err = _run_git(["diff", "--name-only"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect unstaged files: {err}", mode=mode)
+        seen: set[str] = set()
+        names: list[str] = []
+        for line in (staged_out or "").splitlines() + (unstaged_out or "").splitlines():
+            name = line.strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names, None
+
+    if mode == "untracked":
+        out, err = _run_git(["ls-files", "--others", "--exclude-standard"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect untracked files: {err}", mode=mode)
+        return _parse_names(out or ""), None
+
+    if mode == "all":
+        staged_out, err = _run_git(["diff", "--cached", "--name-only"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect staged files: {err}", mode=mode)
+        unstaged_out, err = _run_git(["diff", "--name-only"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect unstaged files: {err}", mode=mode)
+        untracked_out, err = _run_git(["ls-files", "--others", "--exclude-standard"])
+        if err is not None:
+            return None, _local_git_error_diag(rule, f"cannot collect untracked files: {err}", mode=mode)
+        seen2: set[str] = set()
+        names2: list[str] = []
+        for line in (
+            (staged_out or "").splitlines()
+            + (unstaged_out or "").splitlines()
+            + (untracked_out or "").splitlines()
+        ):
+            name = line.strip()
+            if name and name not in seen2:
+                seen2.add(name)
+                names2.append(name)
+        return names2, None
+
+    # Unreachable if params were validated, but fail closed.
+    return None, _local_git_error_diag(rule, f"unknown local_git_mode {mode!r}", mode=mode)
+
+
+def _evaluate_manifest_policy(
+    rule: Rule,
+    filenames: list[str],
+    manifest: dict,
+    manifest_path: str,
+    source_label: str,
+    pagination_metadata: dict | None = None,
+) -> Diagnostic:
+    """Evaluate *filenames* against the policy manifest entries.
+
+    Returns a PASS or FAIL Diagnostic with structured evidence per finding.
+
+    Evidence kind: ``changed_file_policy``.
+
+    Logic:
+    1. Build a list of forbidden-path-pattern entries.
+    2. Build a set of known-allowed-exception entries (pattern + exempts_pattern).
+    3. For each changed file:
+       a. Check if it matches any forbidden pattern.
+       b. If yes, check if it is covered by a known-allowed exception
+          (exception.pattern must match the file AND exception.exempts_pattern
+          must match the forbidden pattern that triggered).
+       c. If not exempted → violation.
+
+    *pagination_metadata*: when supplied, merged into the evidence payload
+    so PR-mode runs carry the same ``page_count`` / ``pagination_complete``
+    parity that ``github_changed_files_absent`` exposes (Copilot review on
+    #232).  Local-git runs pass ``None`` because no pagination occurs.
+    """
+    entries = manifest.get("entries", [])
+
+    forbidden: list[dict] = [e for e in entries if e.get("kind") == "forbidden_path_pattern"]
+    exceptions: list[dict] = [e for e in entries if e.get("kind") == "known_allowed_exception"]
+
+    violations: list[dict] = []
+
+    for filename in filenames:
+        for fp in forbidden:
+            pattern = fp["pattern"]
+            if not _match_glob(filename, pattern, case_sensitive=True):
+                continue
+            # File matches a forbidden pattern. Check for an exception.
+            exempted = False
+            for exc_entry in exceptions:
+                exc_pattern = exc_entry.get("pattern", "")
+                exempts = exc_entry.get("exempts_pattern", "")
+                if _match_glob(filename, exc_pattern, case_sensitive=True) and _match_glob(
+                    pattern, exempts, case_sensitive=True
+                ):
+                    exempted = True
+                    break
+            if not exempted:
+                violations.append(
+                    {
+                        "path": filename,
+                        "matched_pattern": pattern,
+                        "stop_condition": fp.get("stop_condition", ""),
+                        "manifest_source": fp.get("source", ""),
+                        "note": fp.get("note", ""),
+                    }
+                )
+                break  # one violation per file; record first matching pattern
+
+    evidence_data: dict = {
+        "total_changed_files": len(filenames),
+        "manifest_path": manifest_path,
+        "source": source_label,
+        "violations": violations,
+        "forbidden_pattern_count": len(forbidden),
+        "exception_count": len(exceptions),
+    }
+    if pagination_metadata is not None:
+        evidence_data.update(pagination_metadata)
+    evidence = [Evidence(kind="changed_file_policy", data=evidence_data)]
+
+    if not violations:
+        return _diag(
+            rule,
+            Status.PASS,
+            (
+                f"changed_file_policy: 0 of {len(filenames)} changed file(s) "
+                f"violate manifest policy ({manifest_path})."
+            ),
+            evidence,
+        )
+
+    violation_paths = [v["path"] for v in violations]
+    remediation_lines = [
+        f"  {v['path']!r}: matched forbidden pattern {v['matched_pattern']!r} "
+        f"(source: {v['manifest_source'] or 'unspecified'})"
+        for v in violations
+    ]
+    remediation = "Remove or move the following files before committing:\n" + "\n".join(remediation_lines)
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.GITHUB,
+        status=Status.FAIL,
+        severity=rule.severity,
+        message=(
+            f"changed_file_policy: {len(violations)} of {len(filenames)} changed file(s) "
+            f"violate manifest policy ({manifest_path}): {violation_paths!r}."
+        ),
+        evidence=evidence,
+        remediation=remediation,
+    )
+
+
+def _validate_changed_file_policy_params(
+    rule: Rule,
+) -> "tuple[str, str, str, str] | Diagnostic":
+    """Validate and normalise params for ``changed_file_policy``.
+
+    Returns ``(manifest_path, changed_files_source, local_git_mode, repo_root)``
+    on success, or an UNAVAILABLE Diagnostic on error.
+    """
+    params = rule.params
+
+    if "manifest_path" not in params:
+        return _policy_params_error_diag(rule, "manifest_path is required", missing="manifest_path")
+    manifest_path = params["manifest_path"]
+    if not isinstance(manifest_path, str) or not manifest_path:
+        return _policy_params_error_diag(
+            rule,
+            "manifest_path must be a non-empty string",
+            field="manifest_path",
+            actual_type=type(manifest_path).__name__,
+        )
+
+    if "changed_files_source" not in params:
+        return _policy_params_error_diag(
+            rule, "changed_files_source is required", missing="changed_files_source"
+        )
+    cfs = params["changed_files_source"]
+    if cfs not in ("github_pr", "local_git"):
+        return _policy_params_error_diag(
+            rule,
+            f"changed_files_source must be 'github_pr' or 'local_git', got {cfs!r}",
+            field="changed_files_source",
+            actual_value=cfs,
+        )
+
+    local_git_mode = params.get("local_git_mode", "staged_and_unstaged")
+    if not isinstance(local_git_mode, str) or local_git_mode not in _LOCAL_GIT_MODES:
+        return _policy_params_error_diag(
+            rule,
+            f"local_git_mode must be one of {sorted(_LOCAL_GIT_MODES)}, got {local_git_mode!r}",
+            field="local_git_mode",
+            actual_value=local_git_mode,
+        )
+
+    repo_root = params.get("repo_root", "")
+    if not isinstance(repo_root, str):
+        return _policy_params_error_diag(
+            rule,
+            "repo_root must be a string when present",
+            field="repo_root",
+            actual_type=type(repo_root).__name__,
+        )
+
+    return manifest_path, cfs, local_git_mode, repo_root
+
+
+def _check_changed_file_policy_local(rule: Rule, target_str: str) -> Diagnostic:
+    """Handle ``changed_file_policy`` with ``changed_files_source='local_git'``.
+
+    *target_str* is used as *repo_root* when ``params.repo_root`` is not set
+    and target_str looks like a directory path (not a PR reference).
+    """
+    validated = _validate_changed_file_policy_params(rule)
+    if isinstance(validated, Diagnostic):
+        return validated
+    manifest_path, _cfs, local_git_mode, repo_root = validated
+
+    # If repo_root param is absent, fall back to target_str if it looks like a
+    # filesystem path, otherwise use cwd.
+    if not repo_root:
+        from gate_keeper.backends._target import parse_target
+
+        parsed, _ = parse_target(target_str)
+        if parsed is None:
+            # Target does not look like a PR reference — treat as directory.
+            repo_root = target_str
+        # else: target looks like a PR but source is local_git — use cwd.
+
+    manifest, diag = _parse_policy_manifest(rule, manifest_path)
+    if diag is not None:
+        return diag
+
+    filenames, git_diag = _collect_local_git_files(rule, local_git_mode, repo_root)
+    if git_diag is not None:
+        return git_diag
+    assert filenames is not None
+
+    source_label = f"local_git:{local_git_mode}"
+    return _evaluate_manifest_policy(rule, filenames, manifest, manifest_path, source_label)
+
+
+def _check_changed_file_policy_pr(rule: Rule, pr: PrTarget) -> Diagnostic:
+    """Handle ``changed_file_policy`` with ``changed_files_source='github_pr'``."""
+    validated = _validate_changed_file_policy_params(rule)
+    if isinstance(validated, Diagnostic):
+        return validated
+    manifest_path, _cfs, _local_git_mode, _repo_root = validated
+
+    manifest, diag = _parse_policy_manifest(rule, manifest_path)
+    if diag is not None:
+        return diag
+
+    filenames, page_count, fetch_diag = _fetch_changed_files(pr, rule)
+    if fetch_diag is not None:
+        return fetch_diag
+    assert filenames is not None
+    assert page_count is not None
+
+    source_label = f"github_pr:{pr.owner}/{pr.repo}#{pr.number}"
+    pagination_metadata = {
+        "pagination_complete": True,
+        "page_count": page_count,
+    }
+    return _evaluate_manifest_policy(
+        rule,
+        filenames,
+        manifest,
+        manifest_path,
+        source_label,
+        pagination_metadata=pagination_metadata,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dispatch tables
 # ---------------------------------------------------------------------------
 
@@ -1300,10 +1961,31 @@ def check(rule: Rule, target: str | Path | TargetSpec) -> Diagnostic:
             )
         target = target.paths[0] if target.paths else ""
     target_str = str(target)
+
+    # ``changed_file_policy`` must validate its params *before* PR
+    # resolution.  Otherwise a missing/invalid ``changed_files_source``
+    # plus a non-PR target string (e.g. ``--target .``) would fall through
+    # to ``resolve_target()`` and surface as ``target_parse_error`` instead
+    # of the documented ``params_error`` (codex P2 / Copilot review on
+    # #232).  Validated params → dispatch by source; invalid → return the
+    # ``params_error`` diagnostic verbatim.
+    if rule.kind is RuleKind.CHANGED_FILE_POLICY:
+        validated = _validate_changed_file_policy_params(rule)
+        if isinstance(validated, Diagnostic):
+            return validated
+        _manifest_path, cfs, _local_git_mode, _repo_root = validated
+        if cfs == "local_git":
+            return _check_changed_file_policy_local(rule, target_str)
+        # ``cfs == "github_pr"`` — fall through to PR resolution below.
+
     pr, diag = resolve_target(rule, target_str)
     if diag is not None:
         return diag
     assert pr is not None
+
+    # ``changed_file_policy`` with github_pr source.
+    if rule.kind is RuleKind.CHANGED_FILE_POLICY:
+        return _check_changed_file_policy_pr(rule, pr)
 
     # Direct handlers: make their own gh call, don't need pr-view.
     direct = _DIRECT_HANDLERS.get(rule.kind)

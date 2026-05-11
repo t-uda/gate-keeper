@@ -109,7 +109,7 @@ backend rather than minting new `Backend` enum values; see
 `github_not_draft`, `github_labels_absent`, `github_tasks_complete`,
 `github_checks_success`, `github_threads_resolved`,
 `github_non_author_approval`, `github_changed_files_absent`,
-`semantic_rubric`, `external_check`
+`changed_file_policy`, `semantic_rubric`, `external_check`
 
 ### `Severity`
 `error`, `warning`, `advisory`
@@ -144,6 +144,7 @@ artifact.
 | `github_checks_success` | _(none)_ | — | Evaluates every entry in `statusCheckRollup` as required; only `SUCCESS` state/conclusion passes. Branch protection remains the authoritative control plane. |
 | `external_check` | `tool` | _(required)_ | String adapter ID selecting which `external` adapter handles the rule (e.g. `"textlint"`). Missing → `unavailable` / `params_error`; unregistered → `unsupported` / `adapter_unknown`. All other `params` keys are forwarded verbatim to the adapter, which owns its own per-tool keys. See [`docs/backend-external.md`](backend-external.md). |
 | `github_changed_files_absent` | `patterns`, `case_sensitive` | `case_sensitive=true` | `patterns` is required and must be a non-empty list of glob strings; missing or invalid → `unavailable` / `params_error`. `case_sensitive` is optional (default `true`). Glob semantics: `**` matches zero or more path segments, `*` matches anything except `/`, `?` matches one non-`/` char. See the dedicated section below for the data policy. |
+| `changed_file_policy` | `manifest_path`, `changed_files_source`, `local_git_mode`, `repo_root` | `local_git_mode=staged_and_unstaged`; `repo_root` defaults to the target string or cwd | `manifest_path` (required, non-empty string) points at a YAML policy manifest. `changed_files_source` (required) is `"github_pr"` or `"local_git"`. `local_git_mode` (relevant only for `local_git`) is one of `staged \| unstaged \| staged_and_unstaged \| untracked \| all`. `repo_root` overrides the directory used for `git` commands. Deterministic changed-file policy, **not** semantic content review. See the dedicated section below. |
 | `markdown_evidence_block` | `heading` | _(required)_ | Verbatim ATX heading title (case-sensitive). Backend locates the first fenced code block following this heading and stops at the next sibling/parent heading. Missing → `unavailable` / `params_error`. |
 | `markdown_evidence_block` | `format` | _(required)_ | Format of the fenced block. Currently only `"yaml"` is supported. Other values → `unsupported`. |
 | `markdown_evidence_block` | `required_keys` | _(required)_ | Non-empty list of dotted-key strings (e.g. `"policy.bundle"`). Each must resolve through nested mappings. Missing or empty → `unavailable`. |
@@ -309,6 +310,119 @@ Missing or malformed `patterns` (or non-bool `case_sensitive`) produces
 The backend never returns `pass` on a partial page set — incomplete
 pagination is treated as `unavailable` so a forbidden file added in a
 later page can never be silently skipped.
+
+## `changed_file_policy` — manifest-backed changed-file policy
+
+The `changed_file_policy` rule kind (issue #230) evaluates **only changed
+files** — from a GitHub PR or from a local Git working tree — against a
+repository-owned YAML policy manifest. It is a **deterministic changed-file
+policy check, not a semantic content review**: file contents are never
+parsed, inspected, or uploaded.
+
+It is intended for real-data intake repositories such as
+`uda-lab/spread-applicant-ai`, which must prevent rights-constrained or
+private artifacts from being committed to public Git history. The manifest
+remains the project's source of truth; this rule only enforces the manifest.
+
+### Params
+
+```json
+{
+  "manifest_path": "policy-manifests/path-rules.yaml",
+  "changed_files_source": "github_pr",
+  "local_git_mode": "staged_and_unstaged",
+  "repo_root": ""
+}
+```
+
+- `manifest_path` — required, non-empty string; absolute or relative to the
+  working directory.
+- `changed_files_source` — required; one of `"github_pr"` or `"local_git"`.
+- `local_git_mode` — optional, used only when `changed_files_source ==
+  "local_git"`. One of `staged | unstaged | staged_and_unstaged |
+  untracked | all`. Defaults to `staged_and_unstaged`.
+- `repo_root` — optional. Directory used for Git commands when
+  `local_git`. When absent, the target string is used if it does not look
+  like a PR reference; otherwise cwd.
+
+Missing or invalid params produce `status = unavailable` with
+`evidence.kind = params_error`.
+
+### Manifest schema
+
+The parser accepts a small explicit schema; unknown top-level keys and
+unknown entry fields are rejected (fail closed). Arbitrary YAML tags are
+**not** evaluated (`yaml.safe_load`).
+
+```yaml
+version: 1                            # required, must equal 1
+entries:                              # required, list of entries
+  - kind: forbidden_path_pattern
+    pattern: "outputs/**/*.xlsx"      # required
+    stop_condition: fail_closed_never_commit  # required
+    source: docs/policy.md#3          # required (manifest entry reference)
+    note: "..."                       # optional
+
+  - kind: known_allowed_exception
+    pattern: "outputs/sample.xlsx"    # required
+    exempts_pattern: "outputs/**/*.xlsx"  # required (the forbidden pattern exempted)
+    authorising_issue: "#42"          # required
+    source: docs/policy.md            # required
+
+  - kind: generated_output_extension
+    extension: .xlsx                  # required
+    source: docs/policy.md            # required
+    note: "..."                       # optional
+
+  - kind: authored_text_extension
+    extension: .md                    # required
+    source: docs/policy.md            # required
+```
+
+Optional informational top-level keys (`source_documents`, `allowed_kinds`,
+`allowed_stop_conditions`, `known_allowed_exceptions_note`,
+`default_unknown_extension`, `default_unknown_path`) are accepted and
+ignored.
+
+### Glob semantics
+
+Identical to `github_changed_files_absent` (`**`, `*`, `?` per the table
+above). Matching is case-sensitive.
+
+### Evidence — `changed_file_policy`
+
+| Field | Meaning |
+| ----- | ------- |
+| `total_changed_files` | Number of changed files considered. |
+| `manifest_path` | The manifest path that was evaluated. |
+| `source` | `github_pr:<owner>/<repo>#<n>` or `local_git:<mode>`. |
+| `violations` | List of `{path, matched_pattern, stop_condition, manifest_source, note}` per offending file. |
+| `forbidden_pattern_count` | Count of forbidden patterns in the manifest. |
+| `exception_count` | Count of exception entries in the manifest. |
+
+The `manifest_source` on each violation is the `source:` field of the
+matched manifest entry, so diagnostics identify the exact manifest entry
+that caused each finding (per #230 done criteria).
+
+### Failure modes
+
+| Status | Evidence kind | When |
+| ------ | ------------- | ---- |
+| `pass` | `changed_file_policy` | No changed file violates a forbidden pattern (or all violations are covered by a known-allowed exception). |
+| `fail` | `changed_file_policy` | One or more changed files violate the manifest; the `violations` list is populated and the diagnostic carries a `remediation` block listing the offending paths. |
+| `unavailable` | `params_error` | Required params missing or malformed (`manifest_path`, `changed_files_source`, `local_git_mode`, `repo_root`). |
+| `unavailable` | `manifest_error` | Manifest file missing, YAML parse error, unsupported version, unknown top-level key, unknown entry kind, missing required entry field, or unknown entry field. |
+| `unavailable` | `local_git_error` | `git` binary missing or Git command failed (e.g. target is not a Git repository). |
+| `unavailable` | `gh_*` | Any `gh` failure when fetching the PR file list (same surface as `github_changed_files_absent`). |
+
+### Composition
+
+This rule reuses the existing PR file-list machinery
+(`_fetch_changed_files`) so its GitHub-side behaviour matches
+`github_changed_files_absent`. The two rules can coexist; choose
+`github_changed_files_absent` for a flat list of glob patterns embedded in
+the rule itself, and `changed_file_policy` when the patterns live in a
+repository-owned YAML manifest with stop-conditions and exception entries.
 
 ## Validation policy
 
