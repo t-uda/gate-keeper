@@ -46,6 +46,7 @@ from gate_keeper.models import (
     Status,
     TargetKind,
 )
+from gate_keeper.validator import target_kind_mismatch_diagnostic
 
 # ---------------------------------------------------------------------------
 # Entry loader
@@ -67,7 +68,7 @@ _REQUIRED_FIELDS = frozenset(
 # rubric backend renders the v3 artifact-kind block. Distinct name from the
 # pre-existing ``target.kind`` (path / inline) below — the two address
 # different concerns (artifact kind vs. how the target value is encoded).
-_OPTIONAL_FIELDS = frozenset({"notes", "rule_target_kind"})
+_OPTIONAL_FIELDS = frozenset({"notes", "rule_target_kind", "artifact_kind"})
 _TARGET_FIELDS = frozenset({"kind", "value"})
 _VALID_KINDS = ("path", "inline")
 _VALID_JUDGMENTS = ("pass", "fail", "unsupported")
@@ -89,6 +90,10 @@ class BenchEntry:
     source_path: Path
     # #169 — optional artifact-kind annotation on the synthesised rule.
     rule_target_kind: TargetKind = TargetKind.UNSPECIFIED
+    # #204 — optional caller-declared kind for the target artifact. When set
+    # and ``rule_target_kind`` is also set and differs, the bench harness fires
+    # the deterministic precheck (#178) before invoking the LLM provider.
+    artifact_kind: TargetKind | None = None
 
     def resolve_target(self, targets_root: Path) -> str:
         """Return the literal text the rule should be evaluated against."""
@@ -181,6 +186,29 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
                 f"{rule_target_kind_value!r} is not a valid TargetKind; expected one of {valid}"
             ) from exc
 
+    artifact_kind_value = data.get("artifact_kind")
+    if artifact_kind_value is None:
+        artifact_kind: TargetKind | None = None
+    else:
+        if not isinstance(artifact_kind_value, str):
+            raise ValueError(
+                f"BenchEntry({source_path.name}).artifact_kind: expected str, got "
+                f"{type(artifact_kind_value).__name__}"
+            )
+        try:
+            artifact_kind = TargetKind(artifact_kind_value)
+        except ValueError as exc:
+            valid = sorted(member.value for member in TargetKind)
+            raise ValueError(
+                f"BenchEntry({source_path.name}).artifact_kind: "
+                f"{artifact_kind_value!r} is not a valid TargetKind; expected one of {valid}"
+            ) from exc
+        if artifact_kind is TargetKind.UNSPECIFIED:
+            raise ValueError(
+                f"BenchEntry({source_path.name}).artifact_kind: "
+                "'unspecified' is not a valid value; use null/absent to mean 'no kind override'"
+            )
+
     return BenchEntry(
         id=source_path.stem,
         rule_text=_expect_str(data["rule_text"], "rule_text"),
@@ -195,6 +223,7 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
         notes=notes_value,
         source_path=source_path,
         rule_target_kind=rule_target_kind,
+        artifact_kind=artifact_kind,
     )
 
 
@@ -349,6 +378,34 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
 
     rule = _entry_to_rule(entry)
     target_text = entry.resolve_target(targets_root)
+
+    # #204 — deterministic target-kind-mismatch precheck (#178). When the
+    # fixture declares ``artifact_kind`` and the rule carries a differing
+    # ``target_kind`` annotation, short-circuit to UNSUPPORTED without
+    # invoking the LLM provider — mirrors the precheck in validator.validate.
+    if (
+        entry.artifact_kind is not None
+        and rule.target_kind is not TargetKind.UNSPECIFIED
+        and rule.target_kind is not entry.artifact_kind
+    ):
+        diag = target_kind_mismatch_diagnostic(rule, entry.artifact_kind)
+        matched = entry.expected_judgment == "unsupported"
+        return PerRuleResult(
+            id=entry.id,
+            category=entry.category,
+            intended_backend=entry.intended_backend,
+            expected=entry.expected_judgment,
+            actual="unsupported",
+            status="PASS" if matched else "FAIL",
+            reproducibility=1.0 if matched else 0.0,
+            primary_reason=diag.message,
+            failure_mode=None if matched else "kind_mismatch_unexpected",
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=0,
+            model=None,
+            prompt_version=None,
+        )
 
     pass_count = 0
     fail_count = 0

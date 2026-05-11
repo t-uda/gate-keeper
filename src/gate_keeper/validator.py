@@ -207,7 +207,7 @@ def _run_n(
     )
 
 
-def _target_kind_mismatch_diagnostic(
+def target_kind_mismatch_diagnostic(
     rule: Rule,
     artifact_kind: TargetKind,
 ) -> Diagnostic:
@@ -334,7 +334,7 @@ def validate(
             and rule.target_kind is not TargetKind.UNSPECIFIED
             and rule.target_kind is not artifact_kind
         ):
-            diagnostics.append(_target_kind_mismatch_diagnostic(rule, artifact_kind))
+            diagnostics.append(target_kind_mismatch_diagnostic(rule, artifact_kind))
             continue
 
         check_fn = _registry.get(resolved_name)
