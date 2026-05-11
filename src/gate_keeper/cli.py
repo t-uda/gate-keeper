@@ -304,7 +304,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bench_parser.add_argument(
         "entries_dir",
-        help="directory of JSON benchmark entries (e.g. tests/fixtures/semantic/entries/)",
+        nargs="?",
+        default=None,
+        help=(
+            "directory of JSON benchmark entries (e.g. tests/fixtures/semantic/entries/). "
+            "Required unless --model-matrix is given (the config's 'fixtures' key takes "
+            "precedence when both are supplied)."
+        ),
+    )
+    bench_parser.add_argument(
+        "--model-matrix",
+        dest="model_matrix",
+        default=None,
+        metavar="CONFIG",
+        help=(
+            "path to a YAML matrix config file; runs the bench corpus once per model "
+            "listed in the config and emits a flat JSON array to stdout. "
+            "When provided, --reproducibility and --baseline are ignored "
+            "(use the config's 'reproducibility' key instead). "
+            "Slice 2a scope: OpenAI provider only."
+        ),
     )
     bench_parser.add_argument(
         "--reproducibility",
@@ -766,10 +785,16 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
 def _cmd_bench(args: argparse.Namespace) -> int:
     """Evaluate a fixture-corpus benchmark against the LLM-rubric backend.
 
-    Loads JSON entries under *entries_dir*, evaluates each one ``--reproducibility``
-    times via the LLM-rubric backend, and prints aggregate accuracy /
-    reproducibility / token metrics plus a per-entry breakdown. Output format is
-    ``text`` (default) or ``json``.
+    When ``--model-matrix CONFIG`` is given, reads the YAML config, runs the
+    bench corpus once per listed model, and emits a flat JSON array to stdout
+    (one record per (model, fixture) result). ``--reproducibility`` and
+    ``--baseline`` are ignored in matrix mode; use the config's
+    ``reproducibility`` key instead.
+
+    Without ``--model-matrix``, loads JSON entries under *entries_dir*,
+    evaluates each one ``--reproducibility`` times via the LLM-rubric backend,
+    and prints aggregate accuracy / reproducibility / token metrics plus a
+    per-entry breakdown. Output format is ``text`` (default) or ``json``.
 
     Exit codes
     ----------
@@ -784,6 +809,66 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     canonical baseline file is added by the follow-up issue (#132).
     """
     from gate_keeper import bench as _bench
+
+    # ------------------------------------------------------------------
+    # Matrix mode: --model-matrix CONFIG
+    # ------------------------------------------------------------------
+    if args.model_matrix is not None:
+        from gate_keeper.matrix import MatrixConfigError, load_config, render_flat_json, run_matrix
+
+        config_path = Path(args.model_matrix)
+        if not config_path.is_file():
+            print(
+                f"error: --model-matrix: {args.model_matrix}: no such file",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+
+        try:
+            config = load_config(config_path)
+        except MatrixConfigError as exc:
+            print(f"error: --model-matrix: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+
+        # Resolve entries_dir: config 'fixtures' key takes precedence, then
+        # the positional entries_dir argument, then fail closed.
+        if config["fixtures"] is not None:
+            entries_dir = config["fixtures"]
+        elif args.entries_dir is not None:
+            entries_dir = Path(args.entries_dir)
+        else:
+            print(
+                "error: bench --model-matrix requires either a 'fixtures' key in the config "
+                "or an entries_dir positional argument",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+
+        if not entries_dir.is_dir():
+            print(
+                f"error: entries directory does not exist or is not a directory: {entries_dir}",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+
+        try:
+            rows = run_matrix(config_path, entries_dir)
+        except (MatrixConfigError, RuntimeError, FileNotFoundError, ValueError) as exc:
+            print(f"error: --model-matrix: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+
+        print(render_flat_json(rows))
+        return EXIT_OK
+
+    # ------------------------------------------------------------------
+    # Standard single-model bench mode
+    # ------------------------------------------------------------------
+    if args.entries_dir is None:
+        print(
+            "error: bench requires an entries_dir positional argument or --model-matrix CONFIG",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     entries_dir = Path(args.entries_dir)
     if not entries_dir.is_dir():

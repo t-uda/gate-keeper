@@ -1,0 +1,4 @@
+models:
+  - openai:gpt-4o-mini
+  - openai:gpt-4o
+reproducibility: 1
