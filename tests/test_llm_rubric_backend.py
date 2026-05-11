@@ -2913,12 +2913,14 @@ class TestStrategySeam:
     def test_strategies_registry_omits_reserved_ids(self):
         """Reserved-but-unimplemented ids must not appear in the live registry.
 
-        They are declared in ``KNOWN_STRATEGIES`` so the IR can validate
-        the value, but they must not silently dispatch to a single-call
-        strategy in disguise.
+        ``consensus`` is now implemented (#184) and lives in the registry.
+        ``review`` and ``adaptive`` remain reserved (unimplemented) and must
+        not silently dispatch to a single-call strategy in disguise.
         """
-        for reserved in ("consensus", "review", "adaptive"):
+        for reserved in ("review", "adaptive"):
             assert reserved not in llm_backend._STRATEGIES
+        # consensus IS implemented in #184.
+        assert "consensus" in llm_backend._STRATEGIES
 
     def test_default_pass_evidence_carries_strategy_metadata(self, monkeypatch, tmp_path):
         """Issue #183 acceptance: success evidence advertises strategy fields."""
@@ -2967,10 +2969,12 @@ class TestStrategySeam:
         assert diag.evidence[0].data["llm_strategy"] == "single"
         assert diag.evidence[0].data["llm_call_count"] == 1
 
-    @pytest.mark.parametrize("strategy_id", ["consensus", "review", "adaptive"])
+    @pytest.mark.parametrize("strategy_id", ["review", "adaptive"])
     def test_reserved_strategy_returns_unavailable(self, monkeypatch, tmp_path, strategy_id):
-        """Reserved ids dispatch through ``strategy_not_implemented``.
+        """Still-reserved ids dispatch through ``strategy_not_implemented``.
 
+        ``consensus`` is now implemented (#184) and removed from this
+        parametrize. ``review`` and ``adaptive`` remain unimplemented.
         Provider stubs are still wired so a regression where the seam
         silently falls back to ``single`` would surface as a PASS
         verdict; the assertion catches that.
@@ -3038,3 +3042,278 @@ class TestStrategySeam:
         request = llm_backend.JudgmentRequest(rule=rule, target="x")
         with pytest.raises(dataclasses.FrozenInstanceError):
             request.target = "y"  # type: ignore[misc]
+
+
+class TestConsensusStrategy:
+    """Issue #184 — consensus strategy with majority-vote aggregation.
+
+    All tests use fake provider stubs; no live LLM calls are made.
+    The provider stub is configured via monkeypatch on ``_call_openai``.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    # ---- helpers ----
+
+    def _rule(self, panel_size: int | None = None) -> "Rule":
+        params: dict = {"strategy": "consensus"}
+        if panel_size is not None:
+            params["consensus_panel_size"] = panel_size
+        return Rule(
+            id="stub-consensus-rule",
+            title="Stub consensus rule",
+            source=SourceLocation(path="rules.md", line=1),
+            text="The documentation should be clear and comprehensive",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params=params,
+        )
+
+    def _make_spy(self, responses: list[str]) -> "tuple[list[tuple], object]":
+        """Return (calls_log, spy_fn) where spy_fn cycles through *responses*."""
+        calls: list[tuple] = []
+        idx = {"i": 0}
+
+        def _spy(api_key, system, user, model):
+            calls.append((api_key, model))
+            text = responses[idx["i"] % len(responses)]
+            idx["i"] += 1
+            return _stub_response(text, {"latency_ms": 50, "tokens_in": 100, "tokens_out": 20})
+
+        return calls, _spy
+
+    # ---- dispatcher routing ----
+
+    def test_consensus_routes_to_consensus_strategy(self, monkeypatch, tmp_path):
+        """``params.strategy=consensus`` dispatches to ``_run_consensus_strategy``."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        # Should have made provider calls (consensus, not unavailable).
+        assert len(calls) == 3
+        assert diag.evidence[0].kind == "llm_consensus"
+        assert diag.evidence[0].data["llm_strategy"] == "consensus"
+
+    # ---- unanimous verdicts ----
+
+    def test_unanimous_pass_returns_pass(self, monkeypatch, tmp_path):
+        """Three pass votes → PASS with llm_consensus evidence."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["pass"] == 3
+        assert data["consensus_votes"]["fail"] == 0
+        assert data["majority_verdict"] == "pass"
+
+    def test_unanimous_fail_returns_fail(self, monkeypatch, tmp_path):
+        """Three fail votes → FAIL with llm_consensus evidence."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_spy([_VALID_FAIL_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["fail"] == 3
+        assert data["majority_verdict"] == "fail"
+        assert diag.remediation is not None
+
+    # ---- majority (2-1 splits) ----
+
+    def test_two_pass_one_fail_returns_pass(self, monkeypatch, tmp_path):
+        """2 pass + 1 fail with N=3 → PASS (majority)."""
+        _patch_env(monkeypatch, self._ENV)
+        # Cycle: pass, pass, fail.
+        responses = [_VALID_PASS_JSON, _VALID_PASS_JSON, _VALID_FAIL_JSON]
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["pass"] == 2
+        assert data["consensus_votes"]["fail"] == 1
+        assert data["majority_verdict"] == "pass"
+
+    def test_two_fail_one_pass_returns_fail(self, monkeypatch, tmp_path):
+        """2 fail + 1 pass with N=3 → FAIL (majority)."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = [_VALID_FAIL_JSON, _VALID_FAIL_JSON, _VALID_PASS_JSON]
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["fail"] == 2
+        assert data["majority_verdict"] == "fail"
+
+    # ---- tie (N=2, 1-1 split) ----
+
+    def test_tie_with_n2_returns_unsupported_consensus_tie(self, monkeypatch, tmp_path):
+        """N=2, 1 pass + 1 fail → UNSUPPORTED with consensus_tie evidence (fail-closed)."""
+        _patch_env(monkeypatch, self._ENV)
+        responses = [_VALID_PASS_JSON, _VALID_FAIL_JSON]
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=2), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "consensus_tie"
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["pass"] == 1
+        assert data["consensus_votes"]["fail"] == 1
+        assert data["majority_verdict"] == "tie"
+        assert diag.remediation is not None
+
+    # ---- telemetry ----
+
+    def test_telemetry_call_count_equals_panel_size(self, monkeypatch, tmp_path):
+        """``llm_call_count`` equals the resolved panel size."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert len(calls) == 3
+        assert diag.evidence[0].data["llm_call_count"] == 3
+
+    def test_telemetry_models_list_has_n_entries(self, monkeypatch, tmp_path):
+        """``models`` list has one entry per provider call."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert len(diag.evidence[0].data["models"]) == 3
+
+    def test_telemetry_cost_is_sum_of_judges(self, monkeypatch, tmp_path):
+        """``cost_estimate_usd_total`` equals the sum of individual judge costs."""
+        _patch_env(monkeypatch, self._ENV)
+        stub_telem = {"latency_ms": 50, "tokens_in": 100, "tokens_out": 20}
+
+        def _spy(*_a, **_k):
+            return _stub_response(_VALID_PASS_JSON, stub_telem)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        single_cost = llm_backend._estimate_cost(
+            llm_backend.OPENAI_DEFAULT_MODEL, stub_telem["tokens_in"], stub_telem["tokens_out"]
+        )
+        assert single_cost is not None
+        expected_total = single_cost * 3
+        assert abs(diag.evidence[0].data["cost_estimate_usd_total"] - expected_total) < 1e-10
+
+    def test_telemetry_latency_is_sum_of_judges(self, monkeypatch, tmp_path):
+        """``latency_ms_total`` equals the sum of individual judge latencies."""
+        _patch_env(monkeypatch, self._ENV)
+
+        def _spy(*_a, **_k):
+            return _stub_response(_VALID_PASS_JSON, {"latency_ms": 100, "tokens_in": 50, "tokens_out": 10})
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].data["latency_ms_total"] == 300
+
+    # ---- judge_results ----
+
+    def test_judge_results_has_n_entries(self, monkeypatch, tmp_path):
+        """``judge_results`` carries one entry per judge call."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        assert len(diag.evidence[0].data["judge_results"]) == 3
+
+    # ---- parse failure is counted as unsupported ----
+
+    def test_parse_failure_counted_as_unsupported_vote(self, monkeypatch, tmp_path):
+        """A judge that returns invalid JSON contributes an unsupported vote."""
+        _patch_env(monkeypatch, self._ENV)
+        # Judge 0: parse error; judges 1 and 2: pass → majority pass.
+        responses = ["not-json", _VALID_PASS_JSON, _VALID_PASS_JSON]
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["unsupported"] == 1
+        assert data["consensus_votes"]["pass"] == 2
+        assert diag.status is Status.PASS
+
+    # ---- quote fabrication is counted as unsupported ----
+
+    def test_quote_fabrication_counted_as_unsupported_vote(self, monkeypatch, tmp_path):
+        """A judge with fabricated quotes contributes an unsupported vote."""
+        fabricated_response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Looks good.",
+                "supporting_evidence_quotes": ["this quote does not appear in the artifact at all xyz123"],
+                "suggested_action": None,
+            }
+        )
+        _patch_env(monkeypatch, self._ENV)
+        responses = [fabricated_response, _VALID_PASS_JSON, _VALID_PASS_JSON]
+        _, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        assert data["consensus_votes"]["unsupported"] >= 1
+        assert diag.status is Status.PASS
+
+    # ---- supporting quotes are merged from majority judges ----
+
+    def test_supporting_quotes_merged_from_majority_judges(self, monkeypatch, tmp_path):
+        """Quotes from majority-voting judges are merged and deduplicated."""
+        _patch_env(monkeypatch, self._ENV)
+        _, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=3), _target_with_artifact(tmp_path))
+        data = diag.evidence[0].data
+        quotes = data["supporting_evidence_quotes"]
+        # All three judges use the same quote; deduplicated to exactly one entry.
+        assert len(quotes) >= 1
+        assert len(quotes) == len(set(quotes))  # no duplicates
+
+    # ---- panel size validation ----
+
+    def test_default_panel_size_is_3(self, monkeypatch, tmp_path):
+        """When ``consensus_panel_size`` is omitted the default is 3."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON] * 3)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].data["consensus_panel_size"] == 3
+        assert len(calls) == 3
+
+    def test_panel_size_clamped_to_max(self, monkeypatch, tmp_path):
+        """``consensus_panel_size`` > 5 is clamped to 5."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON] * 10)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=99), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].data["consensus_panel_size"] == 5
+        assert len(calls) == 5
+
+    def test_panel_size_clamped_to_min(self, monkeypatch, tmp_path):
+        """``consensus_panel_size`` < 2 is clamped to 2."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([_VALID_PASS_JSON] * 2)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(panel_size=1), _target_with_artifact(tmp_path))
+        assert diag.evidence[0].data["consensus_panel_size"] == 2
+        assert len(calls) == 2
+
+    # ---- unconfigured falls through to unavailable ----
+
+    def test_unconfigured_returns_unavailable(self, monkeypatch, tmp_path):
+        """Consensus path respects the unconfigured check the same as single."""
+        # Force unconfigured state regardless of the host environment by
+        # returning an empty env dict from _load_env_file.
+        monkeypatch.setattr(llm_backend, "_load_env_file", lambda *_a, **_k: {})
+        diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_unconfigured"
