@@ -4192,16 +4192,21 @@ class TestMultiTargetEvidenceTargetIds:
         data = diag.evidence[0].data
         assert data["supporting_evidence_quote_target_ids"] == ["src", "dep"]
 
-    def test_multi_target_evidence_defaults_missing_target_id_to_first(self, monkeypatch, tmp_path):
-        """Quotes whose ``target_id`` is missing default to the first target's id."""
+    def test_multi_target_evidence_missing_target_id_fails_closed(self, monkeypatch, tmp_path):
+        """#225 (slice 2): missing ``target_id`` on a multi-target rule fails closed.
+
+        Slice-1 defaulted missing ``target_id`` to the first declared target's id.
+        Slice-2 tightens this: a quote without a ``target_id`` is rejected as
+        fabricated (cannot be attributed to any specific artifact).
+        """
         _patch_env(monkeypatch, self._ENV)
         target_a = tmp_path / "primary.md"
         target_a.write_text("alpha quote substring here.", encoding="utf-8")
         target_b = tmp_path / "other.md"
         target_b.write_text("beta quote substring here.", encoding="utf-8")
-        # Model emits the legacy string-list form; the rule still declares
-        # ``params.targets`` so the parser must default each quote's
-        # ``target_id`` to the first declared target's id.
+        # Model emits the legacy string-list form on a multi-target rule.
+        # The strict contract requires a known target_id, so the quote is
+        # rejected as un-attributed → verdict becomes UNSUPPORTED.
         response = json.dumps(
             {
                 "judgment": "pass",
@@ -4218,13 +4223,16 @@ class TestMultiTargetEvidenceTargetIds:
             ]
         )
         diag = llm_backend.check(rule, "ignored")
-        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
-        data = diag.evidence[0].data
-        # Default attribution → first declared target's id.
-        assert data["supporting_evidence_quote_target_ids"] == ["primary"]
+        # Strict grounding: quote without target_id is rejected as fabricated.
+        assert diag.status is Status.UNSUPPORTED, diag.evidence[0].to_dict()
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
 
-    def test_multi_target_evidence_unknown_target_id_remapped_to_first(self, monkeypatch, tmp_path):
-        """A model-emitted ``target_id`` not in ``params.targets`` is remapped to first."""
+    def test_multi_target_evidence_unknown_target_id_fails_closed(self, monkeypatch, tmp_path):
+        """#225 (slice 2): unknown ``target_id`` fails closed instead of remapping to first.
+
+        Slice-1 silently remapped an unknown id to the first declared target's id.
+        Slice-2 rejects the quote as fabricated because the target is unknown.
+        """
         _patch_env(monkeypatch, self._ENV)
         target_a = tmp_path / "src.md"
         target_a.write_text("alpha quote substring here.", encoding="utf-8")
@@ -4248,6 +4256,318 @@ class TestMultiTargetEvidenceTargetIds:
             ]
         )
         diag = llm_backend.check(rule, "ignored")
-        assert diag.status is Status.PASS
-        # Unknown id remaps to the first declared target's id.
-        assert diag.evidence[0].data["supporting_evidence_quote_target_ids"] == ["src"]
+        # Strict grounding: unknown target_id is rejected as fabricated.
+        assert diag.status is Status.UNSUPPORTED, diag.evidence[0].to_dict()
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+
+
+# ---------------------------------------------------------------------------
+# Strict per-target quote grounding (#225, slice 2)
+# ---------------------------------------------------------------------------
+
+
+class TestStrictPerTargetGrounding:
+    """#225 — per-artifact substring attribution for multi-target rules.
+
+    The slice-2 contract:
+    - A quote claiming ``target_id=A`` must be a substring of artifact A's
+      text specifically (not merely of the concatenated multi-artifact prompt).
+    - Unknown ``target_id`` values fail closed (quote rejected as fabricated).
+    - Missing ``target_id`` on a multi-target rule fails closed.
+    - Placeholder text ("(no path declared)", "(unable to read…)") can never
+      satisfy the substring check.
+    """
+
+    _ENV = {"GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+
+    def test_quote_grounded_in_correct_artifact_passes(self, monkeypatch, tmp_path):
+        """A quote attributed to the correct artifact passes validation."""
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_a.write_text("unique phrase from alpha artifact.", encoding="utf-8")
+        target_b = tmp_path / "b.md"
+        target_b.write_text("unique phrase from beta artifact.", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Both artifacts agree.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "alpha", "quote": "unique phrase from alpha artifact"},
+                    {"target_id": "beta", "quote": "unique phrase from beta artifact"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+        data = diag.evidence[0].data
+        assert data["supporting_evidence_quote_target_ids"] == ["alpha", "beta"]
+
+    def test_cross_artifact_quote_rejected(self, monkeypatch, tmp_path):
+        """A quote attributed to artifact A but only present in artifact B is rejected.
+
+        Slice-1 would accept this because it concatenated all artifact texts.
+        Slice-2 must reject it because the quote is not in A's text.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_a.write_text("content only in artifact alpha.", encoding="utf-8")
+        target_b = tmp_path / "b.md"
+        target_b.write_text("content only in artifact beta.", encoding="utf-8")
+        # Model quotes from beta but claims target_id="alpha".
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "OK.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "alpha", "quote": "content only in artifact beta"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        # Quote not in alpha's text → fabrication (even though it's in beta's).
+        assert diag.status is Status.UNSUPPORTED, diag.evidence[0].to_dict()
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+        assert "content only in artifact beta" in diag.evidence[0].data["fabricated_quotes"]
+
+    def test_placeholder_quote_rejected(self, monkeypatch, tmp_path):
+        """A quote drawn from a placeholder artifact is rejected.
+
+        Artifacts whose paths cannot be read produce placeholder text like
+        "(unable to read artifact at …)".  The placeholder id is excluded from
+        the quotable corpus; any quote attributed to it is fabricated.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        missing_path = str(tmp_path / "does_not_exist.md")
+        target_b = tmp_path / "b.md"
+        target_b.write_text("real content from beta.", encoding="utf-8")
+        # Model quotes the placeholder text itself.
+        placeholder_text = f"(unable to read artifact at {missing_path})"
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "OK.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "ghost", "quote": placeholder_text},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "ghost", "kind": "documentation", "path": missing_path},
+                {"id": "real", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        # ghost is a placeholder → excluded from corpus → quote fabricated.
+        assert diag.status is Status.UNSUPPORTED, diag.evidence[0].to_dict()
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+
+    def test_no_path_placeholder_quote_rejected(self, monkeypatch, tmp_path):
+        """A quote attributed to a no-path target is rejected.
+
+        When a target spec has no ``path`` declared, the artifact text is
+        ``"(no path declared)"``.  Any quote attributed to that target must
+        be rejected as fabricated.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        target_b = tmp_path / "b.md"
+        target_b.write_text("actual content of beta.", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "OK.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "pathless", "quote": "(no path declared)"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        # "pathless" has no path → placeholder text in prompt; excluded from corpus.
+        rule = _multi_target_rule(
+            [
+                {"id": "pathless", "kind": "documentation"},
+                {"id": "real", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.UNSUPPORTED, diag.evidence[0].to_dict()
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+
+    def test_mixed_valid_and_invalid_quotes_rejected(self, monkeypatch, tmp_path):
+        """When any quote fails per-target grounding, the whole verdict is rejected."""
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_a.write_text("alpha text here.", encoding="utf-8")
+        target_b = tmp_path / "b.md"
+        target_b.write_text("beta text here.", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "OK.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "alpha", "quote": "alpha text here"},  # valid
+                    # invalid: beta content claimed as alpha
+                    {"target_id": "alpha", "quote": "beta text here"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+        assert diag.evidence[0].data["fabricated_quotes"] == ["beta text here"]
+
+
+class TestResolveQuoteTargetIdsStrict:
+    """Unit tests for :func:`_resolve_quote_target_ids_strict` (#225)."""
+
+    def test_single_target_rule_returns_none(self):
+        """The strict resolver mirrors the lenient one for single-target rules."""
+        rule = _semantic_rule()  # no params.targets
+        # Simulate a parsed judgment with one plain-string quote.
+        parsed = LlmJudgment(
+            judgment="pass",
+            primary_reason="ok",
+            supporting_evidence_quotes=["some quote"],
+            suggested_action=None,
+            supporting_evidence_quote_target_ids=None,
+        )
+        result = llm_backend._resolve_quote_target_ids_strict(rule, parsed)
+        assert result is None
+
+    def test_known_target_id_preserved(self):
+        """A known target_id is passed through unchanged."""
+        rule = _multi_target_rule(
+            [
+                {"id": "src", "kind": "documentation", "path": "a.md"},
+                {"id": "dep", "kind": "documentation", "path": "b.md"},
+            ]
+        )
+        parsed = LlmJudgment(
+            judgment="pass",
+            primary_reason="ok",
+            supporting_evidence_quotes=["q1", "q2"],
+            suggested_action=None,
+            supporting_evidence_quote_target_ids=["src", "dep"],
+        )
+        result = llm_backend._resolve_quote_target_ids_strict(rule, parsed)
+        assert result == ["src", "dep"]
+
+    def test_unknown_target_id_becomes_sentinel(self):
+        """An unknown target_id is replaced by _UNKNOWN_TARGET_ID sentinel."""
+        rule = _multi_target_rule([{"id": "src", "kind": "documentation", "path": "a.md"}])
+        parsed = LlmJudgment(
+            judgment="pass",
+            primary_reason="ok",
+            supporting_evidence_quotes=["q"],
+            suggested_action=None,
+            supporting_evidence_quote_target_ids=["not_a_real_id"],
+        )
+        result = llm_backend._resolve_quote_target_ids_strict(rule, parsed)
+        assert result == [llm_backend._UNKNOWN_TARGET_ID]
+
+    def test_missing_target_id_becomes_sentinel(self):
+        """A missing target_id (None in the parallel list) becomes the sentinel."""
+        rule = _multi_target_rule([{"id": "src", "kind": "documentation", "path": "a.md"}])
+        parsed = LlmJudgment(
+            judgment="pass",
+            primary_reason="ok",
+            supporting_evidence_quotes=["q"],
+            suggested_action=None,
+            supporting_evidence_quote_target_ids=[None],
+        )
+        result = llm_backend._resolve_quote_target_ids_strict(rule, parsed)
+        assert result == [llm_backend._UNKNOWN_TARGET_ID]
+
+    def test_plain_string_form_becomes_sentinel(self):
+        """Legacy plain-string quotes (no object form) become the sentinel."""
+        rule = _multi_target_rule([{"id": "src", "kind": "documentation", "path": "a.md"}])
+        # supporting_evidence_quote_target_ids is None when all quotes were
+        # plain strings (no object form seen by parser).
+        parsed = LlmJudgment(
+            judgment="pass",
+            primary_reason="ok",
+            supporting_evidence_quotes=["plain string quote"],
+            suggested_action=None,
+            supporting_evidence_quote_target_ids=None,
+        )
+        result = llm_backend._resolve_quote_target_ids_strict(rule, parsed)
+        assert result == [llm_backend._UNKNOWN_TARGET_ID]
+
+
+class TestFindPerTargetFabricatedQuotes:
+    """Unit tests for :func:`_find_per_target_fabricated_quotes` (#225)."""
+
+    def test_valid_quotes_return_empty(self):
+        """Quotes that are substrings of their attributed artifact pass."""
+        quotes = ["alpha phrase", "beta phrase"]
+        target_ids = ["a", "b"]
+        texts = {"a": "some alpha phrase here", "b": "some beta phrase here"}
+        result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
+        assert result == []
+
+    def test_cross_artifact_quote_detected(self):
+        """A quote present in B but claimed to be from A is fabricated."""
+        quotes = ["beta only content"]
+        target_ids = ["a"]
+        texts = {"a": "alpha only content", "b": "beta only content"}
+        result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
+        assert result == ["beta only content"]
+
+    def test_unknown_target_id_fabricated(self):
+        """A sentinel or unknown target_id (not in texts) is fabricated."""
+        quotes = ["some quote"]
+        target_ids = [llm_backend._UNKNOWN_TARGET_ID]
+        texts = {"known": "some quote here"}
+        result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
+        assert result == ["some quote"]
+
+    def test_empty_quote_fabricated(self):
+        """An empty quote string is fabricated regardless of target_id."""
+        quotes = [""]
+        target_ids = ["a"]
+        texts = {"a": "some content"}
+        result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
+        assert result == [""]
+
+    def test_placeholder_excluded_from_corpus(self):
+        """A target_id absent from texts_by_id (placeholder) causes fabrication."""
+        quotes = ["any text"]
+        target_ids = ["ghost"]
+        texts = {}  # ghost was a placeholder, excluded from corpus
+        result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
+        assert result == ["any text"]
+
+    def test_smart_quote_normalisation_tolerated(self):
+        """Smart-quote differences between quote and artifact are tolerated."""
+        quotes = ["don’t"]  # RIGHT SINGLE QUOTATION MARK
+        target_ids = ["a"]
+        texts = {"a": "please don't do this"}  # ASCII apostrophe
+        result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
+        assert result == []
