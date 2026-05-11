@@ -86,6 +86,8 @@ class FixtureEntry:
     notes: str | None
     source_path: Path
     rule_target_kind: RuleTargetKind = RuleTargetKind.UNSPECIFIED
+    # #204 — optional caller-declared kind for the target artifact.
+    artifact_kind: RuleTargetKind | None = None
 
 
 _REQUIRED = {
@@ -96,7 +98,7 @@ _REQUIRED = {
     "category",
     "intended_backend",
 }
-_OPTIONAL = {"notes", "rule_target_kind"}
+_OPTIONAL = {"notes", "rule_target_kind", "artifact_kind"}
 _TARGET_REQUIRED = {"kind", "value"}
 
 
@@ -165,6 +167,11 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
         rule_target_kind = RuleTargetKind.UNSPECIFIED
     else:
         rule_target_kind = _coerce_enum(RuleTargetKind, rule_target_kind_value, "rule_target_kind")
+    artifact_kind_value = obj.get("artifact_kind")
+    if artifact_kind_value is None:
+        artifact_kind: RuleTargetKind | None = None
+    else:
+        artifact_kind = _coerce_enum(RuleTargetKind, artifact_kind_value, "artifact_kind")
     return FixtureEntry(
         id=source_path.stem,
         rule_text=_expect_str(obj["rule_text"], "rule_text"),
@@ -178,6 +185,7 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
         notes=notes_value,
         source_path=source_path,
         rule_target_kind=rule_target_kind,
+        artifact_kind=artifact_kind,
     )
 
 
