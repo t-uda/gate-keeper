@@ -1,6 +1,7 @@
 {
   "rule_text": "The commit message body explains why the change was made, naming the failure mode and the rationale.",
   "rule_target_kind": "commit_message",
+  "artifact_kind": "pr_description",
   "target": {
     "kind": "path",
     "value": "pr_description_strong.md"
