@@ -63,8 +63,9 @@ def load_config(config_path: Path) -> dict[str, Any]:
       when omitted (the CLI resolves the default).
     - ``reproducibility``: int >= 1.
 
-    Raises :class:`MatrixConfigError` on schema violations, ``OSError`` on
-    read errors, and ``yaml.YAMLError`` on malformed YAML.
+    Raises :class:`MatrixConfigError` on schema violations (including I/O
+    errors and malformed YAML — both are wrapped into :class:`MatrixConfigError`
+    with a descriptive message).
     """
     try:
         raw = config_path.read_text(encoding="utf-8")
@@ -192,9 +193,9 @@ def _build_env_for_model(spec: ModelSpec, base_env: dict[str, str]) -> dict[str,
     env["GATE_KEEPER_LLM_PROVIDER"] = spec.provider
     if spec.provider == "openai":
         env["GATE_KEEPER_OPENAI_MODEL"] = spec.model
-        if "OPENAI_API_KEY" not in env:
+        if not env.get("OPENAI_API_KEY", "").strip():
             raise RuntimeError(
-                "llm-rubric dotenv has no OPENAI_API_KEY; configure it before "
+                "llm-rubric dotenv has no OPENAI_API_KEY (or it is blank); configure it before "
                 "running the model matrix (see docs/llm-rubric.md)."
             )
     else:  # pragma: no cover — guarded by parse_model_specs
@@ -208,10 +209,14 @@ def _build_env_for_model(spec: ModelSpec, base_env: dict[str, str]) -> dict[str,
 
 
 def run_matrix(
-    config_path: Path,
+    config: dict[str, Any],
     entries_dir: Path,
 ) -> list[dict[str, Any]]:
     """Run the bench corpus for each model in the config and return flat JSON rows.
+
+    *config* must be the validated dict returned by :func:`load_config` — the
+    caller is expected to parse the config once and pass it here, so there is no
+    duplicate I/O or TOCTOU risk.
 
     Each element of the returned list is a ``PerRuleResult.to_dict()`` record
     augmented with ``"provider"`` and ``"model_label"`` fields identifying
@@ -226,7 +231,6 @@ def run_matrix(
     """
     from gate_keeper import bench as _bench
 
-    config = load_config(config_path)
     model_specs = parse_model_specs(config["models"])
 
     base_env = _llm._load_env_file()

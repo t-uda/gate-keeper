@@ -852,7 +852,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             return EXIT_USAGE
 
         try:
-            rows = run_matrix(config_path, entries_dir)
+            rows = run_matrix(config, entries_dir)
         except (MatrixConfigError, RuntimeError, FileNotFoundError, ValueError) as exc:
             print(f"error: --model-matrix: {exc}", file=sys.stderr)
             return EXIT_USAGE

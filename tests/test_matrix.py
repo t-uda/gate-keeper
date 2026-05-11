@@ -175,7 +175,7 @@ class TestRunMatrix:
             f"reproducibility: 1\n"
         )
 
-        rows = _matrix.run_matrix(cfg, entries_dir)
+        rows = _matrix.run_matrix(_matrix.load_config(cfg), entries_dir)
 
         assert len(rows) == 2
         labels = [r["model_label"] for r in rows]
@@ -203,7 +203,7 @@ class TestRunMatrix:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(f"models:\n  - openai:gpt-4o-mini\nfixtures: {entries_dir}\n")
 
-        _matrix.run_matrix(cfg, entries_dir)
+        _matrix.run_matrix(_matrix.load_config(cfg), entries_dir)
         assert _llm._load_env_file is _sentinel_loader
 
 
