@@ -1,0 +1,26 @@
+{
+  "rule_text": "The reference document and the tutorial document must agree on the set of top-level gate-keeper CLI commands they name.",
+  "target": {
+    "kind": "inline",
+    "value": "(multi-target rule — see params.targets for the artifact set)"
+  },
+  "params": {
+    "targets": [
+      {
+        "id": "reference",
+        "kind": "documentation",
+        "path": "tests/fixtures/semantic/targets/multi_target_doc_a.md"
+      },
+      {
+        "id": "tutorial",
+        "kind": "documentation",
+        "path": "tests/fixtures/semantic/targets/multi_target_doc_b.md"
+      }
+    ]
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["validate", "compile", "diagnose"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Slice-1 multi-target fixture (#182).  Both artifacts mention the same three commands (validate / compile / diagnose).  Baseline regeneration is deferred to slice 2; the fixture lives in tree so the harness's loader exercises the params.targets schema."
+}

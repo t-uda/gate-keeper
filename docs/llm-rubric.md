@@ -178,7 +178,7 @@ context passed to the model:
 
 ### Structured judgment schema (`LlmJudgment`)
 
-The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v4"`)
+The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v5"`)
 to respond with a JSON object matching the `LlmJudgment` dataclass:
 
 ```json
@@ -567,6 +567,27 @@ Reference history:
   rule's annotated kind verbatim ("The rule is annotated
   `commit_message` but the artifact provided is a pull request
   description.") — is the observable goal.
+- v5 (#182, slice 1): introduces a multi-target rendering branch. When a
+  rule declares `params.targets` (a non-empty list of `{id, kind, path}`
+  entries), the legacy `## Target reference` block is replaced by a
+  labelled `## Target artifacts (multi)` block with one subsection per
+  artifact (`### Target <id> (kind: <kind>)`) and the model is asked to
+  attribute each entry of `supporting_evidence_quotes` to a `target_id`.
+  The parser accepts both the legacy plain-string entries and the
+  multi-target object form `{"target_id": "...", "quote": "..."}`;
+  internally the strings are joined and an optional parallel
+  `supporting_evidence_quote_target_ids` list is surfaced on the success
+  evidence dict for multi-target rules.  Single-target rules (no
+  `params.targets`) render byte-identical text to v4 and emit the v4
+  evidence wire shape unchanged — only the `PROMPT_VERSION` constant
+  changes.  Slice 1 caps the list at 5 entries and uses concatenated
+  artifact text for substring grounding; per-artifact substring
+  attribution and dep-gates-manifest integration are deferred to
+  slice 2.  Bench/baseline regeneration is also deferred (one new
+  fixture lives in tree under
+  `tests/fixtures/semantic/entries/multi-target-01-…` but
+  `baseline.json` is left at the v4 capture until the slice-2 prompt
+  evaluation runs).
 
 ### Per-model dispatch accuracy (#175)
 

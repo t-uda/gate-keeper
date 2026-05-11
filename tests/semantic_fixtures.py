@@ -88,6 +88,10 @@ class FixtureEntry:
     rule_target_kind: RuleTargetKind = RuleTargetKind.UNSPECIFIED
     # #204 — optional caller-declared kind for the target artifact.
     artifact_kind: RuleTargetKind | None = None
+    # #182 — optional rule-IR params (notably ``params.targets`` for
+    # multi-artifact semantic rules).  ``None`` for the legacy single-
+    # target fixtures.
+    params: dict[str, Any] | None = None
 
 
 _REQUIRED = {
@@ -98,7 +102,12 @@ _REQUIRED = {
     "category",
     "intended_backend",
 }
-_OPTIONAL = {"notes", "rule_target_kind", "artifact_kind"}
+# ``params`` (#182, slice 1) is optional and carries rule-IR params
+# (notably ``params.targets`` for multi-artifact semantic rules).  The
+# parser stores it verbatim on :class:`FixtureEntry` so consumers can
+# inspect it; the rubric backend reads it from the synthesised Rule's
+# ``params`` field at evaluation time.
+_OPTIONAL = {"notes", "rule_target_kind", "artifact_kind", "params"}
 _TARGET_REQUIRED = {"kind", "value"}
 
 
@@ -178,6 +187,12 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
                 "'unspecified' is not a valid value; use null/absent to mean 'no kind override'"
             )
         artifact_kind = coerced
+    params_value = obj.get("params")
+    if params_value is not None and not isinstance(params_value, dict):
+        raise ValueError(
+            f"FixtureEntry({source_path.name}).params: expected mapping or absent, "
+            f"got {type(params_value).__name__}"
+        )
     return FixtureEntry(
         id=source_path.stem,
         rule_text=_expect_str(obj["rule_text"], "rule_text"),
@@ -192,6 +207,7 @@ def parse_entry(data: Any, *, source_path: Path) -> FixtureEntry:
         source_path=source_path,
         rule_target_kind=rule_target_kind,
         artifact_kind=artifact_kind,
+        params=params_value,
     )
 
 
