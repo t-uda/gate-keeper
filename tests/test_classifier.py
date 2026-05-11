@@ -538,3 +538,126 @@ class TestDraftRequiresPRContext:
         rule = _classify_text("PR must not be in draft state before review")
         assert rule.backend_hint is Backend.GITHUB
         assert rule.kind is RuleKind.GITHUB_NOT_DRAFT
+
+
+# ---------------------------------------------------------------------------
+# Issue #215: non-binding textlint suggestion fields
+# ---------------------------------------------------------------------------
+
+
+class TestTextlintSuggestion:
+    """Classifier emits an advisory ``suggested_backend`` for textlint-suitable rules.
+
+    The suggestion is non-binding: effective routing (``backend_hint`` /
+    ``kind``) must be unchanged.  Authors adopt the suggestion by editing
+    the rule IR explicitly (see ``docs/backend-external.md``).
+    """
+
+    # --- Positive cases — heuristics should match -----------------------
+
+    def test_term_substitution_emits_suggestion(self):
+        rule = _classify_text("Documentation must use 'GitHub' instead of 'github'.")
+        assert rule.suggested_backend == "external+textlint"
+        assert rule.suggestion_confidence is not None
+        assert 0.0 < rule.suggestion_confidence <= 1.0
+        assert rule.suggestion_rationale
+        assert "term" in rule.suggestion_rationale.lower()
+
+    def test_must_not_use_the_term_emits_suggestion(self):
+        rule = _classify_text("Authors must not use the term 'simply' in documentation.")
+        assert rule.suggested_backend == "external+textlint"
+        assert rule.suggestion_rationale
+
+    def test_passive_voice_emits_suggestion(self):
+        rule = _classify_text("The changelog entry must not use passive voice.")
+        assert rule.suggested_backend == "external+textlint"
+        assert rule.suggestion_rationale
+        rationale_l = rule.suggestion_rationale.lower()
+        assert "passive" in rationale_l or "style" in rationale_l
+
+    def test_first_person_pronoun_emits_suggestion(self):
+        rule = _classify_text("Release notes must not use first-person pronouns.")
+        assert rule.suggested_backend == "external+textlint"
+
+    def test_sentence_length_emits_suggestion(self):
+        rule = _classify_text("Each sentence must not exceed 25 words.")
+        assert rule.suggested_backend == "external+textlint"
+
+    def test_capitalisation_emits_suggestion(self):
+        rule = _classify_text("Product names must be capitalized as defined in the brand guide.")
+        assert rule.suggested_backend == "external+textlint"
+
+    # --- Negative cases — heuristics must NOT match ---------------------
+
+    def test_file_existence_rule_has_no_suggestion(self):
+        rule = _classify_text("The CHANGELOG file must exist before release.")
+        assert rule.suggested_backend is None
+        assert rule.suggestion_confidence is None
+        assert rule.suggestion_rationale is None
+
+    def test_ci_check_rule_has_no_suggestion(self):
+        rule = _classify_text("CI checks must pass before merging.")
+        assert rule.suggested_backend is None
+
+    def test_generic_text_required_has_no_suggestion(self):
+        # ``must contain`` matches the byte-level text_required filesystem
+        # path; on its own that is NOT a textlint pattern and the
+        # suggestion field must remain absent.
+        rule = _classify_text("The README must contain a usage section.")
+        assert rule.suggested_backend is None
+
+    def test_generic_quality_rule_has_no_suggestion(self):
+        rule = _classify_text("Code quality must meet team standards.")
+        assert rule.suggested_backend is None
+
+    def test_pr_state_rule_has_no_suggestion(self):
+        rule = _classify_text("The pull request must not be a draft.")
+        assert rule.suggested_backend is None
+
+    # --- Effective routing must be unchanged ----------------------------
+
+    def test_suggestion_does_not_change_backend(self):
+        # A rule that matches a textlint suggestion AND falls through to
+        # llm-rubric must still route to llm-rubric — the suggestion is
+        # non-binding output only.
+        rule = _classify_text("The changelog entry must not use passive voice.")
+        assert rule.backend_hint is Backend.LLM_RUBRIC
+        assert rule.kind is RuleKind.SEMANTIC_RUBRIC
+        # Suggestion is still surfaced for the author.
+        assert rule.suggested_backend == "external+textlint"
+
+    def test_suggestion_does_not_change_filesystem_routing(self):
+        # If a rule matches BOTH a filesystem heuristic AND a textlint
+        # suggestion, the effective backend stays filesystem.  ``must
+        # contain`` triggers filesystem/text_required, AND ``must not use
+        # the term`` triggers the textlint terminology heuristic.
+        rule = _classify_text("Docs must contain a glossary; authors must not use the term 'simply'.")
+        # text_required wins for effective routing.
+        assert rule.backend_hint is Backend.FILESYSTEM
+        # But the textlint suggestion is still emitted because the rule
+        # text also matches the term-enforcement heuristic.
+        assert rule.suggested_backend == "external+textlint"
+
+    # --- Suggestion fields round-trip through IR ------------------------
+
+    def test_suggestion_fields_serialize_to_dict(self):
+        rule = _classify_text("The changelog entry must not use passive voice.")
+        data = rule.to_dict()
+        assert data["suggested_backend"] == "external+textlint"
+        assert isinstance(data["suggestion_confidence"], float)
+        assert isinstance(data["suggestion_rationale"], str)
+
+    def test_no_suggestion_omits_fields_from_dict(self):
+        rule = _classify_text("The CHANGELOG file must exist before release.")
+        data = rule.to_dict()
+        assert "suggested_backend" not in data
+        assert "suggestion_confidence" not in data
+        assert "suggestion_rationale" not in data
+
+    def test_suggestion_fields_round_trip_through_from_dict(self):
+        original = _classify_text("The changelog entry must not use passive voice.")
+        data = original.to_dict()
+        restored = Rule.from_dict(data)
+        assert restored.suggested_backend == original.suggested_backend
+        assert restored.suggestion_confidence == original.suggestion_confidence
+        assert restored.suggestion_rationale == original.suggestion_rationale

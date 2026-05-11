@@ -150,11 +150,52 @@ These adapters ship with gate-keeper and self-register at CLI entry
 - Classifier rules that route Markdown text to `external_check` — the
   classifier still has no `external` branch; rules use `external_check`
   only when authored that way (or compiled from a future adapter-aware
-  classification pass).
+  classification pass). The classifier *can* emit a non-binding
+  suggestion pointing authors at this backend; see
+  [Classifier suggestion (#215)](#classifier-suggestion-215) below.
 - Concrete `--backend external` invocation flows; the choice is exposed
   for symmetry with the other backends, but the foundation has no adapters
   registered, so every rule routed there returns `unsupported` /
   `adapter_unknown` until #80 lands at least one adapter.
+
+## Classifier suggestion (#215)
+
+The classifier detects textlint-suitable patterns and reports them as
+**non-binding suggestions** on the Rule IR. The effective backend
+(`backend_hint` / `kind`) is **never** rewritten by the suggestion — the
+author keeps control of routing.
+
+When a heuristic matches (`use X instead of Y`, `must not use the term`,
+`passive voice`, `first-person pronouns`, `sentence length`,
+`capitalized as`, etc.), the classifier populates three advisory fields
+on the Rule:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `suggested_backend` | `str` | e.g. `"external+textlint"` |
+| `suggestion_confidence` | `float` in `[0.0, 1.0]` | heuristic confidence |
+| `suggestion_rationale` | `str` | short human-readable explanation |
+
+These fields are omitted from `to_dict()` output when absent so existing
+IR fixtures stay byte-identical.
+
+**Adopting a suggestion (author opt-in).** To actually route a rule to
+the external adapter, edit the compiled IR JSON to set:
+
+```json
+{
+  "kind": "external_check",
+  "backend_hint": "external",
+  "params": { "tool": "textlint" }
+}
+```
+
+Then run `gate-keeper validate --rules-format ir compiled.json --target …`.
+The validator uses the explicit `kind` / `backend_hint`, not
+`suggested_backend`. There is no auto-promotion: the suggestion is a hint
+only, the hand-edited IR is the source of truth. This preserves the
+fail-closed behaviour for authors who have not installed textlint while
+still surfacing the opportunity.
 
 ---
 
