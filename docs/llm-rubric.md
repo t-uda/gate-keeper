@@ -398,6 +398,60 @@ verdict is rejected as ungrounded).  Failure modes recorded in
 
 There is no retry. Investigate the failure mode, then rerun.
 
+## Contributor testing: hermetic vs live-provider tests
+
+### Default behaviour
+
+`uv run pytest` is **always hermetic**.  A pytest autouse fixture in
+`tests/conftest.py` monkeypatches `_load_env_file` to return `{}` for every
+ordinary test, so no host credential file (e.g.
+`/home/vscode/.config/hermes-projects/gate-keeper.env`) is ever read.
+
+Tests that expect `provider_unconfigured` behaviour are therefore stable both
+in CI (which has no dotenv) and on a developer machine that has a real provider
+configured.
+
+### Live-provider tests
+
+Tests that exercise a real LLM provider must be decorated with
+`@pytest.mark.live_llm`.  They are skipped automatically unless **both**
+conditions are met at collection time:
+
+1. `GATE_KEEPER_RUN_LIVE_LLM_TESTS=1` is set in the environment.
+2. The project dotenv file contains a supported provider and the corresponding
+   API key (same check as `_is_configured()`).
+
+Run them explicitly:
+
+```sh
+GATE_KEEPER_RUN_LIVE_LLM_TESTS=1 uv run pytest -m live_llm
+```
+
+### Adding a new test that needs the real dotenv
+
+Mark it `@pytest.mark.live_llm` and add a skip guard inside the test body if
+it requires keys beyond what `_is_configured()` checks:
+
+```python
+import pytest
+
+@pytest.mark.live_llm
+def test_real_provider_smoke():
+    ...
+```
+
+The conftest autouse fixture detects the marker and skips patching, so the
+real `_load_env_file` runs and the test sees the actual dotenv contents.
+
+### Do not monkeypatch `_load_env_file` in ordinary tests
+
+Before this isolation was centralised, individual tests called
+`monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **k: {...})`.
+That pattern still works (the central fixture is applied first; a second
+`monkeypatch.setattr` on the same attribute overrides it within that test), but
+new tests should rely on the autouse stub and only patch when they need a
+specific non-empty env dict.
+
 ## Extending to additional providers
 
 Currently `anthropic` and `openai` are wired. To add another provider:

@@ -41,6 +41,8 @@ extraPaths = ["scripts"]
 [tool.pytest.ini_options]
 markers = [
     "integration: tests that require local tooling (e.g. npx, textlint); skipped automatically when those binaries are missing",
+    "live_llm: live-provider integration test; skipped unless GATE_KEEPER_RUN_LIVE_LLM_TESTS=1 and provider dotenv is configured",
+    "dotenv_loader: tests that directly exercise the _load_env_file implementation; bypasses the hermetic dotenv stub",
 ]
 
 [build-system]
