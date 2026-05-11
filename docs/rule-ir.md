@@ -314,7 +314,7 @@ later page can never be silently skipped.
 ## `changed_file_policy` — manifest-backed changed-file policy
 
 The `changed_file_policy` rule kind (issue #230) evaluates **only changed
-files** — from a GitHub PR or from a local git working tree — against a
+files** — from a GitHub PR or from a local Git working tree — against a
 repository-owned YAML policy manifest. It is a **deterministic changed-file
 policy check, not a semantic content review**: file contents are never
 parsed, inspected, or uploaded.
@@ -341,7 +341,7 @@ remains the project's source of truth; this rule only enforces the manifest.
 - `local_git_mode` — optional, used only when `changed_files_source ==
   "local_git"`. One of `staged | unstaged | staged_and_unstaged |
   untracked | all`. Defaults to `staged_and_unstaged`.
-- `repo_root` — optional. Directory used for git commands when
+- `repo_root` — optional. Directory used for Git commands when
   `local_git`. When absent, the target string is used if it does not look
   like a PR reference; otherwise cwd.
 
@@ -412,7 +412,7 @@ that caused each finding (per #230 done criteria).
 | `fail` | `changed_file_policy` | One or more changed files violate the manifest; the `violations` list is populated and the diagnostic carries a `remediation` block listing the offending paths. |
 | `unavailable` | `params_error` | Required params missing or malformed (`manifest_path`, `changed_files_source`, `local_git_mode`, `repo_root`). |
 | `unavailable` | `manifest_error` | Manifest file missing, YAML parse error, unsupported version, unknown top-level key, unknown entry kind, missing required entry field, or unknown entry field. |
-| `unavailable` | `local_git_error` | `git` binary missing or git command failed (e.g. target is not a git repository). |
+| `unavailable` | `local_git_error` | `git` binary missing or Git command failed (e.g. target is not a Git repository). |
 | `unavailable` | `gh_*` | Any `gh` failure when fetching the PR file list (same surface as `github_changed_files_absent`). |
 
 ### Composition

@@ -18,7 +18,7 @@ Subcommands: [`compile`](#compile), [`explain`](#explain),
 |------|----------|---------|
 | `0`  | `EXIT_OK`   | All rules passed (or `bench` ran without a usage error). |
 | `1`  | `EXIT_FAIL` | One or more rules produced a non-passing status (`fail`, `unavailable`, `unsupported`, or `error`). |
-| `2`  | `EXIT_USAGE` | Bad arguments, unreadable input file, an unmatched `--include` glob, or a duplicate rule id across composed documents. |
+| `2`  | `EXIT_USAGE` | Bad arguments, unreadable input file, an unmatched `--include` glob, or a duplicate rule ID across composed documents. |
 
 Defined in `src/gate_keeper/diagnostics.py`.
 
@@ -64,11 +64,11 @@ globs — not both.
   point back to the originating document.
 - If any `--include` glob matches no files, the command exits `2` and prints
   the unmatched pattern.
-- Rule ids must be unique across the composed RuleSet. If two documents
-  produce the same rule id (the default scheme is `rule-<stem>-L<line>`,
+- Rule IDs must be unique across the composed RuleSet. If two documents
+  produce the same rule ID (the default scheme is `rule-<stem>-L<line>`,
   so two files with the same stem and a rule on the same line collide),
   the command exits `2` and reports both source path/line locations. Rule
-  ids are never silently renamed.
+  IDs are never silently renamed.
 
 ### Sample invocation
 
@@ -344,7 +344,7 @@ Each line: `path:line: severity: [backend/status] rule_id: message [evidence]`.
   [docs/rule-ir.md](rule-ir.md) for the full params and evidence shape.
 - The `changed_file_policy` rule kind (issue #230) is a **deterministic
   changed-file policy check, not a semantic content review**. It evaluates
-  changed files — from a GitHub PR or from a local git working tree —
+  changed files — from a GitHub PR or from a local Git working tree —
   against a repository-owned YAML manifest of forbidden path globs and
   exception entries. File contents are never inspected or uploaded.
   Required params: `manifest_path`, `changed_files_source`
@@ -437,7 +437,7 @@ flag entirely. Rules whose `target_kind` is `unspecified` are
 unaffected: they preserve the prompt-level fallback (the `llm-rubric`
 prompt still names the rule's annotated kind in the model's
 instructions for defence-in-depth, see `docs/llm-rubric.md`). Rules
-routed to non-LLM backends (filesystem, github, external) ignore this
+routed to non-LLM backends (filesystem, GitHub, external) ignore this
 flag.
 
 Sample invocations:

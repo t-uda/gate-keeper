@@ -176,7 +176,7 @@ rules.md:3: error: [github/fail] no-workbook-outputs: PR owner/repo#43: 1 of 9 c
 ## 4b. Manifest-backed changed-file policy — `github / changed_file_policy`
 
 A **deterministic changed-file policy check, not a semantic content
-review**. Evaluates changed files from a GitHub PR *or* a local git working
+review**. Evaluates changed files from a GitHub PR *or* a local Git working
 tree against a repository-owned YAML manifest (issue #230). Useful for
 real-data intake repositories such as `uda-lab/spread-applicant-ai` that
 must prevent rights-constrained or private artifacts from being committed
