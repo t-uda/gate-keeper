@@ -137,6 +137,20 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   message" example with a kind-neutral schema illustration, and (c) adds
 #   a checklist step requiring the model to identify which artifact kind
 #   the rule's predicate actually targets before deciding.
+# - v5 (#182, slice 1): introduce a multi-target rendering branch. When the
+#   rule declares ``params.targets`` (a non-empty list of ``{id, kind, path}``
+#   entries), the ``## Target reference`` block is replaced by a
+#   ``## Target artifacts (multi)`` block carrying one labelled subsection
+#   per artifact (id + kind), and the response schema permits each entry of
+#   ``supporting_evidence_quotes`` to be either a plain string (legacy v4
+#   shape) or an object ``{target_id, quote}`` so the model can attribute
+#   each quote to a specific artifact. Single-target rules (no
+#   ``params.targets`` or an empty list) preserve the v4 rendering and the
+#   v4 string-list evidence shape byte-for-byte; only the
+#   ``prompt_version`` constant changes. The bump is required so
+#   downstream consumers can distinguish "rendered without a multi-target
+#   block because the rule did not declare one" from "rendered with the
+#   pre-v5 template that had no multi-target branch at all".
 #
 # The ``PROMPT_VERSION`` constant is **not** bumped for #191. The rendered
 # template body (schema, instructions, constraints, examples) is unchanged;
@@ -146,7 +160,7 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 # file *path* (and the substring grounding check follows the same
 # substitution). Reproducibility records keyed on ``prompt_version``
 # continue to mean the same thing.
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -222,6 +236,17 @@ class LlmJudgment(BaseModel):
     suggested_action:
         Concrete remediation step. Required on fail; MUST be ``None`` on
         pass and on unsupported.
+    supporting_evidence_quote_target_ids:
+        Optional parallel list (#182, slice 1) attributing each entry of
+        ``supporting_evidence_quotes`` to a specific target id from
+        ``rule.params['targets']``.  ``None`` on single-target rules
+        (preserves the v4 wire shape).  Populated on multi-target rules
+        whose model response used the object form ``{"target_id": "...",
+        "quote": "..."}`` — ``_parse_llm_judgment`` normalises the
+        object form to the legacy string list and records the per-quote
+        ``target_id`` here.  A missing per-quote ``target_id`` on an
+        object-form entry is recorded as ``None`` and the backend
+        substitutes the first target's id when emitting evidence.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -230,6 +255,7 @@ class LlmJudgment(BaseModel):
     primary_reason: str
     supporting_evidence_quotes: list[str]
     suggested_action: str | None
+    supporting_evidence_quote_target_ids: list[str | None] | None = None
 
     @field_validator("primary_reason")
     @classmethod
@@ -638,12 +664,244 @@ def _resolve_artifact_input(
     return str(target)
 
 
+# ---------------------------------------------------------------------------
+# Multi-target context (#182, slice 1)
+#
+# A rule may declare ``params.targets`` as a non-empty list of artifact
+# specs.  Each spec is a mapping ``{id, kind, path}`` where ``id`` is a
+# rule-author-supplied stable string (used to attribute supporting quotes
+# back to a specific artifact in evidence), ``kind`` is a required
+# :class:`TargetKind` value, and ``path`` is an optional repo-relative
+# path.  Slice 1 caps the list at :data:`_MULTI_TARGET_MAX_ENTRIES` (5)
+# entries to prevent prompt bloat; out-of-range values raise.
+#
+# The shape lives entirely in ``rule.params`` rather than as a new IR
+# field so :class:`Rule.from_dict` stays byte-for-byte compatible with
+# existing fixtures (see ``docs/rule-ir.md`` § "Per-kind params" for the
+# documented schema row).  Validation is performed at the seam where the
+# backend consumes the list — :func:`_parse_multi_targets` — and is
+# fail-closed: any structural error raises ``ValueError`` so the caller's
+# diagnostic surfaces the misconfiguration rather than silently dropping
+# to single-target.
+# ---------------------------------------------------------------------------
+
+
+#: Hard cap on the number of multi-target entries a rule may declare (#182).
+#: Five is large enough to cover the dogfood multi-artifact rule shapes
+#: (doc-doc consistency, PR body + changed-files, source ↔ derived artifact)
+#: while keeping prompt bloat bounded.  Rule-author-supplied lists exceeding
+#: this length raise at parse time.
+_MULTI_TARGET_MAX_ENTRIES = 5
+
+
+@dataclass(frozen=True)
+class MultiTargetSpec:
+    """A single parsed entry from ``rule.params['targets']`` (#182).
+
+    Fields
+    ------
+    id:
+        Stable rule-author-supplied identifier.  Surfaces in the prompt's
+        ``## Target artifacts (multi)`` block as the section label and in
+        evidence so per-quote attribution survives serialisation.
+    kind:
+        Required :class:`TargetKind` for this artifact (owner decision on
+        issue #182: "Required.").  Used in the prompt label so the model
+        can recognise per-artifact kind boundaries.
+    path:
+        Optional repo-relative path to the artifact file.  ``None`` is
+        accepted in slice 1 so a future revision can carry inline text;
+        the prompt-builder records ``"(no path declared)"`` when absent.
+    """
+
+    id: str
+    kind: TargetKind
+    path: str | None
+
+
+def _parse_multi_targets(rule: Rule) -> list[MultiTargetSpec]:
+    """Return the parsed ``rule.params['targets']`` list, or ``[]`` if absent (#182).
+
+    Validation (fail-closed):
+
+    - ``targets`` must be a list when present; non-list raises.
+    - Each entry must be a mapping with ``id`` (non-empty string) and
+      ``kind`` (a :class:`TargetKind` value); ``path`` is optional (string
+      or ``None``).
+    - ``kind`` is **required** per the issue-#182 owner decision and is
+      coerced via :class:`TargetKind` — unknown values raise.
+    - ``id`` must be unique within the list; duplicates raise.
+    - At most :data:`_MULTI_TARGET_MAX_ENTRIES` entries are accepted.
+
+    An absent ``params['targets']`` returns ``[]`` so callers can branch on
+    ``if multi_targets`` to detect the multi-target path.  An empty list is
+    treated identically to absence (no multi-target rendering).
+    """
+    raw = rule.params.get("targets")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"Rule.params.targets: expected list, got {type(raw).__name__}")
+    if not raw:
+        return []
+    if len(raw) > _MULTI_TARGET_MAX_ENTRIES:
+        raise ValueError(
+            f"Rule.params.targets: exceeds maximum of {_MULTI_TARGET_MAX_ENTRIES} entries (got {len(raw)})"
+        )
+    specs: list[MultiTargetSpec] = []
+    seen_ids: set[str] = set()
+    for i, entry in enumerate(raw):
+        ctx = f"Rule.params.targets[{i}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{ctx}: expected mapping, got {type(entry).__name__}")
+        allowed = {"id", "kind", "path"}
+        unknown = set(entry) - allowed
+        if unknown:
+            raise ValueError(f"{ctx}: unknown fields: {sorted(unknown)}")
+        if "id" not in entry:
+            raise ValueError(f"{ctx}: missing required field 'id'")
+        if "kind" not in entry:
+            raise ValueError(f"{ctx}: missing required field 'kind'")
+        spec_id = entry["id"]
+        if not isinstance(spec_id, str) or not spec_id.strip():
+            raise ValueError(f"{ctx}.id: expected non-empty string")
+        if spec_id in seen_ids:
+            raise ValueError(f"{ctx}.id: duplicate id {spec_id!r}")
+        seen_ids.add(spec_id)
+        kind_raw = entry["kind"]
+        if not isinstance(kind_raw, str):
+            raise ValueError(f"{ctx}.kind: expected str, got {type(kind_raw).__name__}")
+        try:
+            kind = TargetKind(kind_raw)
+        except ValueError as exc:
+            valid = sorted(member.value for member in TargetKind)
+            raise ValueError(
+                f"{ctx}.kind: {kind_raw!r} is not a valid TargetKind; expected one of {valid}"
+            ) from exc
+        path_raw = entry.get("path")
+        if path_raw is not None and not isinstance(path_raw, str):
+            raise ValueError(f"{ctx}.path: expected str or null, got {type(path_raw).__name__}")
+        specs.append(MultiTargetSpec(id=spec_id, kind=kind, path=path_raw))
+    return specs
+
+
+def _load_multi_target_texts(specs: list[MultiTargetSpec]) -> dict[str, str]:
+    """Return ``{id: text}`` for *specs*, reading each entry's ``path`` (#182).
+
+    For an entry whose ``path`` is ``None`` or does not resolve to a
+    readable file, the text falls back to ``"(no path declared)"`` or a
+    similar placeholder so the prompt rendering still succeeds — the
+    fabrication validator will then reject any quote that claims to come
+    from such an artifact, which is the correct fail-closed outcome.
+
+    Slice-1 scope intentionally keeps this simple: no caching, no
+    base-directory enforcement (deferred to the dep-gates manifest
+    integration in slice 2), no size budget enforcement, no encoding
+    fallback beyond UTF-8.
+    """
+    texts: dict[str, str] = {}
+    for spec in specs:
+        if spec.path is None:
+            texts[spec.id] = "(no path declared)"
+            continue
+        try:
+            path_obj = Path(spec.path)
+            if path_obj.is_file():
+                texts[spec.id] = path_obj.read_text(encoding="utf-8")
+                continue
+        except (OSError, UnicodeDecodeError):
+            pass
+        texts[spec.id] = f"(unable to read artifact at {spec.path})"
+    return texts
+
+
+def _render_multi_target_block(specs: list[MultiTargetSpec], texts: dict[str, str]) -> str:
+    """Render the ``## Target artifacts (multi)`` prompt block (#182).
+
+    Produces one ``### Target <id> (kind: <kind>)`` subsection per spec,
+    followed by the artifact's text body.  The ``(multi)`` suffix on the
+    section heading is what differentiates this from the legacy
+    ``## Target reference`` block — downstream tooling can grep for either
+    marker.
+    """
+    sections: list[str] = ["## Target artifacts (multi)\n"]
+    for spec in specs:
+        text = texts.get(spec.id, "")
+        sections.append(f"### Target {spec.id} (kind: {spec.kind.value})\n\n{text}\n")
+    return "\n".join(sections)
+
+
+_MULTI_TARGET_INSTRUCTION_BLOCK = """\
+- This rule is evaluated against **multiple labelled target artifacts** (see \
+the ``## Target artifacts (multi)`` block above). When you cite supporting \
+evidence, each entry of ``supporting_evidence_quotes`` MUST be an object of \
+the form ``{"target_id": "<id>", "quote": "<near-verbatim substring>"}`` \
+where ``<id>`` matches one of the labelled artifacts above. Plain-string \
+entries are tolerated for backward compatibility but you SHOULD prefer the \
+object form so quote attribution is unambiguous.
+"""
+
+
+def _render_multi_target_instruction_block(
+    specs: list[MultiTargetSpec],
+) -> str:
+    """Return the multi-target instruction block, or ``""`` (#182).
+
+    When *specs* is empty, returns the empty string so the single-target
+    rendering stays byte-identical to v4.
+    """
+    if not specs:
+        return ""
+    return _MULTI_TARGET_INSTRUCTION_BLOCK
+
+
+def _build_multi_target_prompt(
+    rule: Rule,
+    specs: list[MultiTargetSpec],
+) -> tuple[str, str]:
+    """Render system + user messages for a multi-target rule (#182).
+
+    Reuses :data:`RUBRIC_PROMPT_TEMPLATE` with the ``Target reference``
+    slot replaced by the rendered ``## Target artifacts (multi)`` block.
+    The artifact-kind block, unsupported-instruction block, and
+    unsupported-example block are kept under their original gating so
+    ``rule.target_kind`` still controls those for multi-target rules
+    (the per-artifact ``kind`` labels do not duplicate that mechanism).
+    """
+    texts = _load_multi_target_texts(specs)
+    multi_block = _render_multi_target_block(specs, texts)
+    # The legacy template renders ``## Target reference\n\n{target}\n``;
+    # for multi-target we substitute the whole block, so we hand it a
+    # ``target`` string that *is* the multi-target block and we drop the
+    # ``## Target reference`` heading by inlining the new block directly.
+    user = RUBRIC_PROMPT_TEMPLATE.format(
+        rule_text=rule.text,
+        target=multi_block,
+        target_kind_block=_render_target_kind_block(rule.target_kind)
+        + _render_multi_target_instruction_block(specs),
+        unsupported_instruction=_render_unsupported_instruction(rule.target_kind),
+        unsupported_example_block=_render_unsupported_example_block(rule.target_kind),
+    )
+    # The user template hard-codes ``## Target reference`` as the section
+    # heading.  For multi-target rules the inserted block already carries
+    # its own ``## Target artifacts (multi)`` heading, so we patch the
+    # rendered string to drop the redundant heading.  Doing this as a
+    # post-pass keeps the template constant unchanged and the patch
+    # localised — slice 2 may template-ise this once a second rendering
+    # branch lands.
+    user = user.replace(
+        "## Target reference\n\n## Target artifacts (multi)",
+        "## Target artifacts (multi)",
+    )
+    return RUBRIC_SYSTEM_PROMPT, user
+
+
 def _build_prompt(
     rule: Rule,
     target: str | Path,
     artifact_kind: TargetKind | None = None,
 ) -> tuple[str, str]:
-    """Render the system + user messages for *rule* against *target* (#169 / #175 / #191).
+    """Render the system + user messages for *rule* against *target* (#169 / #175 / #191 / #182).
 
     When ``rule.target_kind`` is :data:`TargetKind.UNSPECIFIED` three
     target-kind-related blocks render to the empty string:
@@ -673,7 +931,19 @@ def _build_prompt(
     preserved byte-for-byte (the prompt-level v4 fallback continues to
     apply). See :func:`_resolve_artifact_input` for the substitution
     rules.
+
+    When ``rule.params['targets']`` is non-empty (#182, slice 1) the
+    ``Target reference`` slot is replaced by a labelled
+    ``## Target artifacts (multi)`` block carrying one section per
+    artifact, and the prompt instructions ask the model to attribute each
+    supporting quote to a target id.  *target* and *artifact_kind* are
+    ignored on this branch — the rule's ``params.targets`` carries the
+    artifact set.  Single-target rules (no ``params.targets``) preserve
+    the v4 rendering byte-for-byte.
     """
+    multi_targets = _parse_multi_targets(rule)
+    if multi_targets:
+        return _build_multi_target_prompt(rule, multi_targets)
     system = RUBRIC_SYSTEM_PROMPT
     user = RUBRIC_PROMPT_TEMPLATE.format(
         rule_text=rule.text,
@@ -908,11 +1178,55 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             raw_response_excerpt=excerpt,
         )
 
-    quotes = obj["supporting_evidence_quotes"]
-    if not isinstance(quotes, list):
+    quotes_raw = obj["supporting_evidence_quotes"]
+    if not isinstance(quotes_raw, list):
         return LlmJudgmentParseError(
             failure_mode="missing_field",
             detail="supporting_evidence_quotes must be a list.",
+            raw_response_excerpt=excerpt,
+        )
+
+    # #182 — slice 1: accept either the legacy string-list shape or the
+    # multi-target object shape ``[{"target_id": "...", "quote": "..."},
+    # ...]``.  Object-form entries are normalised to a plain string here
+    # so the downstream Pydantic schema and substring-grounding check
+    # operate on a uniform string list; the per-quote attribution is
+    # surfaced via the optional parallel list
+    # ``supporting_evidence_quote_target_ids``.  A list whose entries are
+    # neither strings nor mappings is rejected as a contract violation.
+    quotes: list[str] = []
+    target_ids: list[str | None] = []
+    saw_object_form = False
+    for i, entry in enumerate(quotes_raw):
+        if isinstance(entry, str):
+            quotes.append(entry)
+            target_ids.append(None)
+            continue
+        if isinstance(entry, dict):
+            saw_object_form = True
+            q_val = entry.get("quote")
+            if not isinstance(q_val, str):
+                return LlmJudgmentParseError(
+                    failure_mode="missing_field",
+                    detail=(f"supporting_evidence_quotes[{i}]: object form requires a 'quote' string field."),
+                    raw_response_excerpt=excerpt,
+                )
+            tid_val = entry.get("target_id")
+            if tid_val is not None and not isinstance(tid_val, str):
+                return LlmJudgmentParseError(
+                    failure_mode="missing_field",
+                    detail=(
+                        f"supporting_evidence_quotes[{i}].target_id: expected str or null, "
+                        f"got {type(tid_val).__name__}."
+                    ),
+                    raw_response_excerpt=excerpt,
+                )
+            quotes.append(q_val)
+            target_ids.append(tid_val if isinstance(tid_val, str) and tid_val else None)
+            continue
+        return LlmJudgmentParseError(
+            failure_mode="missing_field",
+            detail=(f"supporting_evidence_quotes[{i}]: expected str or object, got {type(entry).__name__}."),
             raw_response_excerpt=excerpt,
         )
 
@@ -947,6 +1261,10 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             primary_reason=primary_reason,
             supporting_evidence_quotes=quotes,
             suggested_action=suggested_action,
+            # Only attach the parallel target-id list when at least one
+            # quote arrived in the object form — single-target / legacy
+            # callers keep the v4 wire shape (field is ``None``).
+            supporting_evidence_quote_target_ids=target_ids if saw_object_form else None,
         )
     except ValidationError as exc:
         return LlmJudgmentParseError(
@@ -1067,6 +1385,106 @@ def _resolve_artifact_text(
     no-flag legacy path stays untouched.
     """
     return _resolve_artifact_input(target, artifact_kind)
+
+
+def _build_artifact_text_for_grounding(
+    rule: Rule,
+    target: str | Path,
+    artifact_kind: TargetKind | None = None,
+) -> str:
+    """Return the flat artifact text used for substring grounding (#182).
+
+    For a multi-target rule, concatenates every declared artifact's text
+    (separated by newlines so adjacent artifacts do not run together and
+    create accidental substring matches across artifact boundaries) and
+    returns the result.  A quote drawn from any declared artifact then
+    satisfies the substring check.  This is the slice-1 contract: per-
+    artifact substring attribution (rejecting a quote that claims
+    ``target_id=A`` but only matches artifact ``B``) is deferred to
+    slice 2.
+
+    For a single-target rule, returns the legacy
+    :func:`_resolve_artifact_text` output byte-for-byte.
+    """
+    texts_by_id = _resolve_artifact_texts_for_rule(rule, target, artifact_kind)
+    if len(texts_by_id) == 1 and _SINGLE_TARGET_SENTINEL_ID in texts_by_id:
+        return texts_by_id[_SINGLE_TARGET_SENTINEL_ID]
+    return "\n\n".join(texts_by_id.values())
+
+
+def _resolve_artifact_texts_for_rule(
+    rule: Rule,
+    target: str | Path,
+    artifact_kind: TargetKind | None = None,
+) -> dict[str, str]:
+    """Return per-artifact texts keyed by target id (#182).
+
+    For multi-target rules (``rule.params['targets']`` non-empty), returns
+    a dict keyed by each declared ``id`` whose value is the artifact's
+    text body (or a fallback placeholder when the path could not be
+    read).  The dict mirrors what :func:`_build_multi_target_prompt`
+    rendered into the prompt, so the substring-grounding check sees the
+    same artifact text the model saw.
+
+    For single-target rules (no ``params.targets``), returns a single-
+    entry dict keyed by :data:`_SINGLE_TARGET_SENTINEL_ID` whose value is
+    the legacy :func:`_resolve_artifact_text` output.  Callers that need
+    a flat concatenated string can join the values; callers that need
+    per-target attribution can read the dict directly.
+    """
+    multi_targets = _parse_multi_targets(rule)
+    if multi_targets:
+        return _load_multi_target_texts(multi_targets)
+    return {_SINGLE_TARGET_SENTINEL_ID: _resolve_artifact_text(target, artifact_kind)}
+
+
+#: Sentinel id used by :func:`_resolve_artifact_texts_for_rule` for the
+#: single-target legacy path.  Surfaces in evidence as the default
+#: ``target_id`` when no ``params.targets`` is declared, so a downstream
+#: consumer can branch on ``target_id == _SINGLE_TARGET_SENTINEL_ID`` to
+#: detect the legacy path.  Not user-facing: in evidence we omit the
+#: ``target_id`` field entirely for single-target rules so the v4 wire
+#: shape is preserved (see :func:`_resolve_quote_target_ids`).
+_SINGLE_TARGET_SENTINEL_ID = "__single__"
+
+
+def _resolve_quote_target_ids(
+    rule: Rule,
+    parsed: "LlmJudgment",
+) -> list[str] | None:
+    """Return per-quote target ids for a multi-target rule, or ``None`` (#182).
+
+    Slice-1 contract:
+
+    - When the rule does not declare ``params.targets`` (or the list is
+      empty), returns ``None`` so the legacy v4 evidence shape is
+      preserved byte-for-byte (no ``supporting_evidence_quote_target_ids``
+      key emitted into the evidence dict).
+    - When the rule declares ``params.targets``, returns a list whose
+      length equals ``len(parsed.supporting_evidence_quotes)``.  Each
+      entry is either the model-emitted ``target_id`` (when the model
+      used the object form ``{"target_id": "...", "quote": "..."}``) or
+      the first declared target's id as the default attribution.  Unknown
+      ids (a ``target_id`` not present in ``params.targets``) are also
+      remapped to the first declared target's id — the slice-1 backend
+      does not fail-close on this, but surfaces the attribution so a
+      downstream consumer can inspect the evidence.
+    """
+    specs = _parse_multi_targets(rule)
+    if not specs:
+        return None
+    first_id = specs[0].id
+    known_ids = {spec.id for spec in specs}
+    model_ids = parsed.supporting_evidence_quote_target_ids
+    resolved: list[str] = []
+    for i in range(len(parsed.supporting_evidence_quotes)):
+        candidate: str | None = None
+        if model_ids is not None and i < len(model_ids):
+            candidate = model_ids[i]
+        if candidate is None or candidate not in known_ids:
+            candidate = first_id
+        resolved.append(candidate)
+    return resolved
 
 
 def _find_fabricated_quotes(quotes: list[str], artifact_text: str) -> list[str]:
@@ -1625,7 +2043,12 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
     # ``_resolve_artifact_text`` returns the file content (mirroring what
     # ``_build_prompt`` injected). Quotes are validated against what the
     # model actually saw.
-    artifact_text = _resolve_artifact_text(target, artifact_kind)
+    # #182 — multi-target rules concatenate every declared artifact's text
+    # for the substring-grounding check so a quote drawn from any
+    # declared artifact is accepted; per-artifact substring attribution
+    # (rejecting a quote that claims ``target_id=A`` but only matches
+    # artifact ``B``) is deferred to slice 2.
+    artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
     fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
     if fabricated:
         return Diagnostic(
@@ -1674,23 +2097,30 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
     # ``supporting_evidence_quotes`` field remains the stable compatibility
     # surface, ``supporting_evidence_spans`` is the new offset-bearing field.
     spans = _resolve_quote_spans(parsed.supporting_evidence_quotes, artifact_text)
-    evidence = Evidence(
-        kind="llm_judgment",
-        data={
-            "model": model,
-            "prompt_version": PROMPT_VERSION,
-            "judgment": parsed.judgment,
-            "primary_reason": parsed.primary_reason,
-            "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
-            "supporting_evidence_spans": [span.to_dict() for span in spans],
-            "suggested_action": parsed.suggested_action,
-            "latency_ms": telemetry["latency_ms"],
-            "tokens_in": telemetry["tokens_in"],
-            "tokens_out": telemetry["tokens_out"],
-            "cost_estimate_usd": cost,
-            **strategy_meta,
-        },
-    )
+    evidence_data: dict[str, Any] = {
+        "model": model,
+        "prompt_version": PROMPT_VERSION,
+        "judgment": parsed.judgment,
+        "primary_reason": parsed.primary_reason,
+        "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+        "supporting_evidence_spans": [span.to_dict() for span in spans],
+        "suggested_action": parsed.suggested_action,
+        "latency_ms": telemetry["latency_ms"],
+        "tokens_in": telemetry["tokens_in"],
+        "tokens_out": telemetry["tokens_out"],
+        "cost_estimate_usd": cost,
+        **strategy_meta,
+    }
+    # #182 — when the rule declared ``params.targets``, surface a parallel
+    # ``supporting_evidence_quote_target_ids`` list on the evidence dict so
+    # downstream consumers can attribute each quote to a specific artifact.
+    # Missing per-quote ``target_id`` (model emitted plain strings or
+    # omitted the field) is defaulted to the first declared target's id
+    # per the slice-1 contract.
+    resolved_target_ids = _resolve_quote_target_ids(rule, parsed)
+    if resolved_target_ids is not None:
+        evidence_data["supporting_evidence_quote_target_ids"] = resolved_target_ids
+    evidence = Evidence(kind="llm_judgment", data=evidence_data)
     if status is Status.PASS:
         return Diagnostic(
             rule_id=rule.id,

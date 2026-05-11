@@ -1131,17 +1131,23 @@ class TestLlmJudgmentPydantic:
             j.judgment = "fail"  # type: ignore[misc]
 
     def test_model_dump_contains_all_fields(self):
-        """model_dump() must return a dict with all four field keys."""
+        """model_dump() must return a dict with all expected field keys."""
         j = self._valid_fail()
         d = j.model_dump()
+        # #182 added the optional ``supporting_evidence_quote_target_ids``
+        # parallel list (defaults to ``None``).  Single-target callers
+        # building ``LlmJudgment`` directly still produce the same
+        # legacy four-field shape plus the new None-valued field.
         assert set(d.keys()) == {
             "judgment",
             "primary_reason",
             "supporting_evidence_quotes",
             "suggested_action",
+            "supporting_evidence_quote_target_ids",
         }
         assert d["judgment"] == "fail"
         assert d["suggested_action"] == "Add a ## Usage section."
+        assert d["supporting_evidence_quote_target_ids"] is None
 
     def test_model_dump_pass_suggested_action_none(self):
         """model_dump() on a pass verdict has suggested_action=None."""
@@ -1897,7 +1903,10 @@ class TestPromptVersion:
         # ``unsupported`` example replaced with a kind-neutral schema
         # illustration so gpt-4o-mini stops parroting "PR descriptions"
         # regardless of the rule's actual annotation).
-        assert llm_backend.PROMPT_VERSION == "v4"
+        # #182 bumped v4 → v5 to introduce the multi-target rendering
+        # branch (``## Target artifacts (multi)``). Single-target rules
+        # render byte-identical text to v4; only the constant changes.
+        assert llm_backend.PROMPT_VERSION == "v5"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -1910,7 +1919,8 @@ class TestPromptVersion:
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
-        assert diag.evidence[0].data["prompt_version"] == "v4"
+        # #182 — PROMPT_VERSION is now v5.
+        assert diag.evidence[0].data["prompt_version"] == "v5"
 
 
 # ---------------------------------------------------------------------------
@@ -2326,7 +2336,8 @@ class TestUnsupportedDispatch:
         assert diag.evidence[0].kind == "target_kind_mismatch"
         assert diag.evidence[0].data["judgment"] == "unsupported"
         assert diag.evidence[0].data["rule_target_kind"] == "pr_description"
-        assert diag.evidence[0].data["prompt_version"] == "v4"
+        # #182 — PROMPT_VERSION is now v5.
+        assert diag.evidence[0].data["prompt_version"] == "v5"
 
     def test_unsupported_remediation_explains_mismatch(self, monkeypatch):
         from gate_keeper.models import TargetKind
@@ -3870,3 +3881,362 @@ class TestAdaptiveStrategy:
         diag = llm_backend.check(self._rule(), _target_with_artifact(tmp_path))
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].kind == "llm_adaptive"
+
+
+# ---------------------------------------------------------------------------
+# Multi-target context assembly (#182, slice 1)
+# ---------------------------------------------------------------------------
+
+
+def _multi_target_rule(targets):
+    """Build a semantic rule with the given ``params.targets`` list (#182)."""
+    return Rule(
+        id="stub-llm-rule-mt",
+        title="Stub multi-target semantic rule",
+        source=SourceLocation(path="rules.md", line=5),
+        text="The two documents must agree on the named command-line flags.",
+        kind=RuleKind.SEMANTIC_RUBRIC,
+        severity=Severity.WARNING,
+        backend_hint=Backend.LLM_RUBRIC,
+        confidence=Confidence.LOW,
+        params={"targets": targets},
+    )
+
+
+class TestMultiTargetParamsValidation:
+    """#182 — ``rule.params['targets']`` parser validates id / kind / max-5."""
+
+    def test_empty_list_returns_empty(self):
+        rule = _multi_target_rule([])
+        assert llm_backend._parse_multi_targets(rule) == []
+
+    def test_missing_targets_key_returns_empty(self):
+        # ``params={}`` — no ``targets`` key at all.
+        rule = _semantic_rule()
+        assert llm_backend._parse_multi_targets(rule) == []
+
+    def test_non_list_targets_raises(self):
+        rule = _multi_target_rule({"not": "a list"})  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match=r"expected list"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_missing_kind_raises(self):
+        rule = _multi_target_rule([{"id": "a", "path": "x.md"}])
+        with pytest.raises(ValueError, match=r"missing required field 'kind'"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_missing_id_raises(self):
+        rule = _multi_target_rule([{"kind": "documentation", "path": "x.md"}])
+        with pytest.raises(ValueError, match=r"missing required field 'id'"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_empty_id_raises(self):
+        rule = _multi_target_rule([{"id": "", "kind": "documentation", "path": "x.md"}])
+        with pytest.raises(ValueError, match=r"expected non-empty string"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_duplicate_ids_raise(self):
+        rule = _multi_target_rule(
+            [
+                {"id": "src", "kind": "documentation", "path": "a.md"},
+                {"id": "src", "kind": "documentation", "path": "b.md"},
+            ]
+        )
+        with pytest.raises(ValueError, match=r"duplicate id"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_invalid_kind_raises(self):
+        rule = _multi_target_rule([{"id": "a", "kind": "not_a_real_kind", "path": "x.md"}])
+        with pytest.raises(ValueError, match=r"not a valid TargetKind"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_max_5_enforced(self):
+        targets = [{"id": f"t{i}", "kind": "documentation", "path": f"f{i}.md"} for i in range(6)]
+        rule = _multi_target_rule(targets)
+        with pytest.raises(ValueError, match=r"exceeds maximum of 5 entries"):
+            llm_backend._parse_multi_targets(rule)
+
+    def test_exactly_5_accepted(self):
+        targets = [{"id": f"t{i}", "kind": "documentation", "path": f"f{i}.md"} for i in range(5)]
+        rule = _multi_target_rule(targets)
+        specs = llm_backend._parse_multi_targets(rule)
+        assert len(specs) == 5
+        assert [s.id for s in specs] == ["t0", "t1", "t2", "t3", "t4"]
+
+    def test_path_optional(self):
+        rule = _multi_target_rule([{"id": "a", "kind": "documentation"}])
+        specs = llm_backend._parse_multi_targets(rule)
+        assert specs[0].path is None
+
+    def test_unknown_field_raises(self):
+        rule = _multi_target_rule([{"id": "a", "kind": "documentation", "path": "x.md", "bogus": 1}])
+        with pytest.raises(ValueError, match=r"unknown fields"):
+            llm_backend._parse_multi_targets(rule)
+
+
+class TestMultiTargetPromptRendering:
+    """#182 — empty targets → v4-style render; non-empty → v5 multi-target block."""
+
+    def test_empty_targets_renders_v4_style(self):
+        """A rule with no ``params.targets`` renders the legacy ``## Target reference``."""
+        rule = _semantic_rule()
+        _system, user = llm_backend._build_prompt(rule, "an inline target string")
+        assert "## Target reference" in user
+        assert "## Target artifacts (multi)" not in user
+
+    def test_multi_target_renders_target_artifacts_block(self, tmp_path):
+        target_a = tmp_path / "doc_a.md"
+        target_a.write_text("Alpha content.", encoding="utf-8")
+        target_b = tmp_path / "doc_b.md"
+        target_b.write_text("Beta content.", encoding="utf-8")
+        rule = _multi_target_rule(
+            [
+                {"id": "src", "kind": "documentation", "path": str(target_a)},
+                {"id": "dep", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        _system, user = llm_backend._build_prompt(rule, "ignored")
+        assert "## Target artifacts (multi)" in user
+        assert "### Target src (kind: documentation)" in user
+        assert "### Target dep (kind: documentation)" in user
+        # The legacy single-target heading should not appear when the
+        # multi-target block has fully replaced it.
+        assert "## Target reference" not in user
+        # Multi-target instruction block is rendered.
+        assert "target_id" in user
+
+    def test_multi_target_embeds_artifact_text(self, tmp_path):
+        target_a = tmp_path / "a.md"
+        target_a.write_text("unique alpha marker phrase", encoding="utf-8")
+        target_b = tmp_path / "b.md"
+        target_b.write_text("unique beta marker phrase", encoding="utf-8")
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        _system, user = llm_backend._build_prompt(rule, "ignored")
+        assert "unique alpha marker phrase" in user
+        assert "unique beta marker phrase" in user
+
+    def test_multi_target_missing_file_falls_back_to_placeholder(self):
+        rule = _multi_target_rule(
+            [
+                {"id": "ghost", "kind": "documentation", "path": "/nonexistent/path.md"},
+            ]
+        )
+        _system, user = llm_backend._build_prompt(rule, "ignored")
+        assert "## Target artifacts (multi)" in user
+        assert "### Target ghost (kind: documentation)" in user
+        assert "unable to read artifact" in user
+
+    def test_prompt_version_constant_is_v5(self):
+        assert llm_backend.PROMPT_VERSION == "v5"
+
+
+class TestMultiTargetQuoteParsing:
+    """#182 — parser accepts the object form ``{target_id, quote}``."""
+
+    def test_string_quotes_back_compat(self):
+        text = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": ["alpha", "beta"],
+                "suggested_action": None,
+            }
+        )
+        parsed = llm_backend._parse_llm_judgment(text)
+        assert isinstance(parsed, LlmJudgment)
+        assert parsed.supporting_evidence_quotes == ["alpha", "beta"]
+        # No object form seen → parallel target-ids list is ``None``.
+        assert parsed.supporting_evidence_quote_target_ids is None
+
+    def test_object_form_quotes_extract_target_id(self):
+        text = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    {"target_id": "src", "quote": "alpha"},
+                    {"target_id": "dep", "quote": "beta"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        parsed = llm_backend._parse_llm_judgment(text)
+        assert isinstance(parsed, LlmJudgment)
+        assert parsed.supporting_evidence_quotes == ["alpha", "beta"]
+        assert parsed.supporting_evidence_quote_target_ids == ["src", "dep"]
+
+    def test_object_form_missing_target_id_recorded_as_none(self):
+        text = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    {"quote": "alpha"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        parsed = llm_backend._parse_llm_judgment(text)
+        assert isinstance(parsed, LlmJudgment)
+        assert parsed.supporting_evidence_quotes == ["alpha"]
+        assert parsed.supporting_evidence_quote_target_ids == [None]
+
+    def test_mixed_string_and_object_form(self):
+        text = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    "alpha",
+                    {"target_id": "dep", "quote": "beta"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        parsed = llm_backend._parse_llm_judgment(text)
+        assert isinstance(parsed, LlmJudgment)
+        assert parsed.supporting_evidence_quotes == ["alpha", "beta"]
+        assert parsed.supporting_evidence_quote_target_ids == [None, "dep"]
+
+    def test_object_form_missing_quote_field_rejected(self):
+        text = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [
+                    {"target_id": "src"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        parsed = llm_backend._parse_llm_judgment(text)
+        assert isinstance(parsed, LlmJudgmentParseError)
+        assert "object form requires a 'quote'" in parsed.detail
+
+    def test_invalid_entry_type_rejected(self):
+        text = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [42],
+                "suggested_action": None,
+            }
+        )
+        parsed = llm_backend._parse_llm_judgment(text)
+        assert isinstance(parsed, LlmJudgmentParseError)
+        assert "expected str or object" in parsed.detail
+
+
+class TestMultiTargetEvidenceTargetIds:
+    """#182 — evidence surfaces ``supporting_evidence_quote_target_ids``."""
+
+    _ENV = {"GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+
+    def test_single_target_evidence_omits_target_ids_field(self, monkeypatch, tmp_path):
+        """Legacy single-target rules keep the v4 evidence wire shape."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *a, **k: _stub_response(_VALID_PASS_JSON),
+        )
+        rule = _semantic_rule()
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+        # Pass-path evidence.
+        assert diag.evidence[0].kind == "llm_judgment"
+        assert "supporting_evidence_quote_target_ids" not in diag.evidence[0].data
+
+    def test_multi_target_evidence_surfaces_target_ids(self, monkeypatch, tmp_path):
+        """Multi-target rules surface a parallel target-ids list in evidence."""
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "src.md"
+        target_a.write_text("alpha quote substring here.", encoding="utf-8")
+        target_b = tmp_path / "dep.md"
+        target_b.write_text("beta quote substring here.", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Both artifacts agree.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "src", "quote": "alpha quote substring"},
+                    {"target_id": "dep", "quote": "beta quote substring"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "src", "kind": "documentation", "path": str(target_a)},
+                {"id": "dep", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+        data = diag.evidence[0].data
+        assert data["supporting_evidence_quote_target_ids"] == ["src", "dep"]
+
+    def test_multi_target_evidence_defaults_missing_target_id_to_first(self, monkeypatch, tmp_path):
+        """Quotes whose ``target_id`` is missing default to the first target's id."""
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "primary.md"
+        target_a.write_text("alpha quote substring here.", encoding="utf-8")
+        target_b = tmp_path / "other.md"
+        target_b.write_text("beta quote substring here.", encoding="utf-8")
+        # Model emits the legacy string-list form; the rule still declares
+        # ``params.targets`` so the parser must default each quote's
+        # ``target_id`` to the first declared target's id.
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "OK.",
+                "supporting_evidence_quotes": ["alpha quote substring"],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "primary", "kind": "documentation", "path": str(target_a)},
+                {"id": "other", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+        data = diag.evidence[0].data
+        # Default attribution → first declared target's id.
+        assert data["supporting_evidence_quote_target_ids"] == ["primary"]
+
+    def test_multi_target_evidence_unknown_target_id_remapped_to_first(self, monkeypatch, tmp_path):
+        """A model-emitted ``target_id`` not in ``params.targets`` is remapped to first."""
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "src.md"
+        target_a.write_text("alpha quote substring here.", encoding="utf-8")
+        target_b = tmp_path / "dep.md"
+        target_b.write_text("beta quote substring here.", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "OK.",
+                "supporting_evidence_quotes": [
+                    {"target_id": "made_up_id", "quote": "alpha quote substring"},
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "src", "kind": "documentation", "path": str(target_a)},
+                {"id": "dep", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS
+        # Unknown id remaps to the first declared target's id.
+        assert diag.evidence[0].data["supporting_evidence_quote_target_ids"] == ["src"]

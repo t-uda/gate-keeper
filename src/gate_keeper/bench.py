@@ -68,7 +68,16 @@ _REQUIRED_FIELDS = frozenset(
 # rubric backend renders the v3 artifact-kind block. Distinct name from the
 # pre-existing ``target.kind`` (path / inline) below — the two address
 # different concerns (artifact kind vs. how the target value is encoded).
-_OPTIONAL_FIELDS = frozenset({"notes", "rule_target_kind", "artifact_kind"})
+# ``params`` (#182, slice 1) is optional and carries rule-IR params that
+# the harness forwards verbatim into the synthesised :class:`Rule`'s
+# ``params`` field — notably ``params.targets`` for multi-artifact
+# semantic rules.  Bench evaluation is unchanged for slice 1 (the
+# fixture still declares a single ``target`` for the harness's resolver
+# loop); when ``params.targets`` is set the rubric backend's
+# multi-target branch fires inside ``check`` instead of the legacy
+# single-target rendering.  Bench accuracy / baseline regeneration for
+# multi-target rules is deferred to slice 2.
+_OPTIONAL_FIELDS = frozenset({"notes", "rule_target_kind", "artifact_kind", "params"})
 _TARGET_FIELDS = frozenset({"kind", "value"})
 _VALID_KINDS = ("path", "inline")
 _VALID_JUDGMENTS = ("pass", "fail", "unsupported")
@@ -94,6 +103,12 @@ class BenchEntry:
     # and ``rule_target_kind`` is also set and differs, the bench harness fires
     # the deterministic precheck (#178) before invoking the LLM provider.
     artifact_kind: TargetKind | None = None
+    # #182 — optional rule-IR params forwarded verbatim into the
+    # synthesised Rule's ``params`` field.  Slice 1 uses this only for
+    # ``params.targets`` (multi-artifact semantic rules); ``None`` means
+    # the harness synthesises an empty ``params={}`` (the pre-#182
+    # default).
+    params: dict[str, Any] | None = None
 
     def resolve_target(self, targets_root: Path) -> str:
         """Return the literal text the rule should be evaluated against."""
@@ -209,6 +224,13 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
                 "'unspecified' is not a valid value; use null/absent to mean 'no kind override'"
             )
 
+    params_value = data.get("params")
+    if params_value is not None and not isinstance(params_value, dict):
+        raise ValueError(
+            f"BenchEntry({source_path.name}).params: expected mapping or absent, got "
+            f"{type(params_value).__name__}"
+        )
+
     return BenchEntry(
         id=source_path.stem,
         rule_text=_expect_str(data["rule_text"], "rule_text"),
@@ -224,6 +246,7 @@ def parse_entry(data: Any, *, source_path: Path) -> BenchEntry:
         source_path=source_path,
         rule_target_kind=rule_target_kind,
         artifact_kind=artifact_kind,
+        params=params_value,
     )
 
 
@@ -265,7 +288,10 @@ def _entry_to_rule(entry: BenchEntry) -> Rule:
         severity=Severity.WARNING,
         backend_hint=Backend.LLM_RUBRIC,
         confidence=Confidence.LOW,
-        params={},
+        # #182 — when the fixture declares ``params`` (e.g. ``params.targets``
+        # for multi-artifact semantic rules), forward it verbatim; otherwise
+        # preserve the pre-#182 empty-dict default.
+        params=dict(entry.params) if entry.params is not None else {},
         target_kind=entry.rule_target_kind,
     )
 
