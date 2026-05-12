@@ -455,3 +455,113 @@ class TestMainCli:
     def test_main_missing_rules_file_exits_one(self, monkeypatch, tmp_path):
         rc = script.main(["--rules", str(tmp_path / "nonexistent.md")])
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for copilot review feedback (#236)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewRegressions:
+    """Cover the three copilot review threads on PR #236."""
+
+    def _write_semantic_rules(self, tmp_path: Path) -> Path:
+        rules_md = tmp_path / "rules.md"
+        rules_md.write_text(
+            "# Rules\n\n- The PR description should be clear.\n",
+            encoding="utf-8",
+        )
+        return rules_md
+
+    def test_inconsistent_payload_normalised_to_none(self, monkeypatch, tmp_path):
+        """can_be_deterministic=false + proposed_backend='github' is normalised to 'none'.
+
+        Copilot thread 3223291517: trust-the-model bug — without this guard,
+        an inconsistent payload would bucket the rule under a deterministic
+        backend even though the model itself said it was not deterministic.
+        """
+
+        def _bad_stub(*_args, **_kwargs) -> tuple[str, dict[str, int]]:
+            body = json.dumps(
+                {
+                    "can_be_deterministic": False,
+                    "proposed_backend": "github",
+                    "proposed_pattern": "gh pr view",
+                    "rationale": "model self-contradicts",
+                }
+            )
+            return body, {"latency_ms": 10, "tokens_in": 30, "tokens_out": 15}
+
+        monkeypatch.setattr(_llm, "_load_env_file", lambda *a, **k: dict(_BASE_ENV))
+        monkeypatch.setattr(_llm, "_call_openai", _bad_stub)
+
+        rules_path = self._write_semantic_rules(tmp_path)
+        report = script.run_audit(rules_path, model="openai:gpt-5")
+
+        # The inconsistent payload must be bucketed under "none", not "github".
+        assert len(report["candidates_by_backend"]["github"]) == 0
+        assert len(report["candidates_by_backend"]["none"]) == 1
+        # The suggested_pattern must be dropped (deterministic-only field).
+        none_entry = report["candidates_by_backend"]["none"][0]
+        assert "suggested_pattern" not in none_entry
+
+    def test_inconsistent_deterministic_true_but_none_backend(self, monkeypatch, tmp_path):
+        """can_be_deterministic=true + proposed_backend=null is flagged in rationale.
+
+        Copilot thread 3223291517: the other direction of the inconsistency
+        — the model claims the rule is deterministic but does not name a
+        deterministic backend. We fail-closed to 'none' and prefix the
+        rationale with an [inconsistent payload] marker.
+        """
+
+        def _bad_stub(*_args, **_kwargs) -> tuple[str, dict[str, int]]:
+            body = json.dumps(
+                {
+                    "can_be_deterministic": True,
+                    "proposed_backend": None,
+                    "proposed_pattern": None,
+                    "rationale": "deterministic but unsure how",
+                }
+            )
+            return body, {"latency_ms": 10, "tokens_in": 30, "tokens_out": 15}
+
+        monkeypatch.setattr(_llm, "_load_env_file", lambda *a, **k: dict(_BASE_ENV))
+        monkeypatch.setattr(_llm, "_call_openai", _bad_stub)
+
+        rules_path = self._write_semantic_rules(tmp_path)
+        report = script.run_audit(rules_path, model="openai:gpt-5")
+
+        assert len(report["candidates_by_backend"]["none"]) == 1
+        rationale = report["candidates_by_backend"]["none"][0]["rationale"]
+        assert "inconsistent payload" in rationale
+
+    def test_non_openai_provider_rejected(self, monkeypatch, tmp_path):
+        """--model anthropic:* raises a clear ValueError; no OpenAI call attempted.
+
+        Copilot thread 3223291536: the slice is openai-only. Honouring an
+        ``anthropic:`` prefix would silently invoke ``_call_openai`` with a
+        non-openai model name. Validate at the boundary instead.
+        """
+        rules_path = self._write_semantic_rules(tmp_path)
+
+        # Even without an API key, the provider check must fire first.
+        monkeypatch.setattr(_llm, "_load_env_file", lambda *a, **k: dict(_BASE_ENV))
+
+        with pytest.raises(ValueError, match="openai-only"):
+            script.run_audit(rules_path, model="anthropic:claude-haiku-4-5")
+
+    def test_dotenv_path_in_error_uses_module_constant(self, monkeypatch, tmp_path):
+        """RuntimeError for missing OPENAI_API_KEY references _llm.DOTENV_PATH.
+
+        Copilot thread 3223291543: hard-coded path string risks drift.
+        Use the module-level constant so the message stays in sync.
+        """
+        monkeypatch.setattr(
+            _llm,
+            "_load_env_file",
+            lambda *a, **k: {"GATE_KEEPER_LLM_PROVIDER": "openai"},
+        )
+
+        rules_path = self._write_semantic_rules(tmp_path)
+        with pytest.raises(RuntimeError, match=str(_llm.DOTENV_PATH)):
+            script.run_audit(rules_path, model="openai:gpt-5")

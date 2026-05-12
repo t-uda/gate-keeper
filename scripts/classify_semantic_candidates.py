@@ -123,6 +123,26 @@ def _audit_rule(rule: Any, api_key: str, model: str, dry_run: bool) -> dict[str,
         proposed_pattern = None
         rationale = response_text.strip()
 
+    # Normalise inconsistent payloads (copilot review feedback on #236):
+    # - If the model says ``can_be_deterministic=false``, force the bucket to
+    #   ``"none"`` and drop any suggested pattern regardless of what the model
+    #   wrote for ``proposed_backend``.
+    # - If the model says ``can_be_deterministic=true`` but proposed_backend is
+    #   ``"none"`` / null / not one of the three deterministic buckets, treat
+    #   the payload as inconsistent and fail-closed to ``"none"`` (with a
+    #   prefixed rationale so the inconsistency is visible in the report).
+    _DETERMINISTIC_BACKENDS = ("filesystem", "github", "external+textlint")
+    if not can_be_det:
+        proposed_backend = "none"
+        proposed_pattern = None
+    elif proposed_backend not in _DETERMINISTIC_BACKENDS:
+        rationale = (
+            f"[inconsistent payload: can_be_deterministic=true but "
+            f"proposed_backend={proposed_backend!r}] {rationale}"
+        )
+        proposed_backend = "none"
+        proposed_pattern = None
+
     result: dict[str, Any] = {
         "rule_id": rule.id,
         "rule_text": rule.text,
@@ -209,8 +229,26 @@ def run_audit(
     Returns the JSON report dict. In dry-run mode the API is not called and
     the report contains ``"dry_run": true`` and an empty ``candidates_by_backend``.
 
-    Raises ``RuntimeError`` if the provider is not configured (unless dry_run).
+    Raises ``RuntimeError`` if the provider is not configured (unless dry_run),
+    or ``ValueError`` if *model* declares a non-openai provider prefix (this
+    slice is openai-only; see copilot review feedback on #236).
     """
+    # Enforce openai-only provider for this slice (copilot review feedback on
+    # #236). The slice's routing-auditor prompt is calibrated for gpt-5 minimal
+    # reasoning; honouring an ``anthropic:`` prefix here would silently call
+    # ``_call_openai`` with a non-openai model name and a missing API key. The
+    # cleanest fix is to validate the prefix at the boundary and fail-closed.
+    if ":" in model:
+        provider, raw_model = model.split(":", 1)
+        if provider != "openai":
+            raise ValueError(
+                f"--model {model!r}: this script is openai-only for slice 1; "
+                f"got provider {provider!r}. Use an 'openai:<model>' identifier "
+                "(e.g. 'openai:gpt-5')."
+            )
+    else:
+        raw_model = model
+
     # Parse + classify the rules file.
     ruleset = parse_file(rules_path)
     classified = classify(ruleset)
@@ -220,18 +258,11 @@ def run_audit(
         env = _llm._load_env_file()
         if not env.get("OPENAI_API_KEY"):
             raise RuntimeError(
-                "OPENAI_API_KEY not found in dotenv. "
-                "Configure it in /home/vscode/.config/hermes-projects/gate-keeper.env "
-                "or use --dry-run."
+                f"OPENAI_API_KEY not found in dotenv. Configure it in {_llm.DOTENV_PATH} or use --dry-run."
             )
         api_key = env["OPENAI_API_KEY"]
     else:
         api_key = ""
-
-    # Strip "provider:" prefix to pass bare model name to _call_openai.
-    raw_model = model
-    if ":" in model:
-        _, raw_model = model.split(":", 1)
 
     results: list[dict[str, Any]] = []
     for rule in fallback_rules:
