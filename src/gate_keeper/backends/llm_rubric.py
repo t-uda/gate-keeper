@@ -1116,6 +1116,63 @@ def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[s
     }
 
 
+# ---------------------------------------------------------------------------
+# Reasoning-class model support (#233)
+# ---------------------------------------------------------------------------
+
+# Raw reasoning_effort defaults — declaration order does not matter.
+#
+# Empirical evidence (issue #226, 2026-05-12):
+#   gpt-5   (enum: minimal/low/medium/high)  → minimal is the only passing tier
+#   gpt-5.4 (enum: none/low/medium/high/xhigh) → none is the only passing tier
+#
+# o1* / o3* are out of scope for this account (models not accessible); they
+# are omitted from the table intentionally.  If they become available, add
+# entries here following the same pattern.
+_REASONING_EFFORT_RAW: dict[str, str] = {
+    "gpt-5": "minimal",
+    "gpt-5.4": "none",
+    # o1 / o3 entries would go here when accessible
+}
+
+# Programmatically sorted longest-prefix-first list, derived from
+# _REASONING_EFFORT_RAW at module import time.  Sorting at init prevents
+# append-out-of-order regressions in _reasoning_effort_for() — declaration
+# order in _REASONING_EFFORT_RAW is intentionally not load-bearing.
+_REASONING_EFFORT_TABLE: list[tuple[str, str]] = sorted(
+    _REASONING_EFFORT_RAW.items(),
+    key=lambda kv: -len(kv[0]),
+)
+
+# Models whose names start with one of these prefixes are treated as
+# reasoning-class.  Keep in sync with _REASONING_EFFORT_TABLE prefixes.
+_REASONING_CLASS_PREFIXES: tuple[str, ...] = ("gpt-5", "o1", "o3")
+
+# Token budget for reasoning-class models.  600 starves them (most tokens
+# are consumed internally for reasoning; too few remain for the visible
+# response).  2000 is empirically sufficient (#226 sweep: tokens_out ≈ 250).
+_REASONING_MAX_COMPLETION_TOKENS: int = 2000
+_DEFAULT_MAX_COMPLETION_TOKENS: int = 600
+
+
+def _is_reasoning_class(model: str) -> bool:
+    """Return True if *model* is a reasoning-class model (gpt-5*, o1*, o3*)."""
+    return model.startswith(_REASONING_CLASS_PREFIXES)
+
+
+def _reasoning_effort_for(model: str) -> str | None:
+    """Return the ``reasoning_effort`` value for *model*, or ``None``.
+
+    Uses a longest-prefix match against :data:`_REASONING_EFFORT_TABLE`.
+    Returns ``None`` when the model is reasoning-class but no entry covers it
+    (fail-open: let the API default apply).
+    """
+    for prefix, effort in _REASONING_EFFORT_TABLE:
+        if model.startswith(prefix):
+            return effort
+    return None
+
+
 def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str, dict[str, int]]:
     """Call OpenAI and return ``(response_text, telemetry)``.
 
@@ -1132,19 +1189,39 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
     ``usage`` object), raise :class:`RuntimeError`. The caller in
     :func:`check` catches this and dispatches a ``provider_error``
     diagnostic; we never synthesise a zero token count.
+
+    Reasoning-class models (#233): ``gpt-5*``, ``o1*``, ``o3*`` receive a
+    model-family-specific ``reasoning_effort`` at the lowest tier
+    (``minimal`` for gpt-5, ``none`` for gpt-5.4) and a raised
+    ``max_completion_tokens`` (2000 vs 600) so the visible response is not
+    starved by reasoning token consumption.
     """
     from openai import OpenAI
 
+    reasoning = _is_reasoning_class(model)
+    max_tokens = _REASONING_MAX_COMPLETION_TOKENS if reasoning else _DEFAULT_MAX_COMPLETION_TOKENS
+
+    effort: str | None = _reasoning_effort_for(model) if reasoning else None
+
     client = OpenAI(api_key=api_key)
     start = time.perf_counter()
-    resp = client.chat.completions.create(
-        model=model,
-        max_completion_tokens=600,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    if effort is not None:
+        resp = client.chat.completions.create(
+            model=model,
+            max_completion_tokens=max_tokens,
+            messages=messages,  # type: ignore[arg-type]
+            reasoning_effort=effort,  # type: ignore[arg-type]
+        )
+    else:
+        resp = client.chat.completions.create(
+            model=model,
+            max_completion_tokens=max_tokens,
+            messages=messages,  # type: ignore[arg-type]
+        )
     latency_ms = int(round((time.perf_counter() - start) * 1000))
     text = resp.choices[0].message.content or ""
     usage = getattr(resp, "usage", None)
