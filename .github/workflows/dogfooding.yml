@@ -24,7 +24,6 @@
 #     directory mode is `700`.
 #
 # Out of scope (per #131):
-#   - Sticky / edited comments — each run posts a fresh comment.
 #   - Promotion to required check — promotion path is owned by #79.
 
 name: dogfooding
@@ -134,15 +133,43 @@ jobs:
           cat /tmp/dogfood-comment.md
           echo "::endgroup::"
 
-      - name: Post advisory comment
+      - name: Guard low-signal advisory output
         if: steps.secret_guard.outputs.secret_present == 'true' && steps.format.outcome == 'success'
+        id: comment_guard
+        run: |
+          set +x
+          if rg -q "Advisory evaluation could not be produced for this PR" /tmp/dogfood-comment.md; then
+            echo "post_comment=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping PR comment because advisory output is fallback/noisy."
+          else
+            echo "post_comment=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upsert advisory comment
+        if: steps.secret_guard.outputs.secret_present == 'true' && steps.format.outcome == 'success' && steps.comment_guard.outputs.post_comment == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set +x
-          gh pr comment "$PR_NUMBER" --body-file /tmp/dogfood-comment.md
+          marker='<!-- gate-keeper-dogfooding-comment -->'
+          existing_comment_id="$({
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- gate-keeper-dogfooding-comment -->")) | .id' \
+              | tail -n 1
+          } || true)"
+
+          if [ -n "${existing_comment_id:-}" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_comment_id}" \
+              -F "body=@/tmp/dogfood-comment.md"
+          else
+            gh pr comment "$PR_NUMBER" --body-file /tmp/dogfood-comment.md
+          fi
 
       - name: Scrub provisioned credentials
         if: always() && steps.secret_guard.outputs.secret_present == 'true'
