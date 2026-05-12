@@ -1120,7 +1120,7 @@ def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[s
 # Reasoning-class model support (#233)
 # ---------------------------------------------------------------------------
 
-# Longest-prefix lookup table for reasoning_effort defaults.
+# Raw reasoning_effort defaults — declaration order does not matter.
 #
 # Empirical evidence (issue #226, 2026-05-12):
 #   gpt-5   (enum: minimal/low/medium/high)  → minimal is the only passing tier
@@ -1129,14 +1129,20 @@ def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[s
 # o1* / o3* are out of scope for this account (models not accessible); they
 # are omitted from the table intentionally.  If they become available, add
 # entries here following the same pattern.
-#
-# Entries MUST be sorted longest-first so that iteration delivers the
-# most-specific match first (e.g. "gpt-5.4" beats "gpt-5").
-_REASONING_EFFORT_TABLE: list[tuple[str, str]] = [
-    ("gpt-5.4", "none"),
-    ("gpt-5", "minimal"),
+_REASONING_EFFORT_RAW: dict[str, str] = {
+    "gpt-5": "minimal",
+    "gpt-5.4": "none",
     # o1 / o3 entries would go here when accessible
-]
+}
+
+# Programmatically sorted longest-prefix-first list, derived from
+# _REASONING_EFFORT_RAW at module import time.  Sorting at init prevents
+# append-out-of-order regressions in _reasoning_effort_for() — declaration
+# order in _REASONING_EFFORT_RAW is intentionally not load-bearing.
+_REASONING_EFFORT_TABLE: list[tuple[str, str]] = sorted(
+    _REASONING_EFFORT_RAW.items(),
+    key=lambda kv: -len(kv[0]),
+)
 
 # Models whose names start with one of these prefixes are treated as
 # reasoning-class.  Keep in sync with _REASONING_EFFORT_TABLE prefixes.

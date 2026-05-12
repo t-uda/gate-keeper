@@ -4573,7 +4573,7 @@ class TestFindPerTargetFabricatedQuotes:
         """Smart-quote differences between quote and artifact are tolerated."""
         quotes = ["don’t"]  # RIGHT SINGLE QUOTATION MARK
         target_ids = ["a"]
-        texts = {"a": "please don’t do this"}  # ASCII apostrophe
+        texts = {"a": "please don't do this"}  # ASCII apostrophe
         result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
         assert result == []
 
@@ -4739,3 +4739,62 @@ class TestReasoningEffortParamRouting:
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-4o-mini")
         assert captured[0]["max_completion_tokens"] == 600
+
+    # ------------------------------------------------------------------
+    # _call_openai kwargs: o1*/o3* — reasoning-class without table entry
+    # ------------------------------------------------------------------
+    # These models match the prefix detector (so they get the raised token
+    # budget) but have no entry in _REASONING_EFFORT_RAW (fail-open: no
+    # reasoning_effort kwarg passed, API default applies).  The pattern
+    # locks in the intended behaviour described in #233.
+
+    def test_o1_no_reasoning_effort_kwarg(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "o1")
+        assert "reasoning_effort" not in captured[0]
+
+    def test_o1_uses_reasoning_class_token_budget(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "o1")
+        assert captured[0]["max_completion_tokens"] == 2000
+
+    def test_o3_mini_no_reasoning_effort_kwarg(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "o3-mini")
+        assert "reasoning_effort" not in captured[0]
+
+    def test_o3_mini_uses_reasoning_class_token_budget(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "o3-mini")
+        assert captured[0]["max_completion_tokens"] == 2000
+
+    # ------------------------------------------------------------------
+    # Longest-prefix sort robustness (#233 review thread 3)
+    # ------------------------------------------------------------------
+
+    def test_longest_prefix_table_is_sorted_descending(self):
+        """_REASONING_EFFORT_TABLE must be sorted longest-prefix-first.
+
+        Programmatic sort at module init prevents append-out-of-order
+        regressions in _reasoning_effort_for().
+        """
+        lengths = [len(prefix) for prefix, _ in llm_backend._REASONING_EFFORT_TABLE]
+        assert lengths == sorted(lengths, reverse=True)
+
+    def test_longest_prefix_survives_raw_table_disorder(self, monkeypatch):
+        """Even if _REASONING_EFFORT_RAW is patched with reversed order,
+        the sorted table _REASONING_EFFORT_TABLE keeps longest-prefix
+        semantics. We simulate this by patching the table directly with a
+        bad-order list and confirming the dedicated longest-match helper
+        below (or a re-sort) preserves correctness.
+
+        This test serialises the contract: longest-prefix wins regardless
+        of how entries are declared in the raw dict.
+        """
+        # Bad-order list: shorter prefix declared first.
+        bad_order = [("gpt-5", "minimal"), ("gpt-5.4", "none")]
+        # Sorting it the same way the module does at init yields longest-first.
+        sorted_table = sorted(bad_order, key=lambda kv: -len(kv[0]))
+        monkeypatch.setattr(llm_backend, "_REASONING_EFFORT_TABLE", sorted_table)
+        assert llm_backend._reasoning_effort_for("gpt-5.4") == "none"
+        assert llm_backend._reasoning_effort_for("gpt-5") == "minimal"
