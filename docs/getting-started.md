@@ -27,7 +27,7 @@ uv run gate-keeper --version
 Expected output:
 
 ```
-gate-keeper 0.1.0
+gate-keeper 0.1.1
 ```
 
 ## Write your first rule document
