@@ -4573,6 +4573,169 @@ class TestFindPerTargetFabricatedQuotes:
         """Smart-quote differences between quote and artifact are tolerated."""
         quotes = ["don’t"]  # RIGHT SINGLE QUOTATION MARK
         target_ids = ["a"]
-        texts = {"a": "please don't do this"}  # ASCII apostrophe
+        texts = {"a": "please don’t do this"}  # ASCII apostrophe
         result = llm_backend._find_per_target_fabricated_quotes(quotes, target_ids, texts)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-class model param routing (#233)
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningEffortParamRouting:
+    """Verify that _call_openai passes correct reasoning_effort / max_completion_tokens
+    per model family (#233).
+
+    All tests stub OpenAI().chat.completions.create to capture kwargs so that
+    no real network call is made.  The disable_llm_dotenv autouse fixture
+    (conftest.py) ensures no host credential file is read.
+    """
+
+    def _make_fake_response(self):
+        """Return a minimal fake openai ChatCompletion response object."""
+        import types
+
+        usage = types.SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+        _content = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "ok",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        message = types.SimpleNamespace(content=_content)
+        choice = types.SimpleNamespace(message=message)
+        return types.SimpleNamespace(choices=[choice], usage=usage)
+
+    def _patch_openai(self, monkeypatch):
+        """Patch OpenAI client so create() records kwargs and returns a fake response.
+
+        Returns a list that is appended to on each create() call:
+            [{"model": ..., "max_completion_tokens": ..., "reasoning_effort": ..., ...}]
+        """
+        captured: list[dict] = []
+        fake_response = self._make_fake_response()
+
+        import openai as _openai_module
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                captured.append(dict(kwargs))
+                return fake_response
+
+        class FakeChat:
+            completions = FakeCompletions()
+
+        class FakeClient:
+            chat = FakeChat()
+
+        monkeypatch.setattr(_openai_module, "OpenAI", lambda **kw: FakeClient())
+        return captured
+
+    # ------------------------------------------------------------------
+    # _is_reasoning_class
+    # ------------------------------------------------------------------
+
+    def test_is_reasoning_class_gpt5(self):
+        assert llm_backend._is_reasoning_class("gpt-5") is True
+
+    def test_is_reasoning_class_gpt5_dot4(self):
+        assert llm_backend._is_reasoning_class("gpt-5.4") is True
+
+    def test_is_reasoning_class_gpt5_suffix(self):
+        assert llm_backend._is_reasoning_class("gpt-5.99") is True
+
+    def test_is_reasoning_class_o1(self):
+        assert llm_backend._is_reasoning_class("o1") is True
+
+    def test_is_reasoning_class_o3(self):
+        assert llm_backend._is_reasoning_class("o3-mini") is True
+
+    def test_is_reasoning_class_gpt4o_false(self):
+        assert llm_backend._is_reasoning_class("gpt-4o") is False
+
+    def test_is_reasoning_class_gpt4o_mini_false(self):
+        assert llm_backend._is_reasoning_class("gpt-4o-mini") is False
+
+    def test_is_reasoning_class_claude_false(self):
+        assert llm_backend._is_reasoning_class("claude-sonnet-4-6") is False
+
+    # ------------------------------------------------------------------
+    # _reasoning_effort_for
+    # ------------------------------------------------------------------
+
+    def test_effort_gpt5_minimal(self):
+        assert llm_backend._reasoning_effort_for("gpt-5") == "minimal"
+
+    def test_effort_gpt5_dot4_none(self):
+        assert llm_backend._reasoning_effort_for("gpt-5.4") == "none"
+
+    def test_effort_gpt5_dot4_longest_prefix(self):
+        """gpt-5.4 must match before gpt-5 (longest-prefix wins)."""
+        effort = llm_backend._reasoning_effort_for("gpt-5.4")
+        assert effort == "none"
+
+    def test_effort_gpt5_unknown_subversion_falls_back_to_gpt5(self):
+        """gpt-5.99 → no dedicated entry → matches gpt-5 → minimal."""
+        assert llm_backend._reasoning_effort_for("gpt-5.99") == "minimal"
+
+    def test_effort_gpt4o_none(self):
+        """Non-reasoning models return None (no effort param)."""
+        assert llm_backend._reasoning_effort_for("gpt-4o") is None
+
+    # ------------------------------------------------------------------
+    # _call_openai kwargs: reasoning-class models
+    # ------------------------------------------------------------------
+
+    def test_gpt5_gets_reasoning_effort_minimal(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-5")
+        assert len(captured) == 1
+        assert captured[0]["reasoning_effort"] == "minimal"
+
+    def test_gpt5_gets_max_completion_tokens_2000(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-5")
+        assert captured[0]["max_completion_tokens"] == 2000
+
+    def test_gpt5_dot4_gets_reasoning_effort_none(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-5.4")
+        assert captured[0]["reasoning_effort"] == "none"
+
+    def test_gpt5_dot4_gets_max_completion_tokens_2000(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-5.4")
+        assert captured[0]["max_completion_tokens"] == 2000
+
+    def test_gpt5_unknown_subversion_gets_minimal(self, monkeypatch):
+        """gpt-5.99 longest-prefix-matches gpt-5 → minimal."""
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-5.99")
+        assert captured[0]["reasoning_effort"] == "minimal"
+
+    # ------------------------------------------------------------------
+    # _call_openai kwargs: non-reasoning models (unchanged behaviour)
+    # ------------------------------------------------------------------
+
+    def test_gpt4o_no_reasoning_effort(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-4o")
+        assert "reasoning_effort" not in captured[0]
+
+    def test_gpt4o_mini_no_reasoning_effort(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-4o-mini")
+        assert "reasoning_effort" not in captured[0]
+
+    def test_gpt4o_max_completion_tokens_600(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-4o")
+        assert captured[0]["max_completion_tokens"] == 600
+
+    def test_gpt4o_mini_max_completion_tokens_600(self, monkeypatch):
+        captured = self._patch_openai(monkeypatch)
+        llm_backend._call_openai("sk-test", "system", "user", "gpt-4o-mini")
+        assert captured[0]["max_completion_tokens"] == 600
