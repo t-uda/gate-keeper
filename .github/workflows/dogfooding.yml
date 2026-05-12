@@ -138,7 +138,7 @@ jobs:
         id: comment_guard
         run: |
           set +x
-          if rg -q "Advisory evaluation could not be produced for this PR" /tmp/dogfood-comment.md; then
+          if rg -q "<!-- gate-keeper-dogfooding-comment:fallback -->" /tmp/dogfood-comment.md; then
             echo "post_comment=false" >> "$GITHUB_OUTPUT"
             echo "Skipping PR comment because advisory output is fallback/noisy."
           else
@@ -153,12 +153,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set +x
-          marker='<!-- gate-keeper-dogfooding-comment -->'
           existing_comment_id="$({
             gh api \
               "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
               --paginate \
-              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- gate-keeper-dogfooding-comment -->")) | .id' \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- gate-keeper-dogfooding-comment:")) | .id' \
               | tail -n 1
           } || true)"
 

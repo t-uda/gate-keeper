@@ -33,7 +33,9 @@ import sys
 from typing import Any
 
 _FALLBACK_HEADER = "## gate-keeper dogfooding (advisory)"
-_MARKER = "<!-- gate-keeper-dogfooding-comment -->"
+_MARKER_BASE = "gate-keeper-dogfooding-comment"
+_MARKER_FALLBACK = f"<!-- {_MARKER_BASE}:fallback -->"
+_MARKER_REPORT = f"<!-- {_MARKER_BASE}:report -->"
 _FALLBACK_BODY = (
     "Advisory evaluation could not be produced for this PR.\n\n"
     "The validate step exited without a usable JSON report. This does not "
@@ -46,7 +48,7 @@ _TRAILER = (
 
 
 def _emit_fallback() -> None:
-    print(_MARKER)
+    print(_MARKER_FALLBACK)
     print()
     print(_FALLBACK_HEADER)
     print()
@@ -165,7 +167,7 @@ def main(argv: list[str]) -> int:
         _emit_fallback()
         return 0
 
-    print(_MARKER)
+    print(_MARKER_REPORT)
     print()
     print(_FALLBACK_HEADER)
     print()
