@@ -1,9 +1,12 @@
 # Changelog
 
 All notable changes to `gate-keeper` are documented here. The project
-follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
-1.0, minor-version bumps are reserved for breaking changes and patch
-bumps cover features, fixes, and tooling.
+follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Per
+[SemVer §4](https://semver.org/#spec-item-4), the pre-1.0 (`0.y.z`)
+phase is initial development and backward compatibility is not yet
+guaranteed; releases during this phase increment the patch version
+regardless of whether they ship features, fixes, or tooling. Once the
+public API stabilises and 1.0 ships, normal SemVer rules apply.
 
 ## [0.1.1] — 2026-05-12
 
