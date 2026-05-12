@@ -1,14 +1,14 @@
 {
   "rules": [
     {
-      "id": "cli-reference-tracks-cli-implementation",
-      "title": "docs/cli-reference.md must track src/gate_keeper/cli.py",
+      "id": "manifest-dependency-gate",
+      "title": "Tracked target documents must follow their declared source",
       "source": {
         "path": "docs/dependency-gate-rules.json",
         "line": 1,
-        "heading": "cli-reference tracks cli-implementation"
+        "heading": "manifest-dependency-gate"
       },
-      "text": "When src/gate_keeper/cli.py changes in a PR, docs/cli-reference.md must change too — or a reviewer ack at .gate-keeper/acks/<edge-id>.yml must cover the current source sha.",
+      "text": "When a source file declared in .gate-keeper/dependency-manifest.yml changes in a PR, every target document that tracks it must change too — or a reviewer ack at .gate-keeper/acks/<edge-id>.yml must cover the current source sha. The validator dispatches by `to:` path, so this rule covers every manifest edge when invoked with the matching --target.",
       "kind": "external_check",
       "severity": "warning",
       "backend_hint": "external",

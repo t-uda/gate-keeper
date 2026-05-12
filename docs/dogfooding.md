@@ -73,23 +73,40 @@ promotion criteria in this document yet.
 ## Dependency-gate dogfood (umbrella #159)
 
 Slice 1 of umbrella #159 ships a project-local `external_check` rule that
-gates `src/gate_keeper/cli.py` against `docs/cli-reference.md`. The rule
-lives in [`dependency-gate-rules.json`](dependency-gate-rules.json) and runs
+gates `src/gate_keeper/cli.py` against `docs/cli-reference.md`. Slice
+expansion under umbrella #163 adds five more code→reference edges (the
+"First slice (lowest-risk edges)"): `models.py`→`rule-ir.md`,
+`backends/llm_rubric.py`→`llm-rubric.md`, `adapters/textlint.py` and
+`adapters/command.py`→`backend-external.md`, and `diagnostics.py`→
+`diagnostics-guide.md`. The rules live in
+[`dependency-gate-rules.json`](dependency-gate-rules.json) and run
 through the `command` adapter. Because `command` adapter rules are disabled
-by default, exercising it requires `--allow-command-adapter`:
+by default, exercising them requires `--allow-command-adapter`:
+
+The `external` backend is single-target, so each dogfood doc is validated
+in its own invocation (one per `to:` node in the manifest):
 
 ```sh
-uv run gate-keeper validate \
-  --rules-format ir docs/dependency-gate-rules.json \
-  --target docs/cli-reference.md \
-  --allow-command-adapter
+for target in \
+    docs/cli-reference.md \
+    docs/rule-ir.md \
+    docs/llm-rubric.md \
+    docs/backend-external.md \
+    docs/diagnostics-guide.md ; do
+  uv run gate-keeper validate \
+    --rules-format ir docs/dependency-gate-rules.json \
+    --target "$target" \
+    --allow-command-adapter
+done
 ```
 
 The validator script (`scripts/dependency_gates/check_cli_reference.py`)
 is general — it reads `.gate-keeper/dependency-manifest.yml` and validates
 any edge whose `to` matches the supplied target. Adding new dependency
-edges does not require a new rule. The contract is documented in
-[`design/dependency-gates.md`](design/dependency-gates.md). This rule is
+edges does not require a new validator; adding a new dogfood target does
+require a matching entry in `dependency-gate-rules.json` so the rule can
+be invoked with that target. The contract is documented in
+[`design/dependency-gates.md`](design/dependency-gates.md). These rules are
 **advisory only**; promotion follows the §"Promotion criteria" path above.
 
 ## Out of scope

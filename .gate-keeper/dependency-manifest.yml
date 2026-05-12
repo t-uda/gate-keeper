@@ -1,9 +1,13 @@
 # Project-local dependency manifest consumed by scripts/dependency_gates/
 # validators. Schema: docs/design/dependency-gates.md §3.
 #
-# Slice 1 (umbrella #159 / issue #161) ships exactly one edge: when
-# src/gate_keeper/cli.py changes in a PR, docs/cli-reference.md must change
-# too — or a reviewer ack must land at .gate-keeper/acks/cli-implementation-documents-cli-reference.yml.
+# Slice 1 (umbrella #159 / issue #161) shipped the seed edge:
+#   src/gate_keeper/cli.py → docs/cli-reference.md
+#
+# Slice expansion (umbrella #163, "First slice (lowest-risk edges)") adds the
+# five code→reference edges that mirror the cli/cli-reference pattern. The
+# existing validator (scripts/dependency_gates/check_cli_reference.py)
+# dispatches by `to:` match, so no new validator is required.
 
 nodes:
   - id: cli-implementation
@@ -13,7 +17,58 @@ nodes:
     path: docs/cli-reference.md
     kind: reference
 
+  - id: models-implementation
+    path: src/gate_keeper/models.py
+    kind: code
+  - id: rule-ir-reference
+    path: docs/rule-ir.md
+    kind: reference
+
+  - id: llm-rubric-implementation
+    path: src/gate_keeper/backends/llm_rubric.py
+    kind: code
+  - id: llm-rubric-reference
+    path: docs/llm-rubric.md
+    kind: reference
+
+  - id: textlint-adapter-implementation
+    path: src/gate_keeper/adapters/textlint.py
+    kind: code
+  - id: command-adapter-implementation
+    path: src/gate_keeper/adapters/command.py
+    kind: code
+  - id: backend-external-reference
+    path: docs/backend-external.md
+    kind: reference
+
+  - id: diagnostics-implementation
+    path: src/gate_keeper/diagnostics.py
+    kind: code
+  - id: diagnostics-guide-reference
+    path: docs/diagnostics-guide.md
+    kind: reference
+
 edges:
   - from: cli-implementation
     to: cli-reference
+    relation: documents
+
+  - from: models-implementation
+    to: rule-ir-reference
+    relation: documents
+
+  - from: llm-rubric-implementation
+    to: llm-rubric-reference
+    relation: documents
+
+  - from: textlint-adapter-implementation
+    to: backend-external-reference
+    relation: documents
+
+  - from: command-adapter-implementation
+    to: backend-external-reference
+    relation: documents
+
+  - from: diagnostics-implementation
+    to: diagnostics-guide-reference
     relation: documents
