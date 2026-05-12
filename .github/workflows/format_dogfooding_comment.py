@@ -24,6 +24,12 @@ Output shape (matches issue #131 acceptance criteria):
 
   <small>This comment is advisory and does not gate merge. See
   docs/dogfooding.md.</small>
+
+Structural skips (#240): UNSUPPORTED diagnostics whose primary evidence
+kind is ``target_kind_mismatch`` (deterministic precheck, #178) or
+``llm_quote_fabrication`` (parser-side reject, #172) are not
+author-actionable per PR. They are filtered out of the main table and
+collapsed into a ``<details>`` summary at the end.
 """
 
 from __future__ import annotations
@@ -44,6 +50,17 @@ _FALLBACK_BODY = (
 _TRAILER = (
     "<sub>This comment is advisory and does not gate merge. "
     "See [`docs/dogfooding.md`](docs/dogfooding.md) for the promotion path.</sub>"
+)
+
+# UNSUPPORTED diagnostics whose primary evidence falls in this set are
+# "structural skips": the system correctly short-circuited or self-defended
+# (deterministic target-kind precheck #178, parser-side quote-fabrication
+# reject #172). They are not author-actionable per PR, so they are collapsed
+# into a <details> block instead of polluting the main table. See #240.
+_STRUCTURAL_SKIP_KINDS = frozenset({"target_kind_mismatch", "llm_quote_fabrication"})
+_NO_ACTIONABLE_BODY = (
+    "No author-actionable findings. All evaluated rules either passed or "
+    "were structurally skipped (see below)."
 )
 
 
@@ -94,6 +111,58 @@ def _primary_reason(diag: dict[str, Any]) -> str:
         if isinstance(data, dict) and data.get("primary_reason"):
             return _safe_truncate(str(data["primary_reason"]), 200)
     return "-"
+
+
+def _structural_skip_kind(diag: dict[str, Any]) -> str | None:
+    """Return the structural-skip evidence kind for ``diag``, or ``None``.
+
+    A diagnostic is classified as a structural skip when status is
+    ``unsupported`` AND the first evidence entry's ``kind`` falls in
+    :data:`_STRUCTURAL_SKIP_KINDS`. See module docstring / #240.
+    """
+    status = str(diag.get("status", "")).lower()
+    if status != "unsupported":
+        return None
+    evidence = diag.get("evidence") or []
+    if not isinstance(evidence, list) or not evidence:
+        return None
+    first = evidence[0]
+    if not isinstance(first, dict):
+        return None
+    kind = first.get("kind")
+    if isinstance(kind, str) and kind in _STRUCTURAL_SKIP_KINDS:
+        return kind
+    return None
+
+
+def _structural_skip_summary(skips: list[tuple[dict[str, Any], str]]) -> str:
+    """Render the collapsed ``<details>`` block for structurally-skipped rules."""
+    counts: dict[str, int] = {}
+    for _, kind in skips:
+        counts[kind] = counts.get(kind, 0) + 1
+    breakdown = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+    lines: list[str] = []
+    lines.append("<details>")
+    lines.append(
+        f"<summary>{len(skips)} rule(s) structurally skipped "
+        f"(no author action required): {breakdown}</summary>"
+    )
+    lines.append("")
+    lines.append("| rule | status | evidence.kind | primary_reason |")
+    lines.append("| --- | --- | --- | --- |")
+    for diag, kind in skips:
+        label = _rule_label(diag)
+        status = str(diag.get("status", "-")).upper()
+        reason = _primary_reason(diag)
+        lines.append(f"| {label} | {status} | {kind} | {reason} |")
+    lines.append("")
+    lines.append(
+        "These are non-actionable: deterministic precheck (#178) or "
+        "parser-side quote-fabrication reject (#172) — the system "
+        "correctly defended. See `docs/dogfooding.md`."
+    )
+    lines.append("</details>")
+    return "\n".join(lines)
 
 
 def _telemetry_summary(diagnostics: list[dict[str, Any]]) -> str | None:
@@ -167,21 +236,37 @@ def main(argv: list[str]) -> int:
         _emit_fallback()
         return 0
 
+    actionable: list[dict[str, Any]] = []
+    structural_skips: list[tuple[dict[str, Any], str]] = []
+    for diag in diagnostics:
+        if not isinstance(diag, dict):
+            continue
+        kind = _structural_skip_kind(diag)
+        if kind is not None:
+            structural_skips.append((diag, kind))
+        else:
+            actionable.append(diag)
+
     print(_MARKER_REPORT)
     print()
     print(_FALLBACK_HEADER)
     print()
-    print("| rule | status | judgment | primary_reason |")
-    print("| --- | --- | --- | --- |")
-    for diag in diagnostics:
-        if not isinstance(diag, dict):
-            continue
-        label = _rule_label(diag)
-        status = str(diag.get("status", "-")).upper()
-        judgment = _judgment_for(diag)
-        reason = _primary_reason(diag)
-        print(f"| {label} | {status} | {judgment} | {reason} |")
+    if actionable:
+        print("| rule | status | judgment | primary_reason |")
+        print("| --- | --- | --- | --- |")
+        for diag in actionable:
+            label = _rule_label(diag)
+            status = str(diag.get("status", "-")).upper()
+            judgment = _judgment_for(diag)
+            reason = _primary_reason(diag)
+            print(f"| {label} | {status} | {judgment} | {reason} |")
+    else:
+        print(_NO_ACTIONABLE_BODY)
     print()
+
+    if structural_skips:
+        print(_structural_skip_summary(structural_skips))
+        print()
 
     telemetry = _telemetry_summary(diagnostics)
     if telemetry:

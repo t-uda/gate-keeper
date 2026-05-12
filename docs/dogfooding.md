@@ -56,6 +56,22 @@ annotated rules participate in the deterministic dispatch. See
 (#178)](cli-reference.md#deterministic-target_kind-mismatch-178) for
 the evidence shape and full vocabulary.
 
+### Advisory-comment filtering (structural skips, #240)
+
+The advisory PR comment filters two non-actionable UNSUPPORTED rows out
+of its main table and collapses them into a `<details>` summary at the
+end:
+
+- `evidence.kind=target_kind_mismatch` — deterministic precheck (#178)
+  correctly short-circuited a rule that does not apply to the artifact.
+- `evidence.kind=llm_quote_fabrication` — parser-side reject (#172)
+  correctly defended against a model-fabricated supporting quote.
+
+These represent the system defending itself, not author-actionable
+findings, so surfacing them per-PR is noise. Other UNSUPPORTED kinds
+(e.g. `provider_unconfigured`, `provider_error`) remain in the main
+table.
+
 ## Issue hygiene
 
 Every false positive, false negative, or unclear failure observed during
