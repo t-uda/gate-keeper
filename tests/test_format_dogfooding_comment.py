@@ -23,17 +23,12 @@ from pathlib import Path
 from typing import Any
 
 _SCRIPT_PATH = (
-    Path(__file__).resolve().parent.parent
-    / ".github"
-    / "workflows"
-    / "format_dogfooding_comment.py"
+    Path(__file__).resolve().parent.parent / ".github" / "workflows" / "format_dogfooding_comment.py"
 )
 
 
 def _load_formatter():
-    spec = importlib.util.spec_from_file_location(
-        "format_dogfooding_comment", _SCRIPT_PATH
-    )
+    spec = importlib.util.spec_from_file_location("format_dogfooding_comment", _SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -55,10 +50,7 @@ def _diag_actionable_fail() -> dict[str, Any]:
     return {
         "rule_id": "rule-dogfooding-rules-L23",
         "status": "fail",
-        "message": (
-            "The PR description does not name the user-visible change in "
-            "the first sentence."
-        ),
+        "message": ("The PR description does not name the user-visible change in the first sentence."),
         "evidence": [
             {
                 "kind": "llm_judgment",
