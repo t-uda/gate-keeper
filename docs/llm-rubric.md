@@ -26,6 +26,23 @@ considering that:
 
 Use `severity=advisory` or `severity=warning` for semantic rules.
 
+### Ad-hoc routing audit (`scripts/classify_semantic_candidates.py`)
+
+A one-off utility script asks `gpt-5` (minimal reasoning) whether each
+`semantic_rubric`-fallback rule in a rules file could be evaluated
+deterministically by `filesystem`, `github`, or `external+textlint`, and
+emits a JSON report for human triage. It does **not** change classifier
+behavior; the report is read-only triage input. Not wired into bench or CI.
+
+```sh
+uv run python scripts/classify_semantic_candidates.py \
+    --rules docs/dogfooding-rules.md \
+    [--model openai:gpt-5] \
+    [--out report.json]
+```
+
+Refs: issue #235, #75 (classifier feedback loop, slice 1).
+
 ## Default behavior (no provider configured)
 
 If no provider is configured (the host-side dotenv file is absent or
