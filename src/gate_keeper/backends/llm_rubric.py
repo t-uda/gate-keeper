@@ -108,7 +108,11 @@ class Strategy(Protocol):
     def __call__(self, request: JudgmentRequest) -> Diagnostic: ...
 
 
-DOTENV_PATH = Path(os.environ["GATE_KEEPER_DOTENV"]) if os.environ.get("GATE_KEEPER_DOTENV") else Path.home() / ".config/hermes-projects/gate-keeper.env"
+DOTENV_PATH = (
+    Path(os.environ["GATE_KEEPER_DOTENV"])
+    if os.environ.get("GATE_KEEPER_DOTENV")
+    else Path.home() / ".config/hermes-projects/gate-keeper.env"
+)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
