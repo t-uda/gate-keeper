@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -107,7 +108,11 @@ class Strategy(Protocol):
     def __call__(self, request: JudgmentRequest) -> Diagnostic: ...
 
 
-DOTENV_PATH = Path("/home/vscode/.config/hermes-projects/gate-keeper.env")
+DOTENV_PATH = (
+    Path(os.environ["GATE_KEEPER_DOTENV"])
+    if os.environ.get("GATE_KEEPER_DOTENV")
+    else Path.home() / ".config/hermes-projects/gate-keeper.env"
+)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"

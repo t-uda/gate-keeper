@@ -1935,8 +1935,15 @@ class TestPromptVersion:
 
 class TestPathConstants:
     def test_dotenv_path_matches_spec(self):
-        """Issue #51 hard-codes the host-side dotenv path; do not regress it."""
-        assert llm_backend.DOTENV_PATH == Path("/home/vscode/.config/hermes-projects/gate-keeper.env")
+        """Issue #245: DOTENV_PATH resolves relative to the running user's home."""
+        import os
+
+        expected = (
+            Path(os.environ["GATE_KEEPER_DOTENV"])
+            if os.environ.get("GATE_KEEPER_DOTENV")
+            else Path.home() / ".config/hermes-projects/gate-keeper.env"
+        )
+        assert llm_backend.DOTENV_PATH == expected
 
 
 # ---------------------------------------------------------------------------
