@@ -1937,6 +1937,7 @@ class TestPathConstants:
     def test_dotenv_path_matches_spec(self):
         """Issue #245: DOTENV_PATH resolves relative to the running user's home."""
         import os
+
         expected = (
             Path(os.environ["GATE_KEEPER_DOTENV"])
             if os.environ.get("GATE_KEEPER_DOTENV")
