@@ -82,9 +82,18 @@ phase is worthless if findings are not captured.
 ## Initial advisory rule pool
 
 The seed pool of semantic self-gating rules lives in
-[`dogfooding-rules.md`](dogfooding-rules.md). All three rules in that
-document are advisory only at the time of authoring; none meets the
-promotion criteria in this document yet.
+[`dogfooding-rules.md`](dogfooding-rules.md). The two rules in that
+document are advisory only and do not meet the promotion criteria in
+this document yet.
+
+The pool intentionally ships **no commit-message rule**: the dogfood
+workflow only dispatches `--artifact-kind pr_description`, so any rule
+annotated `target_kind: commit_message` would short-circuit to
+`Status.UNSUPPORTED` (`evidence.kind=target_kind_mismatch`) on every PR
+by construction. The deferred "commit-message dogfood" tracker is #242
+under umbrella #63; reintroduce a commit-message rule once the workflow
+also dispatches the head commit's `%B` with `--artifact-kind
+commit_message`.
 
 ## Dependency-gate dogfood (umbrella #159)
 

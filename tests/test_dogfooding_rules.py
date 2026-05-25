@@ -1,16 +1,21 @@
-"""Tests for the semantic self-gating advisory rule pool (#72).
+"""Tests for the semantic self-gating advisory rule pool (#72, #253, #242).
 
 These tests pin four contracts:
 
-1. ``docs/dogfooding-rules.md`` extracts to exactly three semantic rules.
-2. The classifier routes all three to ``semantic_rubric`` / ``llm-rubric``
+1. ``docs/dogfooding-rules.md`` extracts to exactly two semantic rules.
+   The v2 pool (#253) keeps the two PR-description rules and drops the
+   former L25 commit-message rule per #242 Option C — the dogfood
+   workflow only dispatches ``--artifact-kind pr_description`` so a
+   ``commit_message`` rule would short-circuit to ``UNSUPPORTED`` on
+   every run.
+2. The classifier routes both to ``semantic_rubric`` / ``llm-rubric``
    (no deterministic-backend mis-routing).
 3. With no LLM provider configured, ``llm_rubric.check`` returns
    ``Status.UNAVAILABLE`` with ``provider_unconfigured`` evidence — the
    fail-closed advisory contract documented in ``docs/llm-rubric.md``.
 4. (#169) Each rule carries the expected ``target_kind`` annotation
-   (PR-description rules vs commit-message rules) so the rubric backend
-   can recognise the target-kind-mismatch case.
+   (``pr_description``) so the rubric backend can recognise the
+   target-kind-mismatch case.
 
 The DOTENV_PATH used by the llm_rubric backend is monkeypatched to a
 non-existent tmpdir so the test does not depend on the developer's local
@@ -37,22 +42,30 @@ class TestParserExtraction:
     def test_dogfooding_rules_doc_exists(self):
         assert _RULES_DOC.is_file(), f"missing rules doc: {_RULES_DOC}"
 
-    def test_extracts_exactly_three_rules(self):
+    def test_extracts_exactly_two_rules(self):
         ruleset = _ruleset()
-        assert len(ruleset.rules) == 3, [r.text for r in ruleset.rules]
+        assert len(ruleset.rules) == 2, [r.text for r in ruleset.rules]
 
     def test_rule_texts_match_authored_phrasings(self):
-        # The phrasings adapt docs/semantic-rules.md §3.1 / §3.2 / §3.6 with
-        # a `should` prefix so the bullets are picked up by the parser as
-        # candidates. Filesystem-style verbs (`contain` / `include`) are
-        # avoided so the classifier does not mis-route to FILESYSTEM.
+        # The phrasings adapt docs/semantic-rules.md §3.1 and §3.2. The v2
+        # wording (#253) describes the user-visible change and the
+        # verification method anywhere in the body, matching the real
+        # `Closes #N` + `## Summary` + `## Validation` template both this
+        # repo and uda-lab/hermes-engineering follow. Filesystem-style
+        # verbs (`contain` / `include`) are avoided so the classifier does
+        # not mis-route to FILESYSTEM. L25 (commit-message rule) was
+        # dropped per #242 Option C.
         ruleset = _ruleset()
         texts = [r.text for r in ruleset.rules]
-        assert "The PR description should name the user-visible change in the first sentence." in texts
-        assert "The PR description should state how the change was tested." in texts
-        assert (
-            "The commit message should explain why the change was made, not only what was changed." in texts
-        )
+        # Identify each rule by a substring rather than exact match — v2
+        # wording carries embedded examples and the long form changes
+        # whenever rationale grows.
+        _l23_prefix = "The PR description body should describe the user-visible change introduced by this PR."
+        _l24_prefix = "The PR description should describe how the change was verified"
+        assert any(t.startswith(_l23_prefix) for t in texts), texts
+        assert any(t.startswith(_l24_prefix) for t in texts), texts
+        # No commit-message rule must remain in the pool.
+        assert not any(t.lower().startswith("the commit message") for t in texts), texts
 
 
 class TestClassifierRouting:
@@ -72,29 +85,30 @@ class TestClassifierRouting:
 class TestTargetKindAnnotations:
     """#169 — every rule in dogfooding-rules.md must carry an explicit target_kind.
 
-    The orchestrator runs the rule doc against multiple artifact kinds (PR
-    bodies and commit messages); the annotation is what lets the rubric
-    backend recognise the target-kind-mismatch case rather than parroting
-    a PR-description rule's wording onto a commit message.
+    After the v2 rewrite (#253) and #242 Option C, the pool is exclusively
+    PR-description rules; the former commit-message rule (L25) was dropped
+    because the dogfood workflow only dispatches ``--artifact-kind
+    pr_description``. The target_kind annotation still exists so the
+    rubric backend can recognise a target-kind-mismatch case if a
+    `commit_message` rule is reintroduced in the future.
     """
 
-    def test_pr_description_rules_carry_pr_description_kind(self):
+    def test_all_rules_carry_pr_description_kind(self):
         ruleset = _ruleset()
-        pr_rules = [r for r in ruleset.rules if r.text.startswith("The PR description should")]
-        assert pr_rules, "expected at least one PR-description rule"
-        for rule in pr_rules:
+        assert ruleset.rules, "expected at least one rule"
+        for rule in ruleset.rules:
             assert rule.target_kind is TargetKind.PR_DESCRIPTION, (
                 f"{rule.text!r} carries {rule.target_kind.value} (expected pr_description)"
             )
 
-    def test_commit_message_rule_carries_commit_message_kind(self):
+    def test_no_commit_message_rule_in_pool(self):
+        """#242 Option C — L25 (commit-message rule) is dropped until the
+        dogfood workflow grows a ``commit_message`` dispatch."""
         ruleset = _ruleset()
-        commit_rules = [r for r in ruleset.rules if r.text.startswith("The commit message should")]
-        assert commit_rules, "expected at least one commit-message rule"
-        for rule in commit_rules:
-            assert rule.target_kind is TargetKind.COMMIT_MESSAGE, (
-                f"{rule.text!r} carries {rule.target_kind.value} (expected commit_message)"
-            )
+        commit_rules = [r for r in ruleset.rules if r.target_kind is TargetKind.COMMIT_MESSAGE]
+        assert not commit_rules, (
+            f"unexpected commit-message rule(s) in dogfood pool: {[r.text for r in commit_rules]}"
+        )
 
     def test_no_rule_has_target_kind_parse_warning(self):
         """Annotations in the doc must use known values (no typo recovery)."""
