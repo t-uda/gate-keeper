@@ -1179,27 +1179,33 @@ def _reasoning_effort_for(model: str) -> str | None:
 
 
 def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str, dict[str, int]]:
-    """Call OpenAI and return ``(response_text, telemetry)``.
+    """Call OpenAI Responses API and return ``(response_text, telemetry)``.
 
     Telemetry keys (#76):
 
     - ``latency_ms``: wall-clock provider call duration, integer milliseconds.
     - ``tokens_in``: provider-reported prompt token count
-      (OpenAI ``usage.prompt_tokens``).
+      (OpenAI Responses ``usage.input_tokens``).
     - ``tokens_out``: provider-reported completion token count
-      (OpenAI ``usage.completion_tokens``).
+      (OpenAI Responses ``usage.output_tokens``).
 
     Fail-closed contract (#76 follow-up): if the provider response omits
-    ``usage.prompt_tokens`` or ``usage.completion_tokens`` (or the entire
+    ``usage.input_tokens`` or ``usage.output_tokens`` (or the entire
     ``usage`` object), raise :class:`RuntimeError`. The caller in
     :func:`check` catches this and dispatches a ``provider_error``
     diagnostic; we never synthesise a zero token count.
 
     Reasoning-class models (#233): ``gpt-5*``, ``o1*``, ``o3*`` receive a
-    model-family-specific ``reasoning_effort`` at the lowest tier
-    (``minimal`` for gpt-5, ``none`` for gpt-5.4) and a raised
-    ``max_completion_tokens`` (2000 vs 600) so the visible response is not
+    model-family-specific reasoning effort at the lowest tier
+    (``minimal`` for gpt-5, ``none`` for gpt-5.4) via the Responses API
+    ``reasoning={"effort": ...}`` parameter, and a raised
+    ``max_output_tokens`` (2000 vs 600) so the visible response is not
     starved by reasoning token consumption.
+
+    API endpoint (#248): this helper targets ``/v1/responses`` exclusively
+    via ``client.responses.create``. A restricted OpenAI key for
+    gate-keeper needs only ``Responses (/v1/responses): Request`` enabled;
+    ``Chat completions (/v1/chat/completions)`` may be set to ``None``.
     """
     from openai import OpenAI
 
@@ -1210,38 +1216,38 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
 
     client = OpenAI(api_key=api_key)
     start = time.perf_counter()
-    messages = [
+    input_messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
     if effort is not None:
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model=model,
-            max_completion_tokens=max_tokens,
-            messages=messages,  # type: ignore[arg-type]
-            reasoning_effort=effort,  # type: ignore[arg-type]
+            max_output_tokens=max_tokens,
+            input=input_messages,  # type: ignore[arg-type]
+            reasoning={"effort": effort},  # type: ignore[arg-type]
         )
     else:
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model=model,
-            max_completion_tokens=max_tokens,
-            messages=messages,  # type: ignore[arg-type]
+            max_output_tokens=max_tokens,
+            input=input_messages,  # type: ignore[arg-type]
         )
     latency_ms = int(round((time.perf_counter() - start) * 1000))
-    text = resp.choices[0].message.content or ""
+    text = resp.output_text or ""
     usage = getattr(resp, "usage", None)
     if usage is None:
         raise RuntimeError("OpenAI response missing usage block; cannot record token telemetry.")
-    prompt_tokens = getattr(usage, "prompt_tokens", None)
-    completion_tokens = getattr(usage, "completion_tokens", None)
-    if prompt_tokens is None:
-        raise RuntimeError("OpenAI response missing usage.prompt_tokens; cannot record token telemetry.")
-    if completion_tokens is None:
-        raise RuntimeError("OpenAI response missing usage.completion_tokens; cannot record token telemetry.")
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    if input_tokens is None:
+        raise RuntimeError("OpenAI response missing usage.input_tokens; cannot record token telemetry.")
+    if output_tokens is None:
+        raise RuntimeError("OpenAI response missing usage.output_tokens; cannot record token telemetry.")
     return text, {
         "latency_ms": latency_ms,
-        "tokens_in": int(prompt_tokens),
-        "tokens_out": int(completion_tokens),
+        "tokens_in": int(input_tokens),
+        "tokens_out": int(output_tokens),
     }
 
 

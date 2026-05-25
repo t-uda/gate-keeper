@@ -133,6 +133,59 @@ Behavior:
 `gate-keeper diagnose` surfaces the resolved model and whether it came
 from an override or the default.
 
+### Restricted API key setup
+
+Provider-specific key restriction is not a single shared mechanism — each
+provider exposes a different surface, so the minimal-permission setup for
+gate-keeper must be configured per provider.
+
+**OpenAI (post-#248).** The backend calls
+`client.responses.create(...)` (the `/v1/responses` endpoint). When
+issuing a restricted API key from the OpenAI Platform UI, set only:
+
+- `Responses` (`/v1/responses`): **Request**
+- `Chat completions` (`/v1/chat/completions`): **None** — gate-keeper no
+  longer touches this endpoint after #248.
+- All other resources / capabilities: **None**.
+
+This is the minimal endpoint surface required for `_call_openai` in
+`src/gate_keeper/backends/llm_rubric.py`. Do not enable agent tools,
+file search, web search, or code interpreter — gate-keeper does not use
+any Responses API tool surface.
+
+**Anthropic.** The Anthropic Console does not currently expose the
+endpoint-by-endpoint capability matrix that OpenAI offers, so there is no
+direct equivalent of `Responses: Request, Chat completions: None`.
+Practical isolation for gate-keeper is workspace- and spend-scoped
+instead:
+
+- Create a dedicated Anthropic workspace (or at minimum a dedicated API
+  key) used only by gate-keeper.
+- Apply a low spend limit on that workspace/key so a runaway loop is
+  bounded by billing rather than by capability scoping.
+- Rotate the key independently of other Anthropic keys you hold.
+
+The gate-keeper Anthropic backend uses the Messages API via
+`client.messages.create(...)`; no further endpoint restriction is
+available in the standard Console flow.
+
+**Google AI Studio / Gemini (forward note).** gate-keeper does not
+currently support a Gemini provider. If a Gemini backend is added later,
+its restricted-key guidance will not match the OpenAI shape either — it
+will use Google Cloud's mechanisms:
+
+- Issue the key from a dedicated Google Cloud project used only by
+  gate-keeper.
+- Restrict the API key to the Generative Language API (Gemini) and deny
+  all other APIs.
+- Where applicable, add API-key application restrictions such as a fixed
+  egress IP allowlist.
+- Set low quota and billing limits on the project.
+
+Treat OpenAI endpoint permissions, Anthropic workspace/spend isolation,
+and Google Cloud API-key restrictions as three distinct mechanisms, not
+one shared provider-neutral security model.
+
 ### CI exception: GitHub Actions secret projection
 
 The host-side dotenv route is the only credential path the backend reads
@@ -375,8 +428,8 @@ detection, cost analysis, and per-rule SLA work:
 | Field | Type | Source | Semantics |
 | --- | --- | --- | --- |
 | `latency_ms` | `int` (milliseconds) | `time.perf_counter()` around the SDK call | Wall-clock duration of the provider call, integer-rounded. |
-| `tokens_in` | `int` | Anthropic `usage.input_tokens` / OpenAI `usage.prompt_tokens` | Provider-reported prompt token count. |
-| `tokens_out` | `int` | Anthropic `usage.output_tokens` / OpenAI `usage.completion_tokens` | Provider-reported completion token count. |
+| `tokens_in` | `int` | Anthropic `usage.input_tokens` / OpenAI Responses `usage.input_tokens` | Provider-reported prompt token count. |
+| `tokens_out` | `int` | Anthropic `usage.output_tokens` / OpenAI Responses `usage.output_tokens` | Provider-reported completion token count. |
 | `cost_estimate_usd` | `float \| null` | Static `_MODEL_PRICING` table (snapshot 2026-05-08) | Estimated USD cost for this call; `null` for unknown models (fail-closed). |
 
 Pricing snapshot (2026-05-08) used for `cost_estimate_usd`:
