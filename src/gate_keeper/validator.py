@@ -250,12 +250,36 @@ def target_kind_mismatch_diagnostic(
     )
 
 
+def _run_rule_check(
+    check_fn: Callable,
+    rule: Rule,
+    target: str | Path | TargetSpec,
+    resolved_name: str,
+    reproducibility: int,
+    rule_artifact_kind: TargetKind | None,
+) -> Diagnostic:
+    """Invoke *check_fn* for *rule* with the existing reproducibility / artifact-kind logic.
+
+    Extracted so the same code path is used by both the sequential and the
+    bounded-concurrent dispatch branches in :func:`validate`. Exceptions
+    propagate to the caller, which converts them to ``Status.ERROR`` via
+    :func:`_error_diagnostic`. Non-LLM backends ignore ``reproducibility``
+    and ``rule_artifact_kind`` (the caller has already nulled them out in
+    that case).
+    """
+    if reproducibility > 1 and resolved_name == "llm-rubric":
+        return _run_n(check_fn, rule, target, reproducibility, rule_artifact_kind)
+    return _invoke_check(check_fn, rule, target, rule_artifact_kind)
+
+
 def validate(
     ruleset: RuleSet,
     target: str | Path | TargetSpec,
     backend: str = "auto",
     reproducibility: int = 1,
     artifact_kind: TargetKind | None = None,
+    *,
+    concurrency: int = 1,
 ) -> DiagnosticReport:
     """Validate *ruleset* against *target* using *backend*.
 
@@ -299,6 +323,26 @@ def validate(
         to other backends (filesystem, github, external) ignore this
         parameter. Default ``None`` preserves prior behaviour, including
         the prompt-level fallback inside the llm-rubric backend.
+    concurrency:
+        Maximum number of rule checks executed concurrently (#249, Slice 1).
+        The default ``1`` preserves the strict sequential path bit-for-bit.
+        When ``> 1``, rule checks that survive the deterministic prechecks
+        (target-kind mismatch, registry miss) are dispatched to a bounded
+        :class:`concurrent.futures.ThreadPoolExecutor` with
+        ``max_workers=concurrency``. Deterministic precheck outcomes
+        (UNSUPPORTED target-kind mismatch, UNAVAILABLE registry miss) are
+        produced inline without involving the executor, so no provider call
+        is scheduled for those rules.
+
+        Diagnostic ordering matches ``ruleset.rules`` regardless of
+        concurrency: futures are submitted in rule order and their results
+        are collected in submission order, so out-of-order completion
+        cannot perturb the report. Backend exceptions still become
+        :data:`Status.ERROR` diagnostics at the original rule position.
+
+        Must be ``>= 1``. This flag does not change provider cost per
+        request and is not a Batch-API substitute; it only reduces
+        wall-clock by overlapping otherwise-independent calls.
 
     Returns
     -------
@@ -309,15 +353,48 @@ def validate(
     ------
     ValueError
         If *backend* is not ``"auto"`` and is not a registered backend name,
-        or if *reproducibility* is less than 1.  All other exceptions from
-        backend calls are caught and converted to ``Status.ERROR`` diagnostics
-        so the pipeline always produces a report.
+        or if *reproducibility* is less than 1, or if *concurrency* is less
+        than 1. All other exceptions from backend calls are caught and
+        converted to ``Status.ERROR`` diagnostics so the pipeline always
+        produces a report.
     """
     if backend != "auto" and not _registry.is_registered(backend):
         raise ValueError(f"unknown backend {backend!r}; registered names: {_registry.BACKEND_NAMES}")
     if reproducibility < 1:
         raise ValueError(f"reproducibility must be >= 1, got {reproducibility}")
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be >= 1, got {concurrency}")
 
+    if concurrency == 1:
+        return _validate_sequential(
+            ruleset,
+            target,
+            backend,
+            reproducibility,
+            artifact_kind,
+        )
+    return _validate_concurrent(
+        ruleset,
+        target,
+        backend,
+        reproducibility,
+        artifact_kind,
+        concurrency,
+    )
+
+
+def _validate_sequential(
+    ruleset: RuleSet,
+    target: str | Path | TargetSpec,
+    backend: str,
+    reproducibility: int,
+    artifact_kind: TargetKind | None,
+) -> DiagnosticReport:
+    """Sequential dispatch — the historical default path.
+
+    Kept as its own function so ``concurrency == 1`` callers exercise
+    exactly the prior code shape, with no executor in the call stack.
+    """
     diagnostics: list[Diagnostic] = []
     for rule in ruleset.rules:
         resolved_name = _resolve_backend_name(rule, backend)
@@ -339,28 +416,7 @@ def validate(
 
         check_fn = _registry.get(resolved_name)
         if check_fn is None:
-            # Defensive: name resolved from backend_hint is not registered.
-            # Attribute the diagnostic to the IR Backend that *should* have
-            # handled it when the name maps to one; otherwise fall back to
-            # filesystem (the local-only backend) so output stays renderable.
-            try:
-                attributed = _backend_for(resolved_name)
-            except ValueError:
-                attributed = Backend.FILESYSTEM
-            diag = Diagnostic(
-                rule_id=rule.id,
-                source=rule.source,
-                backend=attributed,
-                status=Status.UNAVAILABLE,
-                severity=rule.severity,
-                message=(f"no backend registered for {resolved_name!r}; cannot validate rule"),
-                evidence=[
-                    Evidence(
-                        kind="registry_miss",
-                        data={"backend_hint": resolved_name},
-                    )
-                ],
-            )
+            diag = _registry_miss_diagnostic(rule, resolved_name)
         else:
             try:
                 # #68: apply multi-run reproducibility for llm-rubric rules via
@@ -372,15 +428,112 @@ def validate(
                 # github, external) take ``(rule, target)`` and would not
                 # benefit from the keyword.
                 rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
-                if reproducibility > 1 and resolved_name == "llm-rubric":
-                    diag = _run_n(check_fn, rule, target, reproducibility, rule_artifact_kind)
-                else:
-                    diag = _invoke_check(check_fn, rule, target, rule_artifact_kind)
+                diag = _run_rule_check(
+                    check_fn, rule, target, resolved_name, reproducibility, rule_artifact_kind
+                )
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)
 
     return DiagnosticReport(diagnostics=diagnostics)
+
+
+def _validate_concurrent(
+    ruleset: RuleSet,
+    target: str | Path | TargetSpec,
+    backend: str,
+    reproducibility: int,
+    artifact_kind: TargetKind | None,
+    concurrency: int,
+) -> DiagnosticReport:
+    """Bounded-parallel dispatch via :class:`ThreadPoolExecutor` (#249, Slice 1).
+
+    Deterministic prechecks (target-kind mismatch, registry miss) run
+    synchronously in the main loop and their diagnostics are recorded
+    directly. Surviving rules are submitted to the executor in rule order.
+    Results are collected in submission order so report ordering matches
+    ``ruleset.rules`` regardless of completion order. Backend exceptions
+    raised inside a future are re-raised by ``future.result()`` and caught
+    here, mirroring the sequential ``except Exception`` arm.
+    """
+    # Late import keeps the sequential path's import footprint unchanged.
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    # Mixed list of finalised diagnostics (deterministic prechecks) and
+    # in-flight futures, in rule order. The post-executor pass replaces
+    # each future with its resolved diagnostic at the same index.
+    slots: list[Diagnostic | tuple[Future[Diagnostic], Rule, str]] = []
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        for rule in ruleset.rules:
+            resolved_name = _resolve_backend_name(rule, backend)
+
+            if (
+                artifact_kind is not None
+                and resolved_name == "llm-rubric"
+                and rule.target_kind is not TargetKind.UNSPECIFIED
+                and rule.target_kind is not artifact_kind
+            ):
+                slots.append(target_kind_mismatch_diagnostic(rule, artifact_kind))
+                continue
+
+            check_fn = _registry.get(resolved_name)
+            if check_fn is None:
+                slots.append(_registry_miss_diagnostic(rule, resolved_name))
+                continue
+
+            rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
+            future = executor.submit(
+                _run_rule_check,
+                check_fn,
+                rule,
+                target,
+                resolved_name,
+                reproducibility,
+                rule_artifact_kind,
+            )
+            slots.append((future, rule, resolved_name))
+
+    diagnostics: list[Diagnostic] = []
+    for slot in slots:
+        if isinstance(slot, Diagnostic):
+            diagnostics.append(slot)
+            continue
+        future, rule, resolved_name = slot
+        try:
+            diagnostics.append(future.result())
+        except Exception as exc:  # noqa: BLE001
+            diagnostics.append(_error_diagnostic(rule, exc, _backend_for(resolved_name)))
+
+    return DiagnosticReport(diagnostics=diagnostics)
+
+
+def _registry_miss_diagnostic(rule: Rule, resolved_name: str) -> Diagnostic:
+    """Build an ``UNAVAILABLE`` diagnostic for an unregistered backend name.
+
+    Defensive path: name resolved from ``backend_hint`` is not registered.
+    Attribute the diagnostic to the IR ``Backend`` that *should* have
+    handled it when the name maps to one; otherwise fall back to
+    ``FILESYSTEM`` (the local-only backend) so output stays renderable.
+    """
+    try:
+        attributed = _backend_for(resolved_name)
+    except ValueError:
+        attributed = Backend.FILESYSTEM
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=attributed,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=(f"no backend registered for {resolved_name!r}; cannot validate rule"),
+        evidence=[
+            Evidence(
+                kind="registry_miss",
+                data={"backend_hint": resolved_name},
+            )
+        ],
+    )
 
 
 __all__ = ["validate"]

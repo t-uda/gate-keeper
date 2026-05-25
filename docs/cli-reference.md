@@ -181,7 +181,7 @@ Markdown rule documents and report pass/fail with evidence.
 gate-keeper validate [--rules-format {markdown,ir}]
                      [--backend {auto,filesystem,github,llm-rubric,external}]
                      [--format {text,json}] [--verbose]
-                     [--reproducibility N]
+                     [--reproducibility N] [--concurrency N]
                      [--allow-command-adapter]
                      [--artifact-kind {pr_description,commit_message,issue_body,documentation,code_change}]
                      --target <TARGET> [--target <TARGET> ...]
@@ -203,6 +203,7 @@ Provide either a single positional `rules` document **or** one or more
 | `--format {text,json}` | option | `text` | Output format. |
 | `--verbose, -v` | flag | off | Expand structured LLM-rubric rationale (judgment, reason, evidence quotes, suggested action, model) as indented lines below each diagnostic. Has no effect for non-LLM backends. |
 | `--reproducibility N` | option | `1` | Run each LLM-rubric rule N times and record an agreement-rate `reproducibility_score` evidence entry. **No-op for non-LLM backends** (filesystem, GitHub, external ignore this flag). |
+| `--concurrency N` | option | `1` | Maximum number of rule checks executed in parallel via a bounded `ThreadPoolExecutor` (#249, Slice 1). Default `1` preserves strict sequential dispatch. Deterministic prechecks (target-kind mismatch, registry miss) short-circuit before scheduling, so no provider call is made for short-circuited rules. Diagnostics are emitted in `ruleset.rules` order regardless of completion order. See [Bounded rule-level concurrency (#249)](#bounded-rule-level-concurrency-249) for the cost-rate warning. |
 | `--allow-command-adapter` | flag | off | Enable the project-local `command` external adapter for this run only. **Security: pass this only for rule documents you fully trust** — the adapter executes whatever `params.argv` the rule document defines. Without this flag, every `external_check` rule whose `params.tool == "command"` returns `unavailable` / `command_adapter_disabled` and no subprocess runs. See [Project-local `command` adapter (#149)](#project-local-command-adapter-149) below. |
 | `--artifact-kind {pr_description,commit_message,issue_body,documentation,code_change}` | option | — | Declare the kind of artifact passed via `--target` (#178). When set, every rule routed to the `llm-rubric` backend whose `target_kind` annotation differs from this value short-circuits to `unsupported` with `evidence.kind=target_kind_mismatch` (carrying `dispatch=deterministic_precheck` and `llm_called=false`) **before any provider call**. Rules with `target_kind=unspecified` ignore this flag (the prompt-level fallback still applies). Omit the flag to preserve the prior compatibility behaviour. See [Deterministic target_kind mismatch (#178)](#deterministic-target_kind-mismatch-178) below. |
 | `-h, --help` | flag | — | Show help and exit. |
@@ -490,6 +491,66 @@ behaviour (the `Target reference` slot carries `str(target)` and the
 prompt-level fallback in #169 / #175 is responsible for declining
 mismatches). Inline-string targets (`--target "<commit message body>"`)
 and non-existent paths are forwarded unchanged regardless of the flag.
+
+### Bounded rule-level concurrency (#249)
+
+`--concurrency N` schedules independent rule checks onto a bounded
+`concurrent.futures.ThreadPoolExecutor` with `max_workers=N`. It targets
+the common case where most of the wall-clock cost of a `validate` run is
+spent waiting on the LLM-rubric provider — running several rules in
+parallel collapses that wait into a single window without changing the
+provider call count.
+
+**Default behaviour is unchanged.** `--concurrency 1` (the default)
+exercises the original strictly sequential dispatch path bit-for-bit;
+existing scripts that omit the flag see no behavioural change.
+
+**Ordering guarantee.** Diagnostics are emitted in `ruleset.rules` order
+regardless of completion order. Internally, rules are submitted to the
+executor in rule order and their futures are collected in submission
+order, so stub backends or providers that respond out of order cannot
+perturb the report.
+
+**Deterministic prechecks are not scheduled.** The target-kind-mismatch
+short-circuit (#178, see [Deterministic target_kind mismatch
+(#178)](#deterministic-target_kind-mismatch-178)) and the
+unregistered-backend (`registry_miss`) fallback both produce their
+diagnostics inline in the dispatch loop before any executor submission.
+This preserves the `llm_called=false` contract: a rule that the
+precheck rejects never reaches the provider, even at high concurrency.
+
+**Exception handling matches the sequential contract.** A backend that
+raises inside a worker still surfaces as a `Status.ERROR` diagnostic at
+the failing rule's position, with the same `exception` evidence record
+the sequential path would produce.
+
+**Cost rate caveat — read before raising the bound.** `--concurrency`
+is **not** the provider Batch API. It does not reduce the per-request
+token cost or the number of requests; it only overlaps requests in
+time. A run with `--concurrency 8` consumes provider quota roughly 8×
+faster than the same run at `--concurrency 1` and is therefore far more
+likely to trip provider rate limits or burn through a quota window in
+the same wall-clock interval. Provider-aware rate limiting, retry, and
+backoff are out of scope for this slice; pick `N` to fit your provider
+plan, and lower it if you see rate-limit errors.
+
+**Scope (this slice).** Only the rule-level dispatch is parallelised.
+Reproducibility-trial concurrency (running each rule's `N` reproducibility
+attempts in parallel) and filesystem multi-target concurrency are not
+included in this slice and are tracked separately.
+
+```sh
+# Default — strict sequential dispatch (no change vs. earlier releases)
+uv run gate-keeper validate docs/dogfooding-rules.md --target .
+
+# Overlap up to 4 rule checks at once for an LLM-heavy ruleset
+uv run gate-keeper validate docs/dogfooding-rules.md --target . \
+    --backend llm-rubric --concurrency 4
+
+# Reject N<1 with a clear usage error
+uv run gate-keeper validate docs/dogfooding-rules.md --target . --concurrency 0
+# error: --concurrency must be >= 1, got 0
+```
 
 ### Project-local `command` adapter (#149)
 

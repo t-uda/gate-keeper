@@ -269,6 +269,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     validate_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "maximum number of rule checks executed in parallel (default: 1; "
+            "Slice 1 of #249 — LLM-rubric rule-level concurrency via "
+            "ThreadPoolExecutor). Deterministic prechecks short-circuit before "
+            "scheduling, so no provider call is made for short-circuited rules. "
+            "Diagnostics remain in rule order regardless of completion order. "
+            "Higher values consume provider quota faster; this is NOT the "
+            "provider Batch API and does NOT reduce per-request cost."
+        ),
+    )
+    validate_parser.add_argument(
         "--allow-command-adapter",
         action="store_true",
         default=False,
@@ -575,6 +590,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         )
         return EXIT_USAGE
 
+    # Validate concurrency argument (#249).
+    if args.concurrency < 1:
+        print(
+            f"error: --concurrency must be >= 1, got {args.concurrency}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
     # Resolve --target values into a single value passed to validator.
     #
     # Compatibility rule (issue #146): when exactly one --target is supplied
@@ -698,6 +721,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             backend=backend,
             reproducibility=args.reproducibility,
             artifact_kind=artifact_kind,
+            concurrency=args.concurrency,
         )
     finally:
         command_adapter.set_enabled(previous_enabled)
