@@ -15,30 +15,41 @@ carrying `provider_unconfigured` evidence. See
 [`llm-rubric.md`](llm-rubric.md) for the contract details.
 
 Promotion criteria live in [`dogfooding.md`](dogfooding.md). At time of
-authoring, the three rules below are advisory only and do not meet the
+authoring, the two rules below are advisory only and do not meet the
 trailing-10-PR criteria.
 
 ## Semantic advisory rules
 
-- The PR description should name the user-visible change in the first sentence. [target_kind: pr_description]
-- The PR description should state how the change was tested. [target_kind: pr_description]
-- The commit message should explain why the change was made, not only what was changed. [target_kind: commit_message]
+- The PR description body should describe the user-visible change introduced by this PR. The description may appear anywhere in the body — for example, in a `## Summary` section, a `## What changed` bullet, or the opening sentence. Leading metadata (`Closes #N`, `Fixes #N`, `Refs #N`, badge images) is not the description. [target_kind: pr_description]
+- The PR description should describe how the change was verified — for example, an explicit `## Test plan` or `## Validation` section, the test commands run, or an affirmation that the change does not require new tests with a brief reason. [target_kind: pr_description]
+
+The pool intentionally omits a commit-message rule: the dogfood workflow
+([`.github/workflows/dogfooding.yml`](../.github/workflows/dogfooding.yml))
+only dispatches `--artifact-kind pr_description`, so a `commit_message`
+rule would short-circuit to `Status.UNSUPPORTED` on every run (see #242
+for the dispatch-shape decision; the deferred commit-message dogfood
+tracker lives under umbrella #63).
 
 ## Rationale per rule
 
-The three rules above adapt the vetted "good" worked examples in
-[`semantic-rules.md`](semantic-rules.md) §3.1, §3.2, and §3.6. They
-cover three dimensions of the benchmark fixture (#65):
+The two rules above adapt the vetted "good" worked examples in
+[`semantic-rules.md`](semantic-rules.md) §3.1 and §3.2. They cover two
+dimensions of the benchmark fixture (#65):
 
 | Rule | Dimension | Source |
 |---|---|---|
-| First-sentence user-visible change | Clarity | `semantic-rules.md §3.1` |
-| Testing method stated | Completeness | `semantic-rules.md §3.2` |
-| Why-not-only-what in commit message | Justification | `semantic-rules.md §3.6` |
+| PR-body describes the user-visible change (anywhere in the body) | Clarity | `semantic-rules.md §3.1` |
+| PR-body describes how the change was verified | Completeness | `semantic-rules.md §3.2` |
 
 Each rule is target-grounded (`semantic-rules.md §1`): the model
 evaluates a single observable predicate against a concrete piece of
 text rather than an abstract quality such as "clear" or "good".
+
+The v2 wording (#253) matches the real PR conventions both this repo
+and `uda-lab/hermes-engineering` follow — `Closes #N` + `## Summary` +
+`## Validation` template — so the predicate is satisfied by conforming
+PRs instead of failing ~90% of them on the prior `first sentence` /
+`how the change was tested` phrasing.
 
 ## What this document does NOT settle
 
