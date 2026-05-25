@@ -3364,13 +3364,28 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
     escalate to consensus (Tier 2: panel of 3) only when the Tier 1 outcome
     is ambiguous.  Escalation triggers (slice 1):
 
-    - ``target_kind_mismatch`` evidence from Tier 1 → escalate.  The model
-      produced an ``unsupported`` LLM verdict (rule premise does not apply to
-      this artifact kind); a consensus panel may resolve the ambiguity.
-    - ``llm_quote_fabrication`` / ``provider_error`` / ``provider_unconfigured``
-      / ``strategy_unavailable`` evidence → **fail-closed without escalation**.
-      Consensus cannot recover malformed provider responses; surfacing the
-      Tier 1 failure directly is the correct action.
+    - ``target_kind_mismatch`` evidence from Tier 1 → escalate to consensus.
+      The model produced an ``unsupported`` LLM verdict (rule premise does not
+      apply to this artifact kind); a consensus panel may resolve the ambiguity.
+    - ``llm_quote_fabrication`` evidence from Tier 1 → escalate to **review**
+      (Tier 2) **iff** ``params.adaptive_escalate_on_quote_fabrication`` is
+      true (#254).  Default is ``False``; behaviour is unchanged when the
+      param is absent or false.  Recovery uses ``review`` (primary+reviewer)
+      rather than ``consensus`` because the failure mode is a single judge
+      that fabricated quotes — a reviewer pass on a fresh primary call is the
+      cheapest path that still re-validates grounding through
+      :func:`_find_fabricated_quotes` (substring contract is *not* weakened).
+      When Tier 2 also returns fabricated quotes (or any UNSUPPORTED), the
+      original Tier 1 ``llm_quote_fabrication`` UNSUPPORTED is propagated
+      with ``adaptive_escalation_reason = "tier1_quote_fabrication"`` and the
+      Tier 1 evidence nested under ``tier1_evidence`` — no ungrounded verdict
+      is ever emitted.  **Cost note:** enabling this param can roughly 3×
+      provider calls (1 fabricated tier-1 + 2 review-pass tier-2) on the
+      affected fraction of rules.
+    - ``provider_error`` / ``provider_unconfigured`` / ``strategy_unavailable``
+      evidence → **fail-closed without escalation**.  Consensus cannot recover
+      malformed provider responses; surfacing the Tier 1 failure directly is
+      the correct action.
     - ``llm_judgment`` (``pass`` / ``fail``) from Tier 1 → commit to verdict,
       no escalation.
 
@@ -3424,14 +3439,35 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
 
     # Determine whether Tier 1 warrants escalation.
     #
-    # Escalation gate: trigger iff the first evidence record has kind
+    # Escalation gate: trigger when the first evidence record has kind
     # ``target_kind_mismatch`` — the model produced an LLM-level
     # ``"unsupported"`` verdict (rule premise does not apply to this artifact
-    # kind).  All other outcomes are either conclusive (PASS/FAIL) or
-    # fail-closed (UNAVAILABLE, llm_quote_fabrication) — consensus cannot
-    # recover those and surfacing the Tier 1 result directly is correct.
+    # kind) — *or* (opt-in via #254) when it has kind
+    # ``llm_quote_fabrication`` and the rule sets
+    # ``params.adaptive_escalate_on_quote_fabrication`` to a truthy value.
+    # All other outcomes are either conclusive (PASS/FAIL) or fail-closed
+    # (UNAVAILABLE, provider_error, provider_unconfigured) — escalation
+    # cannot recover those and surfacing the Tier 1 result directly is correct.
     tier1_ev_kind = tier1_diag.evidence[0].kind if tier1_diag.evidence else ""
-    should_escalate = tier1_ev_kind == "target_kind_mismatch"
+    escalate_on_kind_mismatch = tier1_ev_kind == "target_kind_mismatch"
+    escalate_on_quote_fabrication = tier1_ev_kind == "llm_quote_fabrication" and bool(
+        request.rule.params.get("adaptive_escalate_on_quote_fabrication", False)
+    )
+    should_escalate = escalate_on_kind_mismatch or escalate_on_quote_fabrication
+    # Map the escalation trigger to a stable reason string surfaced via the
+    # ``adaptive_escalation_reason`` evidence field.  Both reasons share the
+    # same Tier 2 plumbing below; only the dispatched strategy and the reason
+    # label differ.
+    escalation_reason: str | None
+    if escalate_on_quote_fabrication:
+        escalation_reason = "tier1_quote_fabrication"
+        tier2_strategy = "review"
+    elif escalate_on_kind_mismatch:
+        escalation_reason = "tier1_unsupported"
+        tier2_strategy = "consensus"
+    else:
+        escalation_reason = None
+        tier2_strategy = ""  # unused
 
     if not should_escalate:
         # Tier 1 is conclusive (PASS/FAIL) or already fail-closed (UNAVAILABLE).
@@ -3470,13 +3506,17 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
             remediation=tier1_diag.remediation,
         )
 
-    # --- Tier 2: escalate to consensus ---
-    # Build a consensus request with panel_size=3 (the default) by injecting
-    # consensus_panel_size into a copy of the rule params.
+    # --- Tier 2: escalate using the strategy selected by the trigger ---
+    # ``target_kind_mismatch`` → consensus (panel of 3) to disambiguate.
+    # ``llm_quote_fabrication`` (opt-in, #254) → review (primary+reviewer)
+    # because the failure mode is a single judge producing ungrounded quotes;
+    # a fresh primary call audited by a reviewer is the cheapest path that
+    # still re-validates grounding via ``_find_fabricated_quotes``.
     rule = request.rule
     escalation_params = dict(rule.params)
-    escalation_params["strategy"] = "consensus"
-    escalation_params.setdefault("consensus_panel_size", 3)
+    escalation_params["strategy"] = tier2_strategy
+    if tier2_strategy == "consensus":
+        escalation_params.setdefault("consensus_panel_size", 3)
 
     escalation_rule = dataclasses.replace(rule, params=escalation_params)
     escalation_request = JudgmentRequest(
@@ -3484,12 +3524,16 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
         target=request.target,
         artifact_kind=request.artifact_kind,
     )
-    tier2_diag = _run_consensus_strategy(escalation_request)
+    if tier2_strategy == "review":
+        tier2_diag = _run_review_strategy(escalation_request)
+    else:
+        tier2_diag = _run_consensus_strategy(escalation_request)
 
     tier2_ev_data: dict[str, Any] = tier2_diag.evidence[0].data if tier2_diag.evidence else {}
 
-    # Default llm_call_count to 0 for the same reason as Tier 1: if consensus
-    # returns early (e.g. provider_unconfigured), no LLM calls were made.
+    # Default llm_call_count to 0 for the same reason as Tier 1: if the
+    # escalation strategy returns early (e.g. provider_unconfigured), no LLM
+    # calls were made.
     tier2_call_count: int = int(tier2_ev_data.get("llm_call_count", 0))
     tier2_models: list[str] = list(tier2_ev_data.get("models", []))  # type: ignore[arg-type]
     tier2_cost: float | None = tier2_ev_data.get("cost_estimate_usd_total")  # type: ignore[assignment]
@@ -3505,13 +3549,56 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
         total_cost = tier1_cost + tier2_cost
     total_latency = tier1_latency + tier2_latency
 
+    # Recovery failure (only on the quote-fabrication path, #254): when the
+    # Tier 1 trigger was ``llm_quote_fabrication`` and Tier 2 also returns
+    # UNSUPPORTED, propagate the *original* Tier 1 fabrication UNSUPPORTED.
+    # Surfacing Tier 2's UNSUPPORTED kind (e.g. ``llm_quote_fabrication``
+    # again, ``review_disagreement``) as the outer evidence kind would mask
+    # the recovery context; emitting ``llm_adaptive`` with the recovery
+    # reason and both tiers' evidence nested keeps the audit trail intact
+    # and prevents any ungrounded verdict from ever being emitted (the
+    # substring contract enforced by ``_find_fabricated_quotes`` is *not*
+    # weakened — Tier 2's grounded-verdict path remains the only success
+    # path).  The ``target_kind_mismatch`` path retains its original
+    # propagation semantics (Tier 2 verdict surfaces directly) so existing
+    # callers continue to see the consensus result on disagreement.
+    if escalation_reason == "tier1_quote_fabrication" and tier2_diag.status is Status.UNSUPPORTED:
+        adaptive_overlay_fail: dict[str, Any] = {
+            "llm_strategy": "adaptive",
+            "adaptive_tier": 2,
+            "adaptive_escalation_reason": escalation_reason,
+            "adaptive_recovery_outcome": "tier2_unsupported",
+            "llm_call_count": total_call_count,
+            "models": total_models,
+            "cost_estimate_usd_total": total_cost,
+            "latency_ms_total": total_latency,
+            "tier1_evidence": {"kind": tier1_ev_kind, "data": tier1_ev_data},
+            "tier2_evidence": {"kind": tier2_ev_kind, "data": tier2_ev_data},
+        }
+        return Diagnostic(
+            rule_id=tier1_diag.rule_id,
+            source=tier1_diag.source,
+            backend=tier1_diag.backend,
+            status=Status.UNSUPPORTED,
+            severity=tier1_diag.severity,
+            message=tier1_diag.message,
+            evidence=[
+                Evidence(
+                    kind="llm_adaptive",
+                    data={**tier1_ev_data, **adaptive_overlay_fail},
+                )
+            ],
+            remediation=tier1_diag.remediation,
+        )
+
     # Nest both tier evidence objects as {kind, data} so the original inner
-    # evidence kinds (e.g. llm_consensus, consensus_tie, provider_unconfigured)
-    # are preserved for downstream programmatic inspection.
+    # evidence kinds (e.g. llm_consensus, consensus_tie, llm_review,
+    # provider_unconfigured) are preserved for downstream programmatic
+    # inspection.
     adaptive_overlay_t2: dict[str, Any] = {
         "llm_strategy": "adaptive",
         "adaptive_tier": 2,
-        "adaptive_escalation_reason": "tier1_unsupported",
+        "adaptive_escalation_reason": escalation_reason,
         "llm_call_count": total_call_count,
         "models": total_models,
         "cost_estimate_usd_total": total_cost,
@@ -3519,6 +3606,9 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
         "tier1_evidence": {"kind": tier1_ev_kind, "data": tier1_ev_data},
         "tier2_evidence": {"kind": tier2_ev_kind, "data": tier2_ev_data},
     }
+    if escalation_reason == "tier1_quote_fabrication":
+        # Tier 2 produced a grounded verdict (PASS/FAIL via review-agree path).
+        adaptive_overlay_t2["adaptive_recovery_outcome"] = "tier2_recovered"
     updated_ev_t2 = [
         Evidence(
             kind="llm_adaptive",
