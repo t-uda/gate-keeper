@@ -1,30 +1,37 @@
-# dogfooding — semantic self-gating advisory comment on PRs (#131)
+# dogfooding — semantic self-gating PR comment (#131, #261)
 #
 # Trigger: `pull_request`. The job runs `gate-keeper validate` with the
-# `llm-rubric` backend against `docs/dogfooding-rules.md` and posts the JSON
-# diagnostic as a markdown table comment on the PR.
+# `llm-rubric` backend against `docs/dogfooding-rules.md` and posts the
+# JSON diagnostic as a markdown table comment on the PR.
 #
-# Status: **advisory only**. Per `docs/dogfooding.md`, semantic self-gating
-# rules do not block merge. The job is wired so that any provider error,
-# secret-absent path, or formatter failure exits 0 (`continue-on-error` on
-# the validate/format/post steps); the workflow conclusion never gates merge.
+# Per-rule promotion model (process; not user-facing comment wording):
+# `docs/dogfooding.md` defines the path from semantic self-gating to
+# required check. The job is wired so that any provider error,
+# secret-absent path, or formatter failure exits 0 (`continue-on-error`
+# on the validate/format/post steps).
+#
+# Per issue #261, the user-facing PR comment body MUST NOT include
+# "advisory" / "does not gate merge" / equivalent non-gating disclaimer
+# wording. That contract is enforced in
+# `tests/test_format_dogfooding_comment.py` with a forbidden-substring
+# regression check across every rendered output shape.
 #
 # Secret handling (no log leakage):
 #   - Provider credentials live behind the `OPENAI_API_KEY` repo secret.
-#   - Job-level `if: ${{ secrets.OPENAI_API_KEY != '' }}` guards the entire
-#     job: when the secret is unregistered the job is skipped silently
-#     (no fail, no advisory comment).
-#   - Credentials are projected into the host-side dotenv path the
-#     llm-rubric backend already loads
-#     (`/home/vscode/.config/hermes-projects/gate-keeper.env`); see
-#     `docs/llm-rubric.md` "CI exception" sub-section.
-#   - The provision step uses `printf` redirected to the dotenv file. It
-#     does NOT use `echo $VAR` or `set -x`. The dotenv file is written
-#     under `umask 077` and never uploaded as a workflow artifact. The
-#     directory mode is `700`.
-#
-# Out of scope (per #131):
-#   - Promotion to required check — promotion path is owned by #79.
+#   - The first step skips the rest of the job when the secret is absent
+#     (typical on forks and pre-secret states) so no half-configured run
+#     surfaces.
+#   - Credentials are projected into the dotenv path the llm-rubric
+#     backend reads by default, computed at runtime as
+#     `$HOME/.config/hermes-projects/gate-keeper.env` (post-#247 /
+#     #261). On GitHub-hosted runners `$HOME=/home/runner`; in the
+#     devcontainer it is `/home/vscode`. We MUST follow `$HOME` so the
+#     backend's read path matches the workflow's write path on every
+#     host. See `docs/llm-rubric.md` "CI exception" sub-section.
+#   - The provision step uses `printf` redirected to the dotenv file.
+#     It does NOT use `echo $VAR` or `set -x`. The dotenv file is
+#     written under `umask 077` (mode 600) and never uploaded as a
+#     workflow artifact.
 
 name: dogfooding
 
@@ -36,7 +43,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  advisory-comment:
+  dogfood-comment:
     # Skip silently when the provider secret is not registered. This keeps
     # the workflow no-op on forks and pre-secret states without surfacing
     # a red check.
@@ -57,7 +64,7 @@ jobs:
             echo "secret_present=true" >> "$GITHUB_OUTPUT"
           else
             echo "secret_present=false" >> "$GITHUB_OUTPUT"
-            echo "OPENAI_API_KEY secret is not set; skipping advisory comment."
+            echo "OPENAI_API_KEY secret is not set; skipping dogfooding comment."
           fi
 
       - uses: astral-sh/setup-uv@v5
@@ -76,21 +83,32 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # NB: never `set -x` here — it would echo the API key.
-          # The llm-rubric backend reads from this absolute path
-          # (DOTENV_PATH in src/gate_keeper/backends/llm_rubric.py).
+          # The llm-rubric backend reads from `$HOME/.config/hermes-projects/
+          # gate-keeper.env` by default (DOTENV_PATH in
+          # src/gate_keeper/backends/llm_rubric.py, post-#247). On
+          # GitHub-hosted runners `$HOME` resolves to `/home/runner`, so we
+          # MUST project the dotenv to `$HOME/...` rather than the
+          # devcontainer-specific `/home/vscode/...` path — otherwise the
+          # backend reads a file the workflow never wrote and reports
+          # `provider_unconfigured` (issue #261).
           set +x
           umask 077
-          sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode
-          sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode/.config
-          sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode/.config/hermes-projects
+          mkdir -p "$HOME/.config/hermes-projects"
+          # Log the projection target BEFORE writing so a missing/wrong
+          # parent directory is obvious; never log the dotenv contents.
+          echo "dotenv projection target: $HOME/.config/hermes-projects/gate-keeper.env"
+          ls -ld "$HOME/.config/hermes-projects" || true
           # printf + redirect — does not echo via `echo $VAR` and is not
           # affected by `-x` since we explicitly disabled it. The dotenv
           # file inherits the 077 umask (mode 600).
           printf 'GATE_KEEPER_LLM_PROVIDER=openai\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
-            > /home/vscode/.config/hermes-projects/gate-keeper.env
-          chmod 600 /home/vscode/.config/hermes-projects/gate-keeper.env
+            > "$HOME/.config/hermes-projects/gate-keeper.env"
+          chmod 600 "$HOME/.config/hermes-projects/gate-keeper.env"
+          # Post-write confirmation: file exists, mode 600, owned by runner.
+          # `ls -l` does not print file contents.
+          ls -l "$HOME/.config/hermes-projects/gate-keeper.env" || true
 
-      - name: Run gate-keeper validate (advisory)
+      - name: Run gate-keeper validate
         if: steps.secret_guard.outputs.secret_present == 'true'
         id: validate
         continue-on-error: true
@@ -98,26 +116,27 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set +x
-          # `--format json` so the post step can transform reliably; failures
-          # are tolerated by continue-on-error and surface as a "no advisory"
-          # log in the post step.
-          # Pass the actual PR body text as --target so the llm-rubric backend
-          # evaluates real prose rather than a URL literal (fixes #189).
-          # github.event.pull_request.body is null for body-less PRs; default
-          # to a single space to keep CLI arg parsing consistent. The rule will
-          # then produce an "insufficient content" evidence result naturally.
+          # `--format json` so the post step can transform reliably;
+          # failures are tolerated by continue-on-error and surface as a
+          # fallback body in the post step.
+          # Pass the actual PR body text as --target so the llm-rubric
+          # backend evaluates real prose rather than a URL literal
+          # (fixes #189). github.event.pull_request.body is null for
+          # body-less PRs; default to a single space to keep CLI arg
+          # parsing consistent. The rule will then produce an
+          # "insufficient content" evidence result naturally.
           BODY="${PR_BODY:- }"
           uv run gate-keeper validate docs/dogfooding-rules.md \
             --target "$BODY" \
             --artifact-kind pr_description \
             --backend llm-rubric \
             --format json \
-            > /tmp/dogfood.json 2> /tmp/dogfood.err || echo "validate exited non-zero (advisory; see stderr below)"
+            > /tmp/dogfood.json 2> /tmp/dogfood.err || echo "validate exited non-zero (see stderr below)"
           echo "::group::stderr"
           cat /tmp/dogfood.err || true
           echo "::endgroup::"
 
-      - name: Format advisory comment
+      - name: Format dogfooding comment
         if: steps.secret_guard.outputs.secret_present == 'true'
         id: format
         continue-on-error: true
@@ -133,19 +152,19 @@ jobs:
           cat /tmp/dogfood-comment.md
           echo "::endgroup::"
 
-      - name: Guard low-signal advisory output
+      - name: Guard low-signal output
         if: steps.secret_guard.outputs.secret_present == 'true' && steps.format.outcome == 'success'
         id: comment_guard
         run: |
           set +x
           if rg -q "<!-- gate-keeper-dogfooding-comment:fallback -->" /tmp/dogfood-comment.md; then
             echo "post_comment=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping PR comment because advisory output is fallback/noisy."
+            echo "Skipping PR comment because output is fallback/noisy."
           else
             echo "post_comment=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upsert advisory comment
+      - name: Upsert dogfooding comment
         if: steps.secret_guard.outputs.secret_present == 'true' && steps.format.outcome == 'success' && steps.comment_guard.outputs.post_comment == 'true'
         continue-on-error: true
         env:
@@ -176,4 +195,4 @@ jobs:
           set +x
           # Best-effort cleanup. The runner is ephemeral, but explicit
           # removal documents intent.
-          rm -f /home/vscode/.config/hermes-projects/gate-keeper.env || true
+          rm -f "$HOME/.config/hermes-projects/gate-keeper.env" || true

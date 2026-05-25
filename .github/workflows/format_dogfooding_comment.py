@@ -8,22 +8,25 @@ workflow without bumping the library version.
 
 The script accepts a single positional arg (path to the JSON file produced
 by ``gate-keeper validate ... --format json``) and writes a Markdown
-comment to stdout. It prints a fallback "no advisory" body when the JSON
-cannot be parsed; the workflow tolerates that path with
-``continue-on-error`` on the validate step.
+comment to stdout. It prints a fallback body when the JSON cannot be
+parsed; the workflow tolerates that path with ``continue-on-error`` on
+the validate step.
 
-Output shape (matches issue #131 acceptance criteria):
+User-facing wording rule (issue #261): the rendered comment MUST NOT
+contain any "advisory" / "does not gate merge" / equivalent non-gating
+disclaimer. Owner directive: remove that wording entirely. The
+``test_format_dogfooding_comment.py`` suite pins this with a
+forbidden-substring regression test so it cannot silently regress.
 
-  ## gate-keeper dogfooding (advisory)
+Output shape:
+
+  ## gate-keeper dogfooding
 
   | rule | status | judgment | primary_reason |
   | --- | --- | --- | --- |
   | <title-or-id> | PASS | pass | ... |
 
   Tokens: in=N out=N, latency: N ms, model: <model>, prompt_version: vX
-
-  <small>This comment is advisory and does not gate merge. See
-  docs/dogfooding.md.</small>
 
 Structural skips (#240): UNSUPPORTED diagnostics whose primary evidence
 kind is ``target_kind_mismatch`` (deterministic precheck, #178) or
@@ -38,19 +41,16 @@ import json
 import sys
 from typing import Any
 
-_FALLBACK_HEADER = "## gate-keeper dogfooding (advisory)"
+_FALLBACK_HEADER = "## gate-keeper dogfooding"
 _MARKER_BASE = "gate-keeper-dogfooding-comment"
 _MARKER_FALLBACK = f"<!-- {_MARKER_BASE}:fallback -->"
 _MARKER_REPORT = f"<!-- {_MARKER_BASE}:report -->"
 _FALLBACK_BODY = (
-    "Advisory evaluation could not be produced for this PR.\n\n"
-    "The validate step exited without a usable JSON report. This does not "
-    "block merge. See the workflow run logs for details."
+    "Evaluation could not be produced for this PR.\n\n"
+    "The validate step exited without a usable JSON report. See the "
+    "workflow run logs for details."
 )
-_TRAILER = (
-    "<sub>This comment is advisory and does not gate merge. "
-    "See [`docs/dogfooding.md`](docs/dogfooding.md) for the promotion path.</sub>"
-)
+_TRAILER = "<sub>See [`docs/dogfooding.md`](docs/dogfooding.md) for the per-rule promotion path.</sub>"
 
 # UNSUPPORTED diagnostics whose primary evidence falls in this set are
 # "structural skips": the system correctly short-circuited or self-defended
