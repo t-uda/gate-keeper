@@ -193,7 +193,7 @@ from. CI environments do not have a developer-managed home directory, so
 GitHub Actions workflows project the repository secret into the same
 absolute dotenv path before invoking `gate-keeper`.
 
-The advisory dogfooding workflow (`.github/workflows/dogfooding.yml`,
+The dogfooding workflow (`.github/workflows/dogfooding.yml`,
 introduced in #131) demonstrates the pattern:
 
 ```yaml
@@ -204,13 +204,22 @@ introduced in #131) demonstrates the pattern:
   run: |
     set +x
     umask 077
-    sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode
-    sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode/.config
-    sudo install -d -m 700 -o "$USER" -g "$USER" /home/vscode/.config/hermes-projects
-    printf 'GATE_KEEPER_LLM_PROVIDER=openai\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
-      > /home/vscode/.config/hermes-projects/gate-keeper.env
-    chmod 600 /home/vscode/.config/hermes-projects/gate-keeper.env
+    mkdir -p "$HOME/.config/hermes-projects"
+    printf 'GATE_KEEPER_LLM_PROVIDER=openai\nGATE_KEEPER_OPENAI_MODEL=gpt-5.4\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
+      > "$HOME/.config/hermes-projects/gate-keeper.env"
+    chmod 600 "$HOME/.config/hermes-projects/gate-keeper.env"
 ```
+
+The backend's default dotenv path is computed at runtime as
+`Path.home() / ".config/hermes-projects/gate-keeper.env"`. On
+GitHub-hosted runners `$HOME=/home/runner`; in a devcontainer it is
+typically `/home/vscode`. The projection target MUST follow `$HOME` so
+the backend's read path matches the workflow's write path on every host
+(issue #261). `GATE_KEEPER_OPENAI_MODEL` is pinned because the
+repository's restricted CI key is allow-listed to a specific model only;
+without it the backend default would be rejected by the provider and
+surface as `provider_error` on every rule (issue #264). The model name
+is not a secret.
 
 Constraints to preserve when adopting this pattern in another workflow:
 
@@ -225,9 +234,8 @@ Constraints to preserve when adopting this pattern in another workflow:
 - **Mode 700 on the directory, mode 600 on the file.** `umask 077` plus
   `chmod 600` on the dotenv satisfy both, even when run as the runner
   user.
-- **No artifact upload of `$HOME` or `/home/vscode`.** Treat the dotenv
-  path as untrusted output; never include it in `actions/upload-artifact`
-  patterns.
+- **No artifact upload of `$HOME`.** Treat the dotenv path as untrusted
+  output; never include it in `actions/upload-artifact` patterns.
 - **Scrub on completion.** Add an `if: always()` cleanup step that
   removes the projected dotenv. The runner is ephemeral, but the
   scrubbing step documents intent and survives reuse if anyone refactors
@@ -738,7 +746,7 @@ level, but `gpt-4o-mini` still misjudges the **artifact kind** itself in
 some cases — for example, treating a short commit message as a "PR
 description" so the artifact-kind dispatch never fires. This is a
 model-capability limitation, not a prompt bug. When dispatch accuracy
-matters (e.g. for advisory dogfood gates that route per `target_kind`),
+matters (e.g. for dogfood gates that route per `target_kind`),
 prefer a stronger model via the `GATE_KEEPER_OPENAI_MODEL` /
 `GATE_KEEPER_ANTHROPIC_MODEL` dotenv override; gpt-4o-mini is appropriate
 for the per-PR cost target but not for high-confidence artifact-kind

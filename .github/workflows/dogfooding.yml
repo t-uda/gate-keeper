@@ -101,7 +101,12 @@ jobs:
           # printf + redirect — does not echo via `echo $VAR` and is not
           # affected by `-x` since we explicitly disabled it. The dotenv
           # file inherits the 077 umask (mode 600).
-          printf 'GATE_KEEPER_LLM_PROVIDER=openai\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
+          # `GATE_KEEPER_OPENAI_MODEL=gpt-5.4` is hard-pinned here because
+          # the CI-side restricted OpenAI key is allow-listed to gpt-5.4
+          # only; the backend default (`gpt-4o-mini`) would be rejected by
+          # the provider and surface as `provider_error` on every rule
+          # (issue #264). The model name is not a secret.
+          printf 'GATE_KEEPER_LLM_PROVIDER=openai\nGATE_KEEPER_OPENAI_MODEL=gpt-5.4\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
             > "$HOME/.config/hermes-projects/gate-keeper.env"
           chmod 600 "$HOME/.config/hermes-projects/gate-keeper.env"
           # Post-write confirmation: file exists, mode 600, owned by runner.
