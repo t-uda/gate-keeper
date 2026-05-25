@@ -896,3 +896,50 @@ not retroactively.  The template in "Regression tolerance and justification
 template" above is the required format; attach it under a
 `## Prompt regression justification` header in the PR description, referencing
 the prior-version baseline commit SHA for reproducibility.
+
+## Adaptive strategy escalation (`strategy=adaptive`)
+
+The adaptive strategy runs a Tier 1 single-judge call and escalates to a
+multi-call Tier 2 strategy only when the Tier 1 outcome is ambiguous. Two
+escalation triggers exist:
+
+| Tier 1 evidence kind        | Default behaviour              | Tier 2 strategy | Opt-in?                                                     | `adaptive_escalation_reason`     |
+|-----------------------------|--------------------------------|-----------------|-------------------------------------------------------------|----------------------------------|
+| `target_kind_mismatch`      | escalate (always)              | `consensus` (3) | n/a                                                         | `"tier1_unsupported"`            |
+| `llm_quote_fabrication`     | commit Tier 1 UNSUPPORTED      | `review` (2)    | `params.adaptive_escalate_on_quote_fabrication: true` (#254) | `"tier1_quote_fabrication"`      |
+| `provider_error` / `provider_unconfigured` / `strategy_unavailable` | fail-closed at Tier 1 | n/a             | n/a                                                         | `null`                           |
+| `llm_judgment` (`pass` / `fail`) | commit Tier 1 verdict     | n/a             | n/a                                                         | `null`                           |
+
+### Quote-fabrication recovery (`adaptive_escalate_on_quote_fabrication`, #254)
+
+Default: `false`. When a rule sets this param true and the Tier 1 single
+judge returns `llm_quote_fabrication` (one or more supporting quotes are
+not substrings of the artifact), the adaptive strategy escalates to
+`review` — a fresh primary + reviewer pair — instead of committing the
+Tier 1 UNSUPPORTED verdict. The reviewer pass *still* runs every quote
+through `_find_fabricated_quotes`; this path does not weaken the substring
+contract. Three outcomes are possible:
+
+- **Tier 2 grounded verdict (recovery succeeds).** Diagnostic carries
+  `status=pass|fail`, `evidence[0].kind == "llm_adaptive"`,
+  `adaptive_tier == 2`,
+  `adaptive_escalation_reason == "tier1_quote_fabrication"`,
+  `adaptive_recovery_outcome == "tier2_recovered"`, and the original
+  Tier 1 fabrication evidence nested under
+  `tier1_evidence = {"kind": "llm_quote_fabrication", "data": {...}}`.
+- **Tier 2 also UNSUPPORTED (recovery fails).** Diagnostic propagates the
+  *Tier 1* UNSUPPORTED with `evidence[0].kind == "llm_adaptive"`,
+  `adaptive_recovery_outcome == "tier2_unsupported"`, and both
+  `tier1_evidence` and `tier2_evidence` nested so the auditor can see the
+  failure on both passes. No ungrounded verdict is ever emitted.
+- **Param absent or false.** Behaviour is identical to today — Tier 1
+  fabrication commits directly with `adaptive_tier == 1`,
+  `adaptive_escalation_reason == null`.
+
+**Cost note.** Enabling the param can roughly 3× provider calls on the
+affected fraction of rules (1 fabricated Tier 1 + 2 review-pass Tier 2 =
+3 calls per fabrication event). Aggregated `llm_call_count`,
+`cost_estimate_usd_total`, and `latency_ms_total` in `evidence[0].data`
+reflect the combined tier totals. Promote per-rule only after measuring
+the fabrication rate against the rule's baseline; do not flip on at the
+profile or project level.

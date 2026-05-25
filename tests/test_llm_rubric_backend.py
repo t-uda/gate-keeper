@@ -3891,6 +3891,273 @@ class TestAdaptiveStrategy:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive strategy quote-fabrication recovery (#254)
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveQuoteFabricationRecovery:
+    """Issue #254 — opt-in adaptive escalation on Tier 1 quote fabrication.
+
+    When ``rule.params.adaptive_escalate_on_quote_fabrication`` is true,
+    a Tier 1 ``llm_quote_fabrication`` UNSUPPORTED is no longer terminal:
+    the adaptive strategy escalates to ``review`` (Tier 2) and propagates
+    its outcome. When Tier 2 also returns UNSUPPORTED, the original Tier 1
+    fabrication is preserved (no ungrounded verdict ever emitted).
+
+    All tests use fake provider stubs; no live LLM calls are made.
+    The substring contract enforced by ``_find_fabricated_quotes`` is not
+    weakened — Tier 2 PASS/FAIL only emerges when its quotes ground.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+    }
+
+    # Tier-1 payload: claims a "pass" verdict with a quote that is NOT a
+    # substring of the canned _STUB_ARTIFACT_TEXT — triggers
+    # ``llm_quote_fabrication``.
+    _FABRICATED_PASS_JSON = json.dumps(
+        {
+            "judgment": "pass",
+            "primary_reason": "All good.",
+            "supporting_evidence_quotes": [
+                "This phrase does not exist in the artifact at all."
+            ],
+            "suggested_action": None,
+        }
+    )
+
+    # Reviewer agree payload for the review-strategy Tier 2.
+    _REVIEWER_AGREE_JSON = json.dumps(
+        {"review_verdict": "agree", "review_reason": "Well-grounded."}
+    )
+
+    def _rule(self, *, escalate: bool) -> "Rule":
+        params: dict[str, object] = {"strategy": "adaptive"}
+        if escalate:
+            params["adaptive_escalate_on_quote_fabrication"] = True
+        return Rule(
+            id="stub-adaptive-qf-rule",
+            title="Stub adaptive quote-fab rule",
+            source=SourceLocation(path="rules.md", line=1),
+            text="The documentation should be clear and comprehensive",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params=params,
+        )
+
+    def _make_spy(self, responses: list[str]) -> "tuple[list[tuple], object]":
+        calls: list[tuple] = []
+        idx = {"i": 0}
+
+        def _spy(api_key, system, user, model):
+            calls.append((api_key, model))
+            text = responses[idx["i"] % len(responses)]
+            idx["i"] += 1
+            return _stub_response(text, {"latency_ms": 50, "tokens_in": 100, "tokens_out": 20})
+
+        return calls, _spy
+
+    # ---- (a) recovery succeeds: tier-2 review returns grounded pass ----
+
+    def test_quote_fabrication_recovery_succeeds_returns_grounded_pass(
+        self, monkeypatch, tmp_path
+    ):
+        """Tier 1 fabricates → Tier 2 review (primary+reviewer) → grounded PASS."""
+        _patch_env(monkeypatch, self._ENV)
+        # 1 fabricated tier-1 + 2 review-strategy calls (primary + reviewer).
+        responses = [
+            self._FABRICATED_PASS_JSON,
+            _VALID_PASS_JSON,
+            self._REVIEWER_AGREE_JSON,
+        ]
+        calls, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(escalate=True), _target_with_artifact(tmp_path))
+
+        # 3 total provider calls: 1 tier-1 + 2 tier-2 review (primary+reviewer).
+        assert len(calls) == 3
+        assert diag.status is Status.PASS
+
+        data = diag.evidence[0].data
+        assert diag.evidence[0].kind == "llm_adaptive"
+        assert data["llm_strategy"] == "adaptive"
+        assert data["adaptive_tier"] == 2
+        assert data["adaptive_escalation_reason"] == "tier1_quote_fabrication"
+        assert data["adaptive_recovery_outcome"] == "tier2_recovered"
+
+        # Aggregated telemetry covers both tiers (>= 2 because tier-1
+        # llm_quote_fabrication evidence stores llm_call_count=1 implicitly
+        # via the tier-1 helper, and tier-2 review adds 2).
+        assert data["llm_call_count"] >= 2
+        assert len(data["models"]) >= 2
+
+        # Tier 1 fabrication evidence is preserved for audit.
+        assert "tier1_evidence" in data
+        t1 = data["tier1_evidence"]
+        assert t1["kind"] == "llm_quote_fabrication"
+        # The Tier 1 evidence carries the fabricated quotes list.
+        assert "fabricated_quotes" in t1["data"]
+        assert t1["data"]["fabricated_quotes"]
+
+        # Tier 2 review evidence is also preserved.
+        assert "tier2_evidence" in data
+        assert data["tier2_evidence"]["kind"] == "llm_review"
+
+    # ---- (b) recovery fails: tier-2 also fabricates → preserve UNSUPPORTED ----
+
+    def test_quote_fabrication_recovery_fails_propagates_tier1_unsupported(
+        self, monkeypatch, tmp_path
+    ):
+        """Tier 1 fabricates → Tier 2 also fabricates → UNSUPPORTED preserved.
+
+        No ungrounded verdict is emitted; the outer evidence kind is
+        ``llm_adaptive`` so callers can see the recovery context, but the
+        diagnostic status remains ``UNSUPPORTED`` and the substring contract
+        is honoured at both tiers.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        # Tier 2 primary also fabricates → the review-strategy primary-call
+        # path emits ``llm_quote_fabrication`` immediately and never calls
+        # the reviewer (see _run_review_strategy line ~3137 fabrication
+        # guard).  So we feed 2 total responses (1 tier-1 + 1 tier-2 primary).
+        responses = [self._FABRICATED_PASS_JSON, self._FABRICATED_PASS_JSON]
+        calls, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        diag = llm_backend.check(self._rule(escalate=True), _target_with_artifact(tmp_path))
+
+        # Tier-1 single + tier-2 review primary (reviewer is skipped because
+        # the primary fabricated).  Exactly 2 calls total.
+        assert len(calls) == 2
+
+        # Critical: final verdict is UNSUPPORTED, never an ungrounded PASS/FAIL.
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.evidence[0].kind == "llm_adaptive"
+
+        data = diag.evidence[0].data
+        assert data["llm_strategy"] == "adaptive"
+        assert data["adaptive_tier"] == 2
+        assert data["adaptive_escalation_reason"] == "tier1_quote_fabrication"
+        assert data["adaptive_recovery_outcome"] == "tier2_unsupported"
+
+        # Original tier-1 fabrication context is preserved.
+        assert "tier1_evidence" in data
+        assert data["tier1_evidence"]["kind"] == "llm_quote_fabrication"
+        assert data["tier1_evidence"]["data"]["fabricated_quotes"]
+
+        # Tier-2 fabrication context is also preserved so the auditor sees
+        # both passes failed for the same reason.
+        assert "tier2_evidence" in data
+        assert data["tier2_evidence"]["kind"] == "llm_quote_fabrication"
+
+    # ---- (c) param defaults to false: no behaviour change ----
+
+    def test_quote_fabrication_param_absent_keeps_tier1_behaviour(
+        self, monkeypatch, tmp_path
+    ):
+        """Default (param absent) → Tier 1 UNSUPPORTED committed, no escalation."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([self._FABRICATED_PASS_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        # ``escalate=False`` → param is omitted from rule.params entirely.
+        diag = llm_backend.check(self._rule(escalate=False), _target_with_artifact(tmp_path))
+
+        # Only one call — escalation gate did not fire.
+        assert len(calls) == 1
+        assert diag.status is Status.UNSUPPORTED
+
+        data = diag.evidence[0].data
+        # Existing #186 contract: tier-1 fabrication commits with llm_adaptive
+        # overlay at adaptive_tier=1 and adaptive_escalation_reason=None.
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+        assert "adaptive_recovery_outcome" not in data
+        # tier-1 fabrication is still nested under tier1_evidence (the
+        # commit-overlay path preserves the original evidence kind, #186).
+        assert "tier1_evidence" in data
+        assert data["tier1_evidence"]["kind"] == "llm_quote_fabrication"
+
+    def test_quote_fabrication_param_false_keeps_tier1_behaviour(
+        self, monkeypatch, tmp_path
+    ):
+        """Explicit ``adaptive_escalate_on_quote_fabrication=False`` → no escalation."""
+        _patch_env(monkeypatch, self._ENV)
+        calls, spy = self._make_spy([self._FABRICATED_PASS_JSON])
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+        rule = self._rule(escalate=False)
+        # Explicit false (in addition to the default absence).
+        rule = dataclasses.replace(
+            rule,
+            params={**rule.params, "adaptive_escalate_on_quote_fabrication": False},
+        )
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+
+        assert len(calls) == 1
+        assert diag.status is Status.UNSUPPORTED
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 1
+        assert data["adaptive_escalation_reason"] is None
+
+    # ---- target_kind_mismatch escalation reason unchanged ----
+
+    def test_target_kind_mismatch_reason_unchanged_when_qf_param_set(
+        self, monkeypatch, tmp_path
+    ):
+        """Setting the QF param must NOT change the target_kind_mismatch path.
+
+        The two escalation reasons are mutually exclusive (distinct evidence
+        kinds at tier 1).  Enabling QF recovery must leave the existing
+        ``tier1_unsupported`` consensus escalation untouched.
+        """
+        from gate_keeper.models import TargetKind
+
+        _patch_env(monkeypatch, self._ENV)
+        unsupported_json = json.dumps(
+            {
+                "judgment": "unsupported",
+                "primary_reason": "Rule targets PR descriptions; this is a commit message.",
+                "supporting_evidence_quotes": [],
+                "suggested_action": None,
+            }
+        )
+        # 1 tier-1 unsupported + 3 consensus panel calls (unchanged behaviour).
+        responses = [unsupported_json] + [_VALID_PASS_JSON] * 3
+        calls, spy = self._make_spy(responses)
+        monkeypatch.setattr(llm_backend, "_call_openai", spy)
+
+        rule = Rule(
+            id="stub-adaptive-qf-tkm-rule",
+            title="Stub adaptive rule with QF flag",
+            source=SourceLocation(path="rules.md", line=1),
+            text="The documentation should be clear and comprehensive",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params={
+                "strategy": "adaptive",
+                "adaptive_escalate_on_quote_fabrication": True,
+            },
+            target_kind=TargetKind.PR_DESCRIPTION,
+        )
+        diag = llm_backend.check(rule, _target_with_artifact(tmp_path))
+
+        # Same 4 calls as the existing #186 target_kind_mismatch path.
+        assert len(calls) == 4
+        data = diag.evidence[0].data
+        assert data["adaptive_tier"] == 2
+        # Reason label stays ``tier1_unsupported`` — the QF flag must not
+        # repurpose this trigger.
+        assert data["adaptive_escalation_reason"] == "tier1_unsupported"
+        # And the consensus-recovery path does NOT set
+        # ``adaptive_recovery_outcome`` (only the QF path does).
+        assert "adaptive_recovery_outcome" not in data
+
+
+# ---------------------------------------------------------------------------
 # Multi-target context assembly (#182, slice 1)
 # ---------------------------------------------------------------------------
 
