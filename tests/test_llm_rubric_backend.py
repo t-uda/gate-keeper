@@ -3921,17 +3921,13 @@ class TestAdaptiveQuoteFabricationRecovery:
         {
             "judgment": "pass",
             "primary_reason": "All good.",
-            "supporting_evidence_quotes": [
-                "This phrase does not exist in the artifact at all."
-            ],
+            "supporting_evidence_quotes": ["This phrase does not exist in the artifact at all."],
             "suggested_action": None,
         }
     )
 
     # Reviewer agree payload for the review-strategy Tier 2.
-    _REVIEWER_AGREE_JSON = json.dumps(
-        {"review_verdict": "agree", "review_reason": "Well-grounded."}
-    )
+    _REVIEWER_AGREE_JSON = json.dumps({"review_verdict": "agree", "review_reason": "Well-grounded."})
 
     def _rule(self, *, escalate: bool) -> "Rule":
         params: dict[str, object] = {"strategy": "adaptive"}
@@ -3963,9 +3959,7 @@ class TestAdaptiveQuoteFabricationRecovery:
 
     # ---- (a) recovery succeeds: tier-2 review returns grounded pass ----
 
-    def test_quote_fabrication_recovery_succeeds_returns_grounded_pass(
-        self, monkeypatch, tmp_path
-    ):
+    def test_quote_fabrication_recovery_succeeds_returns_grounded_pass(self, monkeypatch, tmp_path):
         """Tier 1 fabricates → Tier 2 review (primary+reviewer) → grounded PASS."""
         _patch_env(monkeypatch, self._ENV)
         # 1 fabricated tier-1 + 2 review-strategy calls (primary + reviewer).
@@ -4009,9 +4003,7 @@ class TestAdaptiveQuoteFabricationRecovery:
 
     # ---- (b) recovery fails: tier-2 also fabricates → preserve UNSUPPORTED ----
 
-    def test_quote_fabrication_recovery_fails_propagates_tier1_unsupported(
-        self, monkeypatch, tmp_path
-    ):
+    def test_quote_fabrication_recovery_fails_propagates_tier1_unsupported(self, monkeypatch, tmp_path):
         """Tier 1 fabricates → Tier 2 also fabricates → UNSUPPORTED preserved.
 
         No ungrounded verdict is emitted; the outer evidence kind is
@@ -4055,9 +4047,7 @@ class TestAdaptiveQuoteFabricationRecovery:
 
     # ---- (c) param defaults to false: no behaviour change ----
 
-    def test_quote_fabrication_param_absent_keeps_tier1_behaviour(
-        self, monkeypatch, tmp_path
-    ):
+    def test_quote_fabrication_param_absent_keeps_tier1_behaviour(self, monkeypatch, tmp_path):
         """Default (param absent) → Tier 1 UNSUPPORTED committed, no escalation."""
         _patch_env(monkeypatch, self._ENV)
         calls, spy = self._make_spy([self._FABRICATED_PASS_JSON])
@@ -4080,9 +4070,7 @@ class TestAdaptiveQuoteFabricationRecovery:
         assert "tier1_evidence" in data
         assert data["tier1_evidence"]["kind"] == "llm_quote_fabrication"
 
-    def test_quote_fabrication_param_false_keeps_tier1_behaviour(
-        self, monkeypatch, tmp_path
-    ):
+    def test_quote_fabrication_param_false_keeps_tier1_behaviour(self, monkeypatch, tmp_path):
         """Explicit ``adaptive_escalate_on_quote_fabrication=False`` → no escalation."""
         _patch_env(monkeypatch, self._ENV)
         calls, spy = self._make_spy([self._FABRICATED_PASS_JSON])
@@ -4103,9 +4091,7 @@ class TestAdaptiveQuoteFabricationRecovery:
 
     # ---- target_kind_mismatch escalation reason unchanged ----
 
-    def test_target_kind_mismatch_reason_unchanged_when_qf_param_set(
-        self, monkeypatch, tmp_path
-    ):
+    def test_target_kind_mismatch_reason_unchanged_when_qf_param_set(self, monkeypatch, tmp_path):
         """Setting the QF param must NOT change the target_kind_mismatch path.
 
         The two escalation reasons are mutually exclusive (distinct evidence

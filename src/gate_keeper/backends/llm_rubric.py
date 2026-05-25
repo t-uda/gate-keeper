@@ -3562,10 +3562,7 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
     # path).  The ``target_kind_mismatch`` path retains its original
     # propagation semantics (Tier 2 verdict surfaces directly) so existing
     # callers continue to see the consensus result on disagreement.
-    if (
-        escalation_reason == "tier1_quote_fabrication"
-        and tier2_diag.status is Status.UNSUPPORTED
-    ):
+    if escalation_reason == "tier1_quote_fabrication" and tier2_diag.status is Status.UNSUPPORTED:
         adaptive_overlay_fail: dict[str, Any] = {
             "llm_strategy": "adaptive",
             "adaptive_tier": 2,
