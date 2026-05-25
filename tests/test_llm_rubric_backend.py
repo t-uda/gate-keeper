@@ -745,30 +745,25 @@ class TestEvidenceObservability:
         assert "usage" in detail.lower() or "input_tokens" in detail.lower()
 
     def test_missing_usage_openai_maps_to_unavailable(self, monkeypatch, tmp_path):
-        """OpenAI response without usage fields must fail closed (no synthetic 0)."""
+        """OpenAI Responses API response without usage fields must fail closed (no synthetic 0)."""
         _patch_env(monkeypatch, self._OPENAI_ENV)
 
-        class _UsageMissingCompletion:
-            prompt_tokens = 250
-            # completion_tokens deliberately absent
-
-        class _Choice:
-            class message:  # noqa: N801
-                content = _VALID_PASS_JSON
+        class _UsageMissingOutput:
+            input_tokens = 250
+            # output_tokens deliberately absent
 
         class _Resp:
-            choices = [_Choice()]
-            usage = _UsageMissingCompletion()
+            output_text = _VALID_PASS_JSON
+            usage = _UsageMissingOutput()
 
         class _Client:
             def __init__(self, *_a, **_k):
                 pass
 
-            class chat:  # noqa: N801
-                class completions:  # noqa: N801
-                    @staticmethod
-                    def create(*_a, **_k):
-                        return _Resp()
+            class responses:  # noqa: N801
+                @staticmethod
+                def create(*_a, **_k):
+                    return _Resp()
 
         import sys
 
@@ -783,7 +778,7 @@ class TestEvidenceObservability:
         assert "tokens_in" not in diag.evidence[0].data
         assert "tokens_out" not in diag.evidence[0].data
         detail = diag.evidence[0].data["detail"]
-        assert "usage" in detail.lower() or "completion_tokens" in detail.lower()
+        assert "usage" in detail.lower() or "output_tokens" in detail.lower()
 
     def test_missing_usage_block_anthropic_maps_to_unavailable(self, monkeypatch, tmp_path):
         """Anthropic response with no usage object at all must fail closed."""
@@ -4591,19 +4586,24 @@ class TestFindPerTargetFabricatedQuotes:
 
 
 class TestReasoningEffortParamRouting:
-    """Verify that _call_openai passes correct reasoning_effort / max_completion_tokens
-    per model family (#233).
+    """Verify that _call_openai passes correct reasoning effort / max_output_tokens
+    per model family (#233, #248).
 
-    All tests stub OpenAI().chat.completions.create to capture kwargs so that
+    All tests stub OpenAI().responses.create to capture kwargs so that
     no real network call is made.  The disable_llm_dotenv autouse fixture
     (conftest.py) ensures no host credential file is read.
+
+    Post-#248: the helper targets the Responses API. Reasoning effort
+    travels in the ``reasoning={"effort": ...}`` dict, the token budget
+    parameter is ``max_output_tokens``, and the prompt parameter is
+    ``input`` (list of role/content dicts).
     """
 
     def _make_fake_response(self):
-        """Return a minimal fake openai ChatCompletion response object."""
+        """Return a minimal fake openai Responses-API response object."""
         import types
 
-        usage = types.SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+        usage = types.SimpleNamespace(input_tokens=10, output_tokens=5)
         _content = json.dumps(
             {
                 "judgment": "pass",
@@ -4612,31 +4612,26 @@ class TestReasoningEffortParamRouting:
                 "suggested_action": None,
             }
         )
-        message = types.SimpleNamespace(content=_content)
-        choice = types.SimpleNamespace(message=message)
-        return types.SimpleNamespace(choices=[choice], usage=usage)
+        return types.SimpleNamespace(output_text=_content, usage=usage)
 
     def _patch_openai(self, monkeypatch):
-        """Patch OpenAI client so create() records kwargs and returns a fake response.
+        """Patch OpenAI client so responses.create() records kwargs and returns a fake response.
 
         Returns a list that is appended to on each create() call:
-            [{"model": ..., "max_completion_tokens": ..., "reasoning_effort": ..., ...}]
+            [{"model": ..., "max_output_tokens": ..., "reasoning": {...}, ...}]
         """
         captured: list[dict] = []
         fake_response = self._make_fake_response()
 
         import openai as _openai_module
 
-        class FakeCompletions:
+        class FakeResponses:
             def create(self, **kwargs):
                 captured.append(dict(kwargs))
                 return fake_response
 
-        class FakeChat:
-            completions = FakeCompletions()
-
         class FakeClient:
-            chat = FakeChat()
+            responses = FakeResponses()
 
         monkeypatch.setattr(_openai_module, "OpenAI", lambda **kw: FakeClient())
         return captured
@@ -4700,80 +4695,80 @@ class TestReasoningEffortParamRouting:
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-5")
         assert len(captured) == 1
-        assert captured[0]["reasoning_effort"] == "minimal"
+        assert captured[0]["reasoning"] == {"effort": "minimal"}
 
-    def test_gpt5_gets_max_completion_tokens_2000(self, monkeypatch):
+    def test_gpt5_gets_max_output_tokens_2000(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-5")
-        assert captured[0]["max_completion_tokens"] == 2000
+        assert captured[0]["max_output_tokens"] == 2000
 
     def test_gpt5_dot4_gets_reasoning_effort_none(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-5.4")
-        assert captured[0]["reasoning_effort"] == "none"
+        assert captured[0]["reasoning"] == {"effort": "none"}
 
-    def test_gpt5_dot4_gets_max_completion_tokens_2000(self, monkeypatch):
+    def test_gpt5_dot4_gets_max_output_tokens_2000(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-5.4")
-        assert captured[0]["max_completion_tokens"] == 2000
+        assert captured[0]["max_output_tokens"] == 2000
 
     def test_gpt5_unknown_subversion_gets_minimal(self, monkeypatch):
         """gpt-5.99 longest-prefix-matches gpt-5 → minimal."""
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-5.99")
-        assert captured[0]["reasoning_effort"] == "minimal"
+        assert captured[0]["reasoning"] == {"effort": "minimal"}
 
     # ------------------------------------------------------------------
     # _call_openai kwargs: non-reasoning models (unchanged behaviour)
     # ------------------------------------------------------------------
 
-    def test_gpt4o_no_reasoning_effort(self, monkeypatch):
+    def test_gpt4o_no_reasoning_kwarg(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-4o")
-        assert "reasoning_effort" not in captured[0]
+        assert "reasoning" not in captured[0]
 
-    def test_gpt4o_mini_no_reasoning_effort(self, monkeypatch):
+    def test_gpt4o_mini_no_reasoning_kwarg(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-4o-mini")
-        assert "reasoning_effort" not in captured[0]
+        assert "reasoning" not in captured[0]
 
-    def test_gpt4o_max_completion_tokens_600(self, monkeypatch):
+    def test_gpt4o_max_output_tokens_600(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-4o")
-        assert captured[0]["max_completion_tokens"] == 600
+        assert captured[0]["max_output_tokens"] == 600
 
-    def test_gpt4o_mini_max_completion_tokens_600(self, monkeypatch):
+    def test_gpt4o_mini_max_output_tokens_600(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "gpt-4o-mini")
-        assert captured[0]["max_completion_tokens"] == 600
+        assert captured[0]["max_output_tokens"] == 600
 
     # ------------------------------------------------------------------
     # _call_openai kwargs: o1*/o3* — reasoning-class without table entry
     # ------------------------------------------------------------------
     # These models match the prefix detector (so they get the raised token
     # budget) but have no entry in _REASONING_EFFORT_RAW (fail-open: no
-    # reasoning_effort kwarg passed, API default applies).  The pattern
+    # reasoning kwarg passed, API default applies).  The pattern
     # locks in the intended behaviour described in #233.
 
-    def test_o1_no_reasoning_effort_kwarg(self, monkeypatch):
+    def test_o1_no_reasoning_kwarg(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "o1")
-        assert "reasoning_effort" not in captured[0]
+        assert "reasoning" not in captured[0]
 
     def test_o1_uses_reasoning_class_token_budget(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "o1")
-        assert captured[0]["max_completion_tokens"] == 2000
+        assert captured[0]["max_output_tokens"] == 2000
 
-    def test_o3_mini_no_reasoning_effort_kwarg(self, monkeypatch):
+    def test_o3_mini_no_reasoning_kwarg(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "o3-mini")
-        assert "reasoning_effort" not in captured[0]
+        assert "reasoning" not in captured[0]
 
     def test_o3_mini_uses_reasoning_class_token_budget(self, monkeypatch):
         captured = self._patch_openai(monkeypatch)
         llm_backend._call_openai("sk-test", "system", "user", "o3-mini")
-        assert captured[0]["max_completion_tokens"] == 2000
+        assert captured[0]["max_output_tokens"] == 2000
 
     # ------------------------------------------------------------------
     # Longest-prefix sort robustness (#233 review thread 3)
