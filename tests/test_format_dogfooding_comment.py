@@ -1,4 +1,4 @@
-"""Tests for the dogfooding advisory-comment formatter (#240).
+"""Tests for the dogfooding PR-comment formatter (#240, #261).
 
 The formatter lives outside ``src/`` (it is workflow glue, not a public
 package surface), so we load it via ``importlib`` from the repo-relative
@@ -11,6 +11,10 @@ path. The tests pin:
    placeholder plus the ``<details>`` block.
 4. Mixed inputs render only the actionable rows in the main table, with the
    skipped rows under the ``<details>`` block.
+5. Forbidden-wording regression (#261): the rendered comment MUST NOT contain
+   any "advisory" / "does not gate merge" / equivalent non-gating disclaimer
+   wording in the user-facing body, regardless of input shape (fallback,
+   actionable-only, skip-only, mixed).
 """
 
 from __future__ import annotations
@@ -187,3 +191,83 @@ def test_non_structural_unsupported_is_not_filtered(tmp_path: Path) -> None:
     out = _run(tmp_path, {"diagnostics": [diag]})
     assert "rule-some-unavailable" in out
     assert "<details>" not in out
+
+
+# Forbidden user-facing substrings the PR comment MUST NOT contain (#261).
+#
+# Owner directive (issue #261): remove all "advisory" / "does not gate merge"
+# / equivalent non-gating disclaimer wording from the rendered comment.
+# These substrings are checked case-insensitively against EVERY rendered
+# output shape (fallback, actionable-only, skip-only, mixed) so the wording
+# cannot regress silently — e.g. by re-introducing a trailer, header
+# suffix, or fallback-body disclaimer.
+_FORBIDDEN_SUBSTRINGS = (
+    "advisory",
+    "does not gate merge",
+    "does not block merge",
+    "non-gating",
+    "non-blocking",
+    "not gate",
+    "not block",
+)
+
+
+def _assert_no_forbidden_wording(out: str) -> None:
+    lower = out.lower()
+    for needle in _FORBIDDEN_SUBSTRINGS:
+        assert needle not in lower, (
+            f"forbidden user-facing wording {needle!r} found in rendered "
+            f"PR comment (issue #261); offending output:\n{out}"
+        )
+
+
+def test_fallback_body_has_no_forbidden_wording(tmp_path: Path) -> None:
+    """Unparseable / missing JSON renders the fallback body — it MUST NOT
+    contain advisory / does-not-gate disclaimers (#261)."""
+    # Empty diagnostics list triggers the fallback branch.
+    out = _run(tmp_path, {"diagnostics": []})
+    _assert_no_forbidden_wording(out)
+
+
+def test_actionable_only_has_no_forbidden_wording(tmp_path: Path) -> None:
+    out = _run(tmp_path, {"diagnostics": [_diag_actionable_fail()]})
+    _assert_no_forbidden_wording(out)
+
+
+def test_structural_skip_only_has_no_forbidden_wording(tmp_path: Path) -> None:
+    out = _run(
+        tmp_path,
+        {
+            "diagnostics": [
+                _diag_structural_target_kind(),
+                _diag_structural_quote_fabrication(),
+            ]
+        },
+    )
+    _assert_no_forbidden_wording(out)
+
+
+def test_mixed_input_has_no_forbidden_wording(tmp_path: Path) -> None:
+    out = _run(
+        tmp_path,
+        {
+            "diagnostics": [
+                _diag_actionable_fail(),
+                _diag_structural_quote_fabrication(),
+                _diag_structural_target_kind(),
+            ]
+        },
+    )
+    _assert_no_forbidden_wording(out)
+
+
+def test_malformed_json_fallback_has_no_forbidden_wording(tmp_path: Path) -> None:
+    """The on-disk JSON-decode-error path emits the fallback — same gate (#261)."""
+    formatter = _load_formatter()
+    json_path = tmp_path / "bad.json"
+    json_path.write_text("this is not json", encoding="utf-8")
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = formatter.main(["format_dogfooding_comment.py", str(json_path)])
+    assert rc == 0
+    _assert_no_forbidden_wording(buf.getvalue())
