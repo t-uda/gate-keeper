@@ -1,14 +1,16 @@
-"""Tests for the semantic self-gating advisory rule pool (#72, #253, #242).
+"""Tests for the semantic self-gating advisory rule pool (#72, #253, #242, #246).
 
 These tests pin four contracts:
 
-1. ``docs/dogfooding-rules.md`` extracts to exactly two semantic rules.
+1. ``docs/dogfooding-rules.md`` extracts to exactly three semantic rules.
    The v2 pool (#253) keeps the two PR-description rules and drops the
    former L25 commit-message rule per #242 Option C — the dogfood
    workflow only dispatches ``--artifact-kind pr_description`` so a
    ``commit_message`` rule would short-circuit to ``UNSUPPORTED`` on
-   every run.
-2. The classifier routes both to ``semantic_rubric`` / ``llm-rubric``
+   every run. #246 adds a third PR-description rule that flags PRs
+   landing hardcoded user-specific / container-layout paths in product
+   code (anchor case #245).
+2. The classifier routes all three to ``semantic_rubric`` / ``llm-rubric``
    (no deterministic-backend mis-routing).
 3. With no LLM provider configured, ``llm_rubric.check`` returns
    ``Status.UNAVAILABLE`` with ``provider_unconfigured`` evidence — the
@@ -42,19 +44,25 @@ class TestParserExtraction:
     def test_dogfooding_rules_doc_exists(self):
         assert _RULES_DOC.is_file(), f"missing rules doc: {_RULES_DOC}"
 
-    def test_extracts_exactly_two_rules(self):
+    def test_extracts_exactly_three_rules(self):
         ruleset = _ruleset()
-        assert len(ruleset.rules) == 2, [r.text for r in ruleset.rules]
+        assert len(ruleset.rules) == 3, [r.text for r in ruleset.rules]
 
     def test_rule_texts_match_authored_phrasings(self):
-        # The phrasings adapt docs/semantic-rules.md §3.1 and §3.2. The v2
-        # wording (#253) describes the user-visible change and the
-        # verification method anywhere in the body, matching the real
-        # `Closes #N` + `## Summary` + `## Validation` template both this
-        # repo and uda-lab/hermes-engineering follow. Filesystem-style
-        # verbs (`contain` / `include`) are avoided so the classifier does
-        # not mis-route to FILESYSTEM. L25 (commit-message rule) was
-        # dropped per #242 Option C.
+        # The first two phrasings adapt docs/semantic-rules.md §3.1 and
+        # §3.2. The v2 wording (#253) describes the user-visible change
+        # and the verification method anywhere in the body, matching the
+        # real `Closes #N` + `## Summary` + `## Validation` template both
+        # this repo and uda-lab/hermes-engineering follow. Filesystem-
+        # style verbs (`contain` / `include`) are avoided so the
+        # classifier does not mis-route to FILESYSTEM. L25 (commit-
+        # message rule) was dropped per #242 Option C.
+        #
+        # The third rule (#246, anchor case #245) extends the pool to
+        # cover hardcoded user/container-layout filesystem paths in
+        # product code. The wording preserves the full boundary
+        # definition — acceptable spellings and the test-fixture
+        # exemption — so the rubric prompt has unambiguous context.
         ruleset = _ruleset()
         texts = [r.text for r in ruleset.rules]
         # Identify each rule by a substring rather than exact match — v2
@@ -62,8 +70,10 @@ class TestParserExtraction:
         # whenever rationale grows.
         _l23_prefix = "The PR description body should describe the user-visible change introduced by this PR."
         _l24_prefix = "The PR description should describe how the change was verified"
+        _env_safety_prefix = "Product code must not hardcode absolute filesystem locations"
         assert any(t.startswith(_l23_prefix) for t in texts), texts
         assert any(t.startswith(_l24_prefix) for t in texts), texts
+        assert any(t.startswith(_env_safety_prefix) for t in texts), texts
         # No commit-message rule must remain in the pool.
         assert not any(t.lower().startswith("the commit message") for t in texts), texts
 

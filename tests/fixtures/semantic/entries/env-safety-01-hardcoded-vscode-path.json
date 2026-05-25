@@ -1,0 +1,13 @@
+{
+  "rule_text": "Product code must not hardcode absolute filesystem locations that assume a specific user account, devcontainer user, host username, or workspace root layout. Acceptable spellings include `~`, `$HOME`, `${HOME}`, `home()` from pathlib, `platformdirs`, documented placeholders, and CI-only locations explicitly scoped to a workflow step. Test fixtures that exercise location handling are exempt when the test scope makes the intent obvious.",
+  "rule_target_kind": "pr_description",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_hardcoded_path.md"
+  },
+  "expected_judgment": "fail",
+  "expected_rationale_keywords": ["/home/vscode", "hardcoded", "devcontainer", "home()"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Anchor case for #246 (originally observed in #245). The PR description plainly states that the change introduces `Path(\"/home/vscode/.config/gate-keeper/.env\")` as a module-level constant in src/, which is exactly the spelling the env-safety rule forbids."
+}
