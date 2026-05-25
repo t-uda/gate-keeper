@@ -82,7 +82,7 @@ phase is worthless if findings are not captured.
 ## Initial advisory rule pool
 
 The seed pool of semantic self-gating rules lives in
-[`dogfooding-rules.md`](dogfooding-rules.md). The two rules in that
+[`dogfooding-rules.md`](dogfooding-rules.md). The three rules in that
 document are advisory only and do not meet the promotion criteria in
 this document yet.
 

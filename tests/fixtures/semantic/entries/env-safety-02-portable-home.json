@@ -1,0 +1,13 @@
+{
+  "rule_text": "Product code must not hardcode absolute filesystem locations that assume a specific user account, devcontainer user, host username, or workspace root layout. Acceptable spellings include `~`, `$HOME`, `${HOME}`, `home()` from pathlib, `platformdirs`, documented placeholders, and CI-only locations explicitly scoped to a workflow step. Test fixtures that exercise location handling are exempt when the test scope makes the intent obvious.",
+  "rule_target_kind": "pr_description",
+  "target": {
+    "kind": "path",
+    "value": "pr_description_portable_home.md"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["home()", "portable", "user"],
+  "category": "consistency",
+  "intended_backend": "llm-rubric",
+  "notes": "Negative counterpart to env-safety-01. The PR description describes resolving the location via `Path.home() / \".config/gate-keeper/.env\"` — `home()` from pathlib is one of the explicitly acceptable spellings called out in the rule text — so the rubric should pass."
+}
