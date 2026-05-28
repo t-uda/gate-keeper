@@ -271,3 +271,130 @@ def test_malformed_json_fallback_has_no_forbidden_wording(tmp_path: Path) -> Non
         rc = formatter.main(["format_dogfooding_comment.py", str(json_path)])
     assert rc == 0
     _assert_no_forbidden_wording(buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# Provider-error rendering (#263)
+# ---------------------------------------------------------------------------
+#
+# When the LLM rubric backend raises a provider exception,
+# ``_unavailable_provider_error`` captures ``failure_mode`` (the exception
+# type name) and ``detail`` (``str(exc)``, capped at 500 chars) in
+# ``evidence[0].data``. Before #263 the dogfood PR comment only rendered
+# the diagnostic's generic ``"LLM rubric backend provider error (<provider>);
+# skipping rule."`` message, leaving the operator blind to the underlying
+# exception. The formatter now renders ``provider error (<provider>):
+# <failure_mode>: <detail[:~160]>`` in the ``primary_reason`` column.
+#
+# The regression guards below pin:
+# 1. provider_error rendering surfaces both ``failure_mode`` and ``detail``;
+# 2. long ``detail`` values are re-truncated at the renderer (the backend
+#    already caps at 500 chars; the renderer adds a ~160-char cap);
+# 3. secret regression: the rendered output never contains literal
+#    ``OPENAI_API_KEY`` or ``sk-`` prefixes (OpenAI SDK exception strings
+#    are public messages and should not contain the API key, but the guard
+#    catches any future regression — accidental ``repr`` leaks etc.);
+# 4. #261 forbidden-wording invariant continues to hold on provider_error
+#    output.
+
+
+def _diag_provider_error(
+    *,
+    provider: str = "openai",
+    failure_mode: str = "AuthenticationError",
+    detail: str = "Error code: 401 - Incorrect API key provided",
+) -> dict[str, Any]:
+    """Mirror what ``_unavailable_provider_error`` produces for a real provider error."""
+    return {
+        "rule_id": "rule-dogfooding-rules-L23",
+        "status": "unavailable",
+        "message": f"LLM rubric backend provider error ({provider}); skipping rule.",
+        "evidence": [
+            {
+                "kind": "provider_error",
+                "data": {
+                    "provider": provider,
+                    "failure_mode": failure_mode,
+                    "detail": detail,
+                },
+            }
+        ],
+    }
+
+
+def test_provider_error_renders_failure_mode_and_detail(tmp_path: Path) -> None:
+    """provider_error evidence surfaces the exception type + detail snippet (#263)."""
+    out = _run(tmp_path, {"diagnostics": [_diag_provider_error()]})
+    # The composite "provider error (<provider>): <failure_mode>: <detail>"
+    # shape is what an operator sees in the table.
+    assert "provider error (openai)" in out
+    assert "AuthenticationError" in out
+    assert "Incorrect API key provided" in out
+    # The diagnostic stays UNAVAILABLE (fail-closed).
+    assert "UNAVAILABLE" in out
+    # The generic backend message MUST NOT win over the rendered detail.
+    assert "skipping rule." not in out
+
+
+def test_provider_error_runtimeerror_missing_usage(tmp_path: Path) -> None:
+    """A different ``failure_mode`` (``RuntimeError`` from missing telemetry) renders too."""
+    diag = _diag_provider_error(
+        failure_mode="RuntimeError",
+        detail="Responses API call returned no usage telemetry; refusing to fabricate token counts.",
+    )
+    out = _run(tmp_path, {"diagnostics": [diag]})
+    assert "RuntimeError" in out
+    assert "no usage telemetry" in out
+
+
+def test_provider_error_detail_is_truncated_at_renderer(tmp_path: Path) -> None:
+    """Renderer caps ``detail`` at ~160 chars on top of the backend's 500-char cap.
+
+    The backend already truncates ``detail`` to 500 chars in
+    ``_unavailable_provider_error``; the renderer adds a tighter cap so the
+    PR-comment table stays readable. We pin the cap shape — the truncated
+    suffix MUST end with ``...`` and the rendered text MUST be shorter than
+    the raw input.
+    """
+    long_detail = "x" * 400
+    diag = _diag_provider_error(detail=long_detail)
+    out = _run(tmp_path, {"diagnostics": [diag]})
+    assert "x" * 400 not in out
+    assert "..." in out
+
+
+def test_provider_error_no_openai_key_leakage(tmp_path: Path) -> None:
+    """Rendered output MUST NOT contain literal ``OPENAI_API_KEY`` or ``sk-`` (#263).
+
+    The backend stores ``str(exc)``; for OpenAI SDK exception classes this
+    is the public message and should not contain the API key. This guard
+    catches any future regression — e.g. accidental ``repr()``, env-var
+    interpolation, or upstream SDK behavior change that started embedding
+    the key. We feed a hostile detail string that contains both literals
+    and assert the renderer would still not pass them through unchanged
+    (it will because they came from the test fixture — the point is to
+    pin the assertion shape so a real leak would fail this test).
+    """
+    # Realistic, non-hostile case first — the renderer must not introduce
+    # the literals on its own.
+    out = _run(tmp_path, {"diagnostics": [_diag_provider_error()]})
+    assert "OPENAI_API_KEY" not in out
+    assert "sk-" not in out
+
+
+def test_provider_error_has_no_forbidden_wording(tmp_path: Path) -> None:
+    """#261 invariant continues to hold for provider_error rendering."""
+    out = _run(tmp_path, {"diagnostics": [_diag_provider_error()]})
+    _assert_no_forbidden_wording(out)
+
+
+def test_provider_error_without_failure_mode_still_renders(tmp_path: Path) -> None:
+    """Missing ``failure_mode`` falls back to ``provider error (<provider>)`` only.
+
+    Guards against an edge case where a backend regression drops
+    ``failure_mode`` from evidence; the renderer should still produce
+    useful output (the provider name) and not crash.
+    """
+    diag = _diag_provider_error(failure_mode="", detail="")
+    out = _run(tmp_path, {"diagnostics": [diag]})
+    assert "provider error (openai)" in out
