@@ -256,82 +256,44 @@ context passed to the model:
 
 ### Structured judgment schema (`LlmJudgment`)
 
-The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version `PROMPT_VERSION = "v6"`)
-to respond with a JSON object matching the `LlmJudgment` dataclass:
+The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version
+`PROMPT_VERSION = "v7"`) to return **line-range evidence references**:
 
 ```json
 {
-  "judgment":                    "pass" | "fail",
-  "primary_reason":              "<one sentence>",
-  "supporting_evidence_quotes":  ["<near-verbatim substring of the target>", ...],
-  "suggested_action":            "<concrete fix>" | null
+  "judgment": "pass" | "fail" | "unsupported",
+  "primary_reason": "<one sentence>",
+  "supporting_evidence_refs": [
+    {"target_id": null, "path": "README.md", "line_start": 12, "line_end": 18}
+  ],
+  "suggested_action": "<concrete fix>" | null
 }
 ```
 
-Constraints enforced by `_parse_llm_judgment()`:
-- `judgment` must be exactly `"pass"` or `"fail"`.
-- `primary_reason` must be a non-empty string (single sentence).
-- `supporting_evidence_quotes` must contain at least one entry for **every
-  verdict — both `"pass"` and `"fail"`** (#168). The prompt additionally
-  instructs the model to draw quotes as near-verbatim substrings of the
-  target text and to favor representative content over opening-line
-  citations on long artifacts.
-- `suggested_action` must be a non-empty string on `"fail"` and is coerced to `null` on `"pass"`.
-- Extra fields in the JSON response are silently ignored (forward-compatible).
+Primary contract (#268):
+- Prompt target blocks are rendered with stable 1-based line numbers.
+- `supporting_evidence_refs` is validated against the exact prompt-visible
+  corpus (single-target and multi-target paths share the same resolver).
+- On success, gate-keeper reconstructs `supporting_evidence_quotes`
+  mechanically from the referenced line ranges and emits both:
+  `supporting_evidence_quotes` (compat) and `supporting_evidence_refs`
+  (structured contract).
 
-### Parser-side substring grounding (#172)
+Malformed refs (out-of-range, reversed, non-integer, unknown `target_id`,
+unquotable placeholder target, etc.) are treated as grader contract failures:
+`status=unavailable`, `evidence.kind=invalid_evidence_reference`,
+`failure_mode=grader_error`.
 
-Prompt-side discipline alone is not sufficient. Tick 6 of umbrella #164's
-dogfood loop showed that on the first sample after the v2 prompt merged
-the model returned six fail verdicts whose `supporting_evidence_quotes`
-had **zero overlap** with the artifact (generic "fail-shaped" placeholder
-strings). A model-instruction-only constraint is by design unreliable.
+### Legacy quote fallback (#172)
 
-The backend therefore enforces the substring contract in `check()` after
-`_parse_llm_judgment()` succeeds:
+Legacy quote-shaped outputs (`supporting_evidence_quotes` without refs) are
+still accepted defensively. In that fallback path, the original substring
+anti-fabrication validator remains active:
 
-- Each entry of `supporting_evidence_quotes` must occur as a substring of
-  the artifact text the rule is being evaluated against. Whitespace runs
-  are normalised (collapsed to a single space) and a small set of smart
-  punctuation pairs (curly single/double quotes, en/em dashes) is folded
-  to their ASCII counterparts, so the model may copy with cosmetic
-  differences. **Paraphrase or rewording is not tolerated.**
-- The check runs against the **same string the prompt template rendered**
-  into the `Target reference` block via `_build_prompt`. The substitution
-  rules (issue #191) are:
-  - When the caller declares `--artifact-kind` **and** `target` resolves
-    to a real file on disk, the prompt renders the **file content**;
-    the substring check is therefore performed against that content.
-    This is the post-#191 path — gpt-4o-mini at v4 was observed
-    parroting filenames as artifact-kind evidence on path targets, so
-    the path / filename is intentionally withheld from the prompt.
-  - When `--artifact-kind` is **not** declared, the prompt renders
-    `str(target)` byte-for-byte (legacy v4 behaviour), and the
-    substring check accepts only quotes drawn from the path / inline
-    string the model actually saw.
-  - Inline-string targets and non-existent paths fall back to
-    `str(target)` regardless of `--artifact-kind` — there is no file
-    body to substitute.
-  The provider helpers do not give the model a file-read tool, so the
-  model only ever sees the rendered `Target reference` block. The bench
-  harness pre-resolves path targets to file contents before calling
-  `check`, so for bench callers the target string is already the inline
-  content; for the bench callers, `--artifact-kind` therefore changes
-  nothing at the substring-grounding layer.
-- On any violation the verdict is **rejected**: the diagnostic returns
-  `status=unsupported` with `evidence[0]` of kind
-  `llm_quote_fabrication`. The evidence preserves the model's claimed
-  judgment, primary reason, all returned quotes, the subset that failed
-  containment (`fabricated_quotes`), and the standard telemetry / cost
-  fields. `Diagnostic.remediation` advises the operator not to act on the
-  verdict.
-- Empty / whitespace-only quotes are treated as fabricated (zero-grounding
-  is a degenerate case, not a forgivable normalisation difference).
-
-This is option (A) from #172's design: reject the verdict rather than
-strip-and-flag offending quotes. The user-visible signal "this verdict
-came from a model that ignored the substring contract" is more valuable
-than a verdict whose grounding has been silently degraded.
+- Non-substring / fabricated quotes produce `status=unsupported`,
+  `evidence.kind=llm_quote_fabrication`.
+- Successful legacy outputs still emit `supporting_evidence_quotes` plus
+  span metadata for compatibility.
 
 ### Span-based evidence offsets (#179)
 
@@ -738,6 +700,14 @@ Reference history:
   ever shows IDs the model itself emitted (or `null` after the strict
   fabrication guard). Baseline comparison runs must filter on
   `prompt_version`.
+- v7 (#268): moves the primary evidence contract from free-form quote text
+  to structured `supporting_evidence_refs` line ranges. Prompt artifacts are
+  rendered with stable line numbers, backend validation reconstructs
+  `supporting_evidence_quotes` mechanically from ranges, and malformed refs
+  map to `status=unavailable` with
+  `evidence.kind=invalid_evidence_reference` /
+  `failure_mode=grader_error`. Legacy quote fabrication checks remain as a
+  fallback path only.
 
 ### Per-model dispatch accuracy (#175)
 

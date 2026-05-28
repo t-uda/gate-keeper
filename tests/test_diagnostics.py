@@ -600,3 +600,13 @@ def test_json_provider_error_failure_mode_from_evidence():
     diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
     parsed = json.loads(render_json(diags))
     assert parsed["diagnostics"][0]["failure_mode"] == "invalid_json"
+
+
+def test_json_invalid_evidence_reference_maps_to_grader_error():
+    ev = Evidence(
+        kind="invalid_evidence_reference",
+        data={"failure_mode": "grader_error", "detail": "line_start must be integer"},
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"

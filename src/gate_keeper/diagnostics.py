@@ -111,6 +111,8 @@ def _derive_failure_mode(diagnostic: Diagnostic) -> str | None:
             return "adapter_unknown"
         if e.kind == "params_error":
             return "params_error"
+        if e.kind == "invalid_evidence_reference":
+            return str(e.data.get("failure_mode", "grader_error"))
         if e.kind == "llm_judgment":
             judgment = e.data.get("judgment", "")
             return f"llm_{judgment}" if judgment else "llm_fail"

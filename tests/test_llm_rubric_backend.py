@@ -18,7 +18,7 @@ import pytest
 
 from gate_keeper.backends import llm_rubric as llm_backend
 from gate_keeper.backends.llm_rubric import LlmJudgment, LlmJudgmentParseError
-from gate_keeper.diagnostics import EXIT_FAIL, EXIT_OK, compute_exit_code
+from gate_keeper.diagnostics import EXIT_FAIL, EXIT_OK, compute_exit_code, render_json, render_text
 from gate_keeper.models import (
     Backend,
     Confidence,
@@ -1138,6 +1138,7 @@ class TestLlmJudgmentPydantic:
             "judgment",
             "primary_reason",
             "supporting_evidence_quotes",
+            "supporting_evidence_refs",
             "suggested_action",
             "supporting_evidence_quote_target_ids",
         }
@@ -1906,7 +1907,9 @@ class TestPromptVersion:
         # now declares the {target_id, quote} object form **required**
         # (slice 1 said preferred) and backend enforcement is tightened
         # in lockstep — v5 and v6 evidence are not interchangeable.
-        assert llm_backend.PROMPT_VERSION == "v6"
+        # #268 bumps v6 → v7 to switch the primary evidence contract to
+        # supporting_evidence_refs line-range references.
+        assert llm_backend.PROMPT_VERSION == "v7"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -1919,8 +1922,8 @@ class TestPromptVersion:
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
-        # #225 — PROMPT_VERSION is now v6.
-        assert diag.evidence[0].data["prompt_version"] == "v6"
+        # #268 — PROMPT_VERSION is now v7.
+        assert diag.evidence[0].data["prompt_version"] == "v7"
 
 
 # ---------------------------------------------------------------------------
@@ -2343,8 +2346,8 @@ class TestUnsupportedDispatch:
         assert diag.evidence[0].kind == "target_kind_mismatch"
         assert diag.evidence[0].data["judgment"] == "unsupported"
         assert diag.evidence[0].data["rule_target_kind"] == "pr_description"
-        # #225 — PROMPT_VERSION is now v6.
-        assert diag.evidence[0].data["prompt_version"] == "v6"
+        # #268 — PROMPT_VERSION is now v7.
+        assert diag.evidence[0].data["prompt_version"] == "v7"
 
     def test_unsupported_remediation_explains_mismatch(self, monkeypatch):
         from gate_keeper.models import TargetKind
@@ -2423,12 +2426,12 @@ class TestArtifactKindStripsFilenameFromPrompt:
             artifact_kind=TargetKind.COMMIT_MESSAGE,
         )
 
-        # The file content must appear inline.
-        assert commit_body in user
-        # The path / filename must NOT appear in the rendered prompt — the
-        # whole point of #191 is to deny the model a filename to parrot.
-        assert str(commit_path) not in user
-        assert commit_path.name not in user
+        # The file content must appear inline as numbered lines.
+        assert "fix(parser): handle CRLF in evidence blocks" in user
+        assert "related to #foo" in user
+        assert "1 | fix(parser): handle CRLF in evidence blocks" in user
+        # #268 line-range refs include path metadata in the rendered artifact.
+        assert str(commit_path) in user
 
     def test_path_target_with_artifact_kind_string_path_also_strips(self, tmp_path):
         """The substitution applies to both ``Path`` and string-path
@@ -2445,9 +2448,10 @@ class TestArtifactKindStripsFilenameFromPrompt:
             artifact_kind=TargetKind.COMMIT_MESSAGE,
         )
 
-        assert commit_body in user
-        assert str(commit_path) not in user
-        assert commit_path.name not in user
+        assert "feat(cli): emit --help on stderr" in user
+        assert "because stdout is reserved for results" in user
+        assert "1 | feat(cli): emit --help on stderr" in user
+        assert str(commit_path) in user
 
     def test_path_target_without_artifact_kind_preserves_legacy_path_render(self, tmp_path):
         """When ``artifact_kind`` is omitted, legacy v4 behaviour is
@@ -2478,7 +2482,9 @@ class TestArtifactKindStripsFilenameFromPrompt:
             inline,
             artifact_kind=TargetKind.COMMIT_MESSAGE,
         )
-        assert inline in user
+        assert "fix(parser): handle CRLF in evidence blocks" in user
+        assert "related to #foo" in user
+        assert "1 | fix(parser): handle CRLF in evidence blocks" in user
 
     def test_nonexistent_path_with_artifact_kind_falls_back_to_string(self, tmp_path):
         """A non-existent path with ``artifact_kind`` set must not raise;
@@ -2575,8 +2581,8 @@ class TestArtifactKindStripsFilenameFromPrompt:
         assert isinstance(captured["user"], str)
         rendered_prompt: str = captured["user"]  # type: ignore[assignment]
         assert body_quote in rendered_prompt
-        assert str(commit_path) not in rendered_prompt
-        assert commit_path.name not in rendered_prompt
+        assert str(commit_path) in rendered_prompt
+        assert commit_path.name in rendered_prompt
 
         # End result: PASS with content-grounded evidence (no fabrication).
         assert diag.status is Status.PASS
@@ -4302,8 +4308,155 @@ class TestMultiTargetPromptRendering:
         with pytest.raises(ValueError, match=r"path traversal"):
             llm_backend._parse_multi_targets(rule)
 
-    def test_prompt_version_constant_is_v6(self):
-        assert llm_backend.PROMPT_VERSION == "v6"
+    def test_prompt_version_constant_is_v7(self):
+        assert llm_backend.PROMPT_VERSION == "v7"
+
+
+class TestEvidenceRefsPrimaryContract:
+    """#268 — primary path validates refs and reconstructs quotes mechanically."""
+
+    _ENV = {"GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+
+    def test_single_target_refs_reconstruct_quotes(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "line one\nline two\nline three"
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded by middle lines.",
+                "supporting_evidence_refs": [
+                    {"target_id": None, "path": None, "line_start": 2, "line_end": 3}
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        data = diag.evidence[0].data
+        assert data["supporting_evidence_quotes"] == ["line two\nline three"]
+        assert data["supporting_evidence_refs"] == [
+            {"target_id": None, "path": None, "line_start": 2, "line_end": 3}
+        ]
+        assert data["supporting_evidence_spans"][0]["start_line"] == 2
+        assert data["supporting_evidence_spans"][0]["end_line"] == 3
+
+    def test_multi_target_refs_reconstruct_quotes(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_b = tmp_path / "b.md"
+        target_a.write_text("a1\na2\na3", encoding="utf-8")
+        target_b.write_text("b1\nb2\nb3", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "fail",
+                "primary_reason": "Cross-artifact check failed.",
+                "supporting_evidence_refs": [
+                    {"target_id": "alpha", "path": str(target_a), "line_start": 1, "line_end": 2},
+                    {"target_id": "beta", "path": str(target_b), "line_start": 3, "line_end": 3},
+                ],
+                "suggested_action": "Align both artifacts.",
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.FAIL
+        data = diag.evidence[0].data
+        assert data["supporting_evidence_quotes"] == ["a1\na2", "b3"]
+        assert data["supporting_evidence_quote_target_ids"] == ["alpha", "beta"]
+
+    @pytest.mark.parametrize(
+        ("judgment", "refs", "detail_fragment", "suggested_action"),
+        [
+            (
+                "pass",
+                [{"target_id": None, "path": None, "line_start": 1, "line_end": 9}],
+                "invalid range",
+                None,
+            ),
+            (
+                "pass",
+                [{"target_id": None, "path": None, "line_start": 3, "line_end": 2}],
+                "invalid range",
+                None,
+            ),
+            (
+                "pass",
+                [{"target_id": None, "path": None, "line_start": "x", "line_end": 2}],
+                "line_start",
+                None,
+            ),
+            ("pass", [], "must contain at least one entry", None),
+            ("fail", [], "must contain at least one entry", "Add evidence refs."),
+        ],
+    )
+    def test_invalid_single_target_refs_map_to_grader_error(
+        self, monkeypatch, judgment, refs, detail_fragment, suggested_action
+    ):
+        _patch_env(monkeypatch, self._ENV)
+        response = json.dumps(
+            {
+                "judgment": judgment,
+                "primary_reason": "x",
+                "supporting_evidence_refs": refs,
+                "suggested_action": suggested_action,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        diag = llm_backend.check(_semantic_rule(), "line one\nline two")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "invalid_evidence_reference"
+        assert diag.evidence[0].data["failure_mode"] == "grader_error"
+        assert detail_fragment in diag.evidence[0].data["detail"]
+
+    def test_unknown_target_id_maps_to_grader_error(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        target = tmp_path / "a.md"
+        target.write_text("a1\na2", encoding="utf-8")
+        rule = _multi_target_rule([{"id": "alpha", "kind": "documentation", "path": str(target)}])
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "x",
+                "supporting_evidence_refs": [
+                    {"target_id": "unknown", "path": str(target), "line_start": 1, "line_end": 1}
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "invalid_evidence_reference"
+        assert "unknown id" in diag.evidence[0].data["detail"]
+
+    def test_ref_based_output_in_json_and_verbose(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "alpha\nbeta\ngamma"
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_refs": [
+                    {"target_id": None, "path": None, "line_start": 2, "line_end": 2}
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        payload = json.loads(render_json([diag]))
+        assert payload["diagnostics"][0]["failure_mode"] is None
+        ev_data = payload["diagnostics"][0]["evidence"][0]["data"]
+        assert ev_data["supporting_evidence_refs"][0]["line_start"] == 2
+        verbose = render_text([diag], verbose=True)
+        assert 'evidence  : "beta"' in verbose
 
 
 class TestMultiTargetQuoteParsing:
