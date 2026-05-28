@@ -22,6 +22,29 @@
         "manifest": ".gate-keeper/dependency-manifest.yml",
         "timeout_seconds": 30
       }
+    },
+    {
+      "id": "repo-local-reference-scanner",
+      "title": "Repo-local references in text-bearing files must resolve and be classified",
+      "source": {
+        "path": "docs/dependency-gate-rules.json",
+        "line": 1,
+        "heading": "repo-local-reference-scanner"
+      },
+      "text": "Issue #269 slice 1. Walks the target text-bearing file (README / docs / config / rule file), extracts repo-local file/path/doc references, and emits deterministic findings for each category that fires: `broken_reference` (referenced path missing), `uncovered_reference` / `newly_introduced` (a new repo-local reference relative to baseline, not yet covered by a manifest edge), and `suspicious_broad` (glob, trailing slash, or bare top-level directory). Detection + reporting only; manifest-coverage enforcement and LLM-rubric narrowing are explicitly later slices.",
+      "kind": "external_check",
+      "severity": "warning",
+      "backend_hint": "external",
+      "confidence": "high",
+      "params": {
+        "tool": "command",
+        "argv": [
+          "python",
+          "scripts/dependency_gates/check_repo_refs.py"
+        ],
+        "manifest": ".gate-keeper/dependency-manifest.yml",
+        "timeout_seconds": 30
+      }
     }
   ]
 }

@@ -276,6 +276,67 @@ A single additional validator surfaces the shared logic that a core rule kind wo
 
 ---
 
+## 6.1. Repo-local reference scanner (issue #269, slice 1)
+
+A second `command`-adapter validator lives alongside `check_cli_reference.py`:
+`scripts/dependency_gates/check_repo_refs.py`. It is registered as the
+`repo-local-reference-scanner` rule in `docs/dependency-gate-rules.json`.
+
+The scanner walks one text-bearing target file (readme / docs / config /
+rule file), extracts repo-local references via
+`scripts/dependency_gates/_repo_ref_scan.py`, and classifies each one. It is
+deterministic-only: no LLM, no semantic inference, no manifest-coverage
+enforcement (that is a later slice — see #269 Layer 1).
+
+Recognised reference shapes (extractor):
+
+- Markdown inline link target `[text](path)` → `md_link`.
+- Markdown inline image target `![alt](path)` → `md_image`.
+- Markdown reference-style definition `[id]: path` → `md_ref_def`.
+- Single-backtick inline code span whose body matches a tracked path shape
+  (contains `/` AND either starts with a known top-level directory or
+  ends with a known file extension) → `inline_code`.
+- Bare path-like token prefixed with a known top-level directory
+  (`src/`, `docs/`, `scripts/`, `tests/`, `.github/`, `.gate-keeper/`) →
+  `bare_path`.
+
+URL-shaped targets (scheme prefix, `//host`, `mailto:`), pure in-page
+anchors (`#frag`), and fenced code blocks are intentionally ignored.
+
+Evidence vocabulary (validator), one entry per category that fires:
+
+- `broken_reference` — referenced repo-local path does not exist on disk.
+  Status: `fail`. Carries a `references` array of `{path, line, column, shape}`.
+- `uncovered_reference` — a repo-local reference appeared in the target,
+  the target itself is in the changed-file set, the reference path is not
+  co-changed alongside the target, and the reference is not already
+  recorded as a manifest edge endpoint. The data carries
+  `subkind: newly_introduced`. Status: `pass` (informational, slice 1).
+- `suspicious_broad` — reference shape is intentionally broad: glob
+  characters (`*` / `?`), trailing slash, or bare top-level directory
+  (`docs`, `src`, …). Status: `pass` (informational, slice 1).
+- `repo_refs_clean` — emitted when no finding category fires. Status: `pass`.
+- `scanner_not_applicable` — emitted when the target is not a text-bearing
+  file. Status: `pass`.
+
+Fail-closed (always `Status.UNAVAILABLE`):
+
+- `params_error` — empty `target` payload.
+- `target_unreadable` — target file missing or undecodable.
+- `manifest_invalid` — manifest load error (only when manifest is present).
+- `changed_file_source_unresolved` — `git diff` cannot resolve the base
+  ref. The scanner still emits any broken/broad findings; only the
+  newly-introduced category is skipped, and an explicit evidence entry
+  with this kind is appended so the consumer can distinguish "no new
+  refs" from "did not check".
+
+The validator runs at `severity: warning` in slice 1 (per the
+`docs/dogfooding.md` § "Promotion criteria" path). The broken-reference
+category produces `Status.FAIL` regardless; the other two deterministic
+categories stay informational until a future slice promotes them.
+
+---
+
 ## 7. Out of Scope
 
 This note settles slice 1. The following remain deferred:
