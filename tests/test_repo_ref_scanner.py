@@ -72,6 +72,36 @@ def test_ignores_in_page_anchors():
     assert refs == []
 
 
+def test_bare_path_lookbehind_excludes_markdown_link_text():
+    """Regression for sonnet review on #273 / #269.
+
+    Without ``[`` in ``_BARE_PATH_RE``'s lookbehind, the path-shaped fragment
+    inside Markdown link *text* (``[docs/old.md](docs/new.md)``) would be
+    re-extracted as a ``bare_path`` reference in addition to the correct
+    ``md_link``. When the text-side path no longer existed on disk (e.g.
+    after a rename) the validator emitted a spurious ``broken_reference``
+    → ``Status.FAIL`` on perfectly valid Markdown.
+    """
+    text = "[docs/old.md](docs/new.md)\n"
+    refs = scanner.extract_references(text)
+    assert len(refs) == 1, f"expected exactly one ref, got {refs}"
+    assert refs[0].shape == "md_link"
+    assert refs[0].path == "docs/new.md"
+
+
+def test_bare_path_lookbehind_excludes_external_link_text():
+    """Sibling regression: link text must not leak even when the URL is external.
+
+    The link target is an external URL (correctly ignored by the extractor),
+    but the link text contains a repo-shape path. The bare-path matcher must
+    still be blocked by the ``[`` lookbehind so the text fragment is not
+    surfaced as a ``broken_reference``.
+    """
+    text = "[docs/something](https://external.example.com)\n"
+    refs = scanner.extract_references(text)
+    assert refs == [], f"expected no refs (URL external, link text inert), got {refs}"
+
+
 def test_extracts_inline_code_with_known_prefix():
     text = "Edit `src/gate_keeper/cli.py` to add the flag.\n"
     refs = scanner.extract_references(text)

@@ -106,16 +106,22 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)`(?P<body>[^`\n]+?)`(?!`)")
 
 # A bare path-like token: starts with a known top-level directory, possibly
 # trailed by additional path segments. The lookbehind/lookahead keep us from
-# matching path-fragments embedded in larger identifiers.
+# matching path-fragments embedded in larger identifiers. The ``[`` in the
+# lookbehind specifically blocks the bare-path matcher from firing inside
+# Markdown link *text* (``[docs/old.md](docs/new.md)``) — without it the
+# link-text fragment would be re-extracted as a `bare_path` reference and
+# could produce a spurious ``broken_reference`` FAIL when the text-side
+# path no longer exists (e.g. after a rename).
 _BARE_PATH_RE = re.compile(
-    r"(?<![\w./])(?P<path>(?:" + "|".join(re.escape(d) for d in KNOWN_TOP_LEVEL_DIRS) + r")/[\w./*?-]*)"
+    r"(?<![\w./\[])(?P<path>(?:" + "|".join(re.escape(d) for d in KNOWN_TOP_LEVEL_DIRS) + r")/[\w./*?-]*)"
 )
 
 # Fenced code block boundary (``` or ~~~ with optional info string).
 _FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>```+|~~~+)")
 
-# YAML/JSON-ish front-matter delimiter ("---" on its own line).
-_YAML_FENCE_RE = re.compile(r"^---\s*$")
+# TODO(#269-later): strip YAML front-matter (lines between a leading ``---``
+# and the matching closing ``---``) before scanning. Deferred to a later
+# slice; the first slice does not yet skip front-matter content.
 
 
 def extract_references(text: str, *, source_path: str | None = None) -> list[Reference]:
