@@ -64,8 +64,13 @@ fail-closed behavior: an unconfigured evaluator must not silently pass rules.
 file at:
 
 ```
-/home/vscode/.config/hermes-projects/gate-keeper.env
+$HOME/.config/hermes-projects/gate-keeper.env
 ```
+
+The path resolves via `Path.home()` at runtime, so it matches the
+developer's home directory in a devcontainer (`/home/vscode/...`),
+on a hosted CI runner (`/home/runner/...`), or on a bare developer
+machine.
 
 It is loaded explicitly via `python-dotenv`'s `dotenv_values` into a
 process-local dict; **`os.environ` is intentionally not consulted**. This is
@@ -132,6 +137,25 @@ Behavior:
 
 `gate-keeper diagnose` surfaces the resolved model and whether it came
 from an override or the default.
+
+#### Strict-mode override (`GATE_KEEPER_REQUIRE_MODEL`)
+
+Opt-in via the same dotenv. When set to a truthy value (`1`, `true`,
+`yes`; case-insensitive), an unset / blank `GATE_KEEPER_<PROVIDER>_MODEL`
+raises an internal `ModelConfigurationError` that the backend surfaces
+as:
+
+- `Status.UNAVAILABLE`
+- `evidence[0].kind = "provider_unconfigured"`
+- `evidence[0].data.failure_mode = "model_unconfigured"`
+- `evidence[0].data.provider`, `evidence[0].data.override_key`
+- `remediation` names the override key and the strict-mode opt-out.
+
+Intended use is CI environments whose provider key is allow-listed to a
+specific model — the silent fallback would otherwise be rejected by the
+provider and surface as opaque `provider_error` on every rule, masking
+the real misconfiguration (issue #266 / #264). Strict mode is off by
+default; existing developer dotenvs are unaffected.
 
 ### Restricted API key setup
 
@@ -204,8 +228,22 @@ introduced in #131) demonstrates the pattern:
   run: |
     set +x
     umask 077
+
+    # Source the non-secret dogfooding config (#266). The model name
+    # lives in a tracked file rather than a workflow literal so updating
+    # it is a PR diff, not an Actions UI tweak.
+    # shellcheck disable=SC1091
+    . .github/dogfooding-config.env
+
+    # Fail fast on missing / blank model config.
+    if [ -z "${GATE_KEEPER_OPENAI_MODEL:-}" ]; then
+      echo "::error::GATE_KEEPER_OPENAI_MODEL is unset or blank in .github/dogfooding-config.env" >&2
+      exit 1
+    fi
+
     mkdir -p "$HOME/.config/hermes-projects"
-    printf 'GATE_KEEPER_LLM_PROVIDER=openai\nGATE_KEEPER_OPENAI_MODEL=gpt-5.4\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
+    printf 'GATE_KEEPER_LLM_PROVIDER=openai\nGATE_KEEPER_OPENAI_MODEL=%s\nGATE_KEEPER_REQUIRE_MODEL=1\nOPENAI_API_KEY=%s\n' \
+      "$GATE_KEEPER_OPENAI_MODEL" "$OPENAI_API_KEY" \
       > "$HOME/.config/hermes-projects/gate-keeper.env"
     chmod 600 "$HOME/.config/hermes-projects/gate-keeper.env"
 ```
@@ -215,11 +253,28 @@ The backend's default dotenv path is computed at runtime as
 GitHub-hosted runners `$HOME=/home/runner`; in a devcontainer it is
 typically `/home/vscode`. The projection target MUST follow `$HOME` so
 the backend's read path matches the workflow's write path on every host
-(issue #261). `GATE_KEEPER_OPENAI_MODEL` is pinned because the
-repository's restricted CI key is allow-listed to a specific model only;
-without it the backend default would be rejected by the provider and
-surface as `provider_error` on every rule (issue #264). The model name
-is not a secret.
+(issue #261).
+
+`GATE_KEEPER_OPENAI_MODEL` is sourced from the tracked file
+`.github/dogfooding-config.env` (#266) because the repository's
+restricted CI key is allow-listed to a specific model only; without
+that override the backend default (`gpt-4o-mini`) would be rejected by
+the provider and surface as `provider_error` on every rule (issue
+#264). The model name is not a secret — keeping it in a reviewable
+in-repo file rather than a workflow literal or Actions variable means a
+model update is a normal PR diff, with no out-of-tree GUI state to
+maintain.
+
+`GATE_KEEPER_REQUIRE_MODEL=1` is projected into the runtime dotenv
+alongside the model name (#266). It switches the backend's
+`_resolve_model` into strict mode: if `GATE_KEEPER_OPENAI_MODEL` (or
+`GATE_KEEPER_ANTHROPIC_MODEL` for the anthropic provider) is unset or
+blank, the backend emits `provider_unconfigured` with
+`evidence[0].data.failure_mode = "model_unconfigured"` and names the
+override key in the remediation string, rather than silently falling
+back to the source default. The strict-mode key is opt-in via dotenv —
+no developer flow that omits it changes behaviour. Recognised truthy
+values: `1`, `true`, `yes` (case-insensitive).
 
 Constraints to preserve when adopting this pattern in another workflow:
 

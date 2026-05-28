@@ -407,6 +407,164 @@ class TestResolveModel:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_model — strict-mode guard (#266)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModelStrictMode:
+    """Issue #266 — opt-in strict mode rejects blank/missing model override.
+
+    The strict-mode guard exists for CI environments whose restricted
+    provider key only accepts a specific model. Without strict mode,
+    silently falling back to the source default would be rejected by the
+    provider and surface as opaque ``provider_error`` on every rule.
+    With strict mode, the backend reports
+    ``provider_unconfigured`` / ``failure_mode="model_unconfigured"``
+    naming the dotenv key to fix.
+
+    The default (non-strict) behaviour is preserved byte-for-byte — see
+    ``test_default_silent_fallback_preserved`` for the explicit
+    regression pin.
+    """
+
+    def test_strict_mode_raises_on_blank_openai_override(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "   ",
+            "GATE_KEEPER_REQUIRE_MODEL": "1",
+        }
+        with pytest.raises(llm_backend.ModelConfigurationError) as excinfo:
+            llm_backend._resolve_model("openai", env)
+        assert excinfo.value.provider == "openai"
+        assert excinfo.value.override_key == "GATE_KEEPER_OPENAI_MODEL"
+
+    def test_strict_mode_raises_on_unset_openai_override(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_REQUIRE_MODEL": "1",
+        }
+        with pytest.raises(llm_backend.ModelConfigurationError) as excinfo:
+            llm_backend._resolve_model("openai", env)
+        assert excinfo.value.provider == "openai"
+        assert excinfo.value.override_key == "GATE_KEEPER_OPENAI_MODEL"
+
+    def test_strict_mode_raises_on_blank_anthropic_override(self):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "GATE_KEEPER_ANTHROPIC_MODEL": "",
+            "GATE_KEEPER_REQUIRE_MODEL": "1",
+        }
+        with pytest.raises(llm_backend.ModelConfigurationError) as excinfo:
+            llm_backend._resolve_model("anthropic", env)
+        assert excinfo.value.provider == "anthropic"
+        assert excinfo.value.override_key == "GATE_KEEPER_ANTHROPIC_MODEL"
+
+    def test_strict_mode_passes_through_non_blank_override(self):
+        """A real override + strict mode returns the override (no false positive)."""
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "gpt-5.4",
+            "GATE_KEEPER_REQUIRE_MODEL": "1",
+        }
+        assert llm_backend._resolve_model("openai", env) == "gpt-5.4"
+
+    @pytest.mark.parametrize("flag", ["1", "true", "TRUE", "Yes", "yes"])
+    def test_strict_mode_truthy_values_accepted(self, flag):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_REQUIRE_MODEL": flag,
+        }
+        with pytest.raises(llm_backend.ModelConfigurationError):
+            llm_backend._resolve_model("openai", env)
+
+    @pytest.mark.parametrize("flag", ["0", "false", "no", "", "FALSE", "off"])
+    def test_strict_mode_falsy_values_keep_default_fallback(self, flag):
+        """Falsy / unknown values must preserve the historical silent fallback."""
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_REQUIRE_MODEL": flag,
+        }
+        assert llm_backend._resolve_model("openai", env) == llm_backend.OPENAI_DEFAULT_MODEL
+
+    def test_default_silent_fallback_preserved(self):
+        """Regression pin for #266: without GATE_KEEPER_REQUIRE_MODEL, blank
+        override still returns the source default constant. Non-CI developer
+        flows must keep their historical behaviour byte-for-byte.
+        """
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "",
+        }
+        assert llm_backend._resolve_model("openai", env) == llm_backend.OPENAI_DEFAULT_MODEL
+
+    def test_require_model_strict_helper(self):
+        assert llm_backend._require_model_strict({}) is False
+        assert llm_backend._require_model_strict({"GATE_KEEPER_REQUIRE_MODEL": ""}) is False
+        assert llm_backend._require_model_strict({"GATE_KEEPER_REQUIRE_MODEL": "0"}) is False
+        assert llm_backend._require_model_strict({"GATE_KEEPER_REQUIRE_MODEL": "1"}) is True
+        assert llm_backend._require_model_strict({"GATE_KEEPER_REQUIRE_MODEL": "  yes  "}) is True
+        assert llm_backend._require_model_strict({"GATE_KEEPER_REQUIRE_MODEL": "TRUE"}) is True
+
+    def test_check_surfaces_model_unconfigured_diagnostic(self, monkeypatch, tmp_path):
+        """End-to-end: strict mode + blank model → provider_unconfigured
+        with failure_mode=model_unconfigured."""
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai-test",
+            "GATE_KEEPER_OPENAI_MODEL": "",
+            "GATE_KEEPER_REQUIRE_MODEL": "1",
+        }
+        _patch_env(monkeypatch, env)
+
+        # Provider helper must NOT be invoked when model config fails fast.
+        # Patch it to a sentinel that raises if called so a regression
+        # surfaces as a test failure rather than a silent network attempt.
+        def _explode(*_a, **_k):
+            raise AssertionError("provider helper called despite model misconfiguration")
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _explode)
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _explode)
+
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_unconfigured"
+        data = diag.evidence[0].data
+        assert data["failure_mode"] == "model_unconfigured"
+        assert data["provider"] == "openai"
+        assert data["override_key"] == "GATE_KEEPER_OPENAI_MODEL"
+        assert "GATE_KEEPER_OPENAI_MODEL" in (diag.remediation or "")
+
+    def test_check_surfaces_model_unconfigured_for_anthropic(self, monkeypatch, tmp_path):
+        env = {
+            "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "GATE_KEEPER_REQUIRE_MODEL": "yes",
+        }
+        _patch_env(monkeypatch, env)
+
+        def _explode(*_a, **_k):
+            raise AssertionError("provider helper called despite model misconfiguration")
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _explode)
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _explode)
+
+        diag = llm_backend.check(_semantic_rule(), tmp_path)
+        assert diag.status is Status.UNAVAILABLE
+        assert diag.evidence[0].kind == "provider_unconfigured"
+        data = diag.evidence[0].data
+        assert data["failure_mode"] == "model_unconfigured"
+        assert data["provider"] == "anthropic"
+        assert data["override_key"] == "GATE_KEEPER_ANTHROPIC_MODEL"
+
+
+# ---------------------------------------------------------------------------
 # Provider dispatch — Anthropic (#67: updated to structured schema)
 # ---------------------------------------------------------------------------
 
