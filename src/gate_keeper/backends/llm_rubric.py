@@ -704,6 +704,63 @@ def _is_configured(env: dict[str, str] | None = None) -> bool:
     return bool(env.get(key_var))
 
 
+class ModelConfigurationError(RuntimeError):
+    """Raised when strict-mode resolution finds a blank / missing model override (#266).
+
+    Strict mode is opt-in via the dotenv key ``GATE_KEEPER_REQUIRE_MODEL``
+    (truthy values: ``1``, ``true``, ``yes``; case-insensitive). It exists
+    so CI environments whose provider key is allow-listed to a specific
+    model can fail fast with a clear diagnostic when the model override is
+    unset or blank, rather than silently falling back to the source
+    default (which the provider would then reject as
+    :data:`provider_error` on every rule, masking the real
+    misconfiguration).
+
+    Outside strict mode the historical silent fallback to the source
+    default constant is preserved byte-for-byte — non-CI developer flows
+    that rely on the default ``gpt-4o-mini`` / ``claude-haiku-4-5`` are
+    unaffected.
+
+    Attributes
+    ----------
+    provider:
+        Provider name (``"openai"`` or ``"anthropic"``) whose model override
+        was unset / blank.
+    override_key:
+        The exact dotenv key that was checked
+        (``GATE_KEEPER_OPENAI_MODEL`` or ``GATE_KEEPER_ANTHROPIC_MODEL``).
+    """
+
+    def __init__(self, provider: str, override_key: str) -> None:
+        super().__init__(
+            f"{override_key} is unset or blank in the dotenv but "
+            f"GATE_KEEPER_REQUIRE_MODEL is set; refusing to silently fall back "
+            f"to the source default for provider {provider!r}."
+        )
+        self.provider = provider
+        self.override_key = override_key
+
+
+_STRICT_MODEL_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def _require_model_strict(env: dict[str, str]) -> bool:
+    """Return ``True`` iff ``GATE_KEEPER_REQUIRE_MODEL`` is set truthy (#266).
+
+    Strict-mode opt-in lives in the dotenv (not ``os.environ``) to match
+    the rest of the backend's auth surface — the same single-snapshot
+    dict that decides ``_is_configured`` also decides whether
+    :func:`_resolve_model` falls back silently or raises.
+
+    Recognised truthy values (case-insensitive): ``1``, ``true``, ``yes``.
+    Anything else — including ``0``, ``false``, ``no``, an empty string,
+    or a missing key — is treated as opt-out so existing dotenvs keep
+    their historical silent-fallback behaviour.
+    """
+    raw = env.get("GATE_KEEPER_REQUIRE_MODEL", "").strip().lower()
+    return raw in _STRICT_MODEL_TRUTHY
+
+
 def _resolve_model(provider: str, env: dict[str, str]) -> str:
     """Return the model identifier to use for *provider*.
 
@@ -711,12 +768,25 @@ def _resolve_model(provider: str, env: dict[str, str]) -> str:
     and non-empty (after stripping); otherwise falls back to the source
     default constant. Empty / whitespace-only overrides are ignored so a
     blank line in the dotenv does not silently produce an invalid model id.
+
+    Strict mode (#266): when ``GATE_KEEPER_REQUIRE_MODEL`` is truthy in
+    the same dotenv snapshot, a missing / blank override raises
+    :class:`ModelConfigurationError` instead of falling back. This exists
+    for CI environments whose restricted provider key only accepts a
+    specific model — silent fallback there manifests as
+    ``provider_error`` on every rule, masking the real misconfiguration.
+    Non-strict callers (the default, all developer flows) keep the
+    historical fallback behaviour byte-for-byte.
     """
     if provider == "anthropic":
         override = env.get("GATE_KEEPER_ANTHROPIC_MODEL", "").strip()
+        if not override and _require_model_strict(env):
+            raise ModelConfigurationError("anthropic", "GATE_KEEPER_ANTHROPIC_MODEL")
         return override or ANTHROPIC_DEFAULT_MODEL
     if provider == "openai":
         override = env.get("GATE_KEEPER_OPENAI_MODEL", "").strip()
+        if not override and _require_model_strict(env):
+            raise ModelConfigurationError("openai", "GATE_KEEPER_OPENAI_MODEL")
         return override or OPENAI_DEFAULT_MODEL
     raise ValueError(f"unsupported provider: {provider!r}")
 
@@ -2474,6 +2544,50 @@ def _unavailable_unconfigured(rule: Rule, rubric_input: dict[str, Any]) -> Diagn
     )
 
 
+def _unavailable_model_unconfigured(
+    rule: Rule,
+    rubric_input: dict[str, Any],
+    exc: ModelConfigurationError,
+) -> Diagnostic:
+    """Diagnostic for strict-mode model-config failures (#266).
+
+    Distinct from :func:`_unavailable_unconfigured` so an operator can
+    tell the missing-provider case ("no key, no provider") from the
+    missing-model case ("provider configured but the model override is
+    blank under strict mode"). The evidence carries
+    ``failure_mode="model_unconfigured"`` and the override key name so a
+    PR comment or log can point straight at the dotenv line to fix.
+    """
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=(
+            f"LLM rubric backend: {exc.override_key} is unset or blank under "
+            "strict-mode (GATE_KEEPER_REQUIRE_MODEL=1); skipping rule."
+        ),
+        evidence=[
+            Evidence(
+                kind="provider_unconfigured",
+                data={
+                    **rubric_input,
+                    "failure_mode": "model_unconfigured",
+                    "provider": exc.provider,
+                    "override_key": exc.override_key,
+                },
+            )
+        ],
+        remediation=(
+            f"Set {exc.override_key} to a non-blank value in the dotenv "
+            "(see docs/llm-rubric.md — Model selection / CI exception). "
+            "Or unset GATE_KEEPER_REQUIRE_MODEL to opt out of strict mode "
+            "and accept the backend's source default."
+        ),
+    )
+
+
 def _unavailable_provider_error(
     rule: Rule,
     rubric_input: dict[str, Any],
@@ -2645,7 +2759,14 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
         return _unavailable_unconfigured(rule, rubric_input)
 
     provider = env["GATE_KEEPER_LLM_PROVIDER"]
-    model = _resolve_model(provider, env)
+    try:
+        model = _resolve_model(provider, env)
+    except ModelConfigurationError as exc:
+        # Strict-mode model misconfiguration (#266). Surface as
+        # ``provider_unconfigured`` with ``failure_mode="model_unconfigured"``
+        # so the operator sees the override key by name rather than an
+        # opaque ``provider_error`` on every rule.
+        return _unavailable_model_unconfigured(rule, rubric_input, exc)
     system, user = _build_prompt(rule, target, artifact_kind)
 
     try:
@@ -2994,7 +3115,13 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
         return _unavailable_unconfigured(rule, rubric_input)
 
     provider = env["GATE_KEEPER_LLM_PROVIDER"]
-    model = _resolve_model(provider, env)
+    try:
+        model = _resolve_model(provider, env)
+    except ModelConfigurationError as exc:
+        # Strict-mode model misconfiguration (#266) — same dispatch as
+        # the single-strategy path; the consensus call would otherwise
+        # surface as `provider_error` on every judge call.
+        return _unavailable_model_unconfigured(rule, rubric_input, exc)
 
     # Resolve panel size from rule.params, clamp to valid range.
     raw_panel_size = rule.params.get("consensus_panel_size", _CONSENSUS_PANEL_SIZE_DEFAULT)
@@ -3548,7 +3675,13 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
         return _unavailable_unconfigured(rule, rubric_input)
 
     provider = env["GATE_KEEPER_LLM_PROVIDER"]
-    model = _resolve_model(provider, env)
+    try:
+        model = _resolve_model(provider, env)
+    except ModelConfigurationError as exc:
+        # Strict-mode model misconfiguration (#266) — review strategy
+        # bails before the primary call so neither pass hits the
+        # provider with an empty model id.
+        return _unavailable_model_unconfigured(rule, rubric_input, exc)
 
     # ---- Pass 1: primary judge (same prompt as single strategy) ----
     system, user = _build_prompt(rule, target, artifact_kind)

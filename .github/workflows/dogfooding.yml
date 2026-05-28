@@ -32,6 +32,17 @@
 #     It does NOT use `echo $VAR` or `set -x`. The dotenv file is
 #     written under `umask 077` (mode 600) and never uploaded as a
 #     workflow artifact.
+#
+# Non-secret configuration (post-#266):
+#   - The model name (`GATE_KEEPER_OPENAI_MODEL`) is sourced from the
+#     tracked file `.github/dogfooding-config.env`, NOT a workflow
+#     literal. Updating the model is a normal PR diff review (see that
+#     file's header for the CI-key allow-list coupling).
+#   - Strict-mode key `GATE_KEEPER_REQUIRE_MODEL=1` is projected into
+#     the runtime dotenv so a blank or missing model value fails fast
+#     with a clear diagnostic rather than silently falling back to the
+#     backend default (`gpt-4o-mini`), which the restricted CI key
+#     would reject as `provider_error` on every rule.
 
 name: dogfooding
 
@@ -93,20 +104,44 @@ jobs:
           # `provider_unconfigured` (issue #261).
           set +x
           umask 077
+
+          # Source the non-secret dogfooding config (#266).  The model
+          # name lives in a tracked file rather than a workflow literal
+          # so updating it is a PR diff, not an Actions UI tweak.  The
+          # `. <file>` sourcing carries `GATE_KEEPER_OPENAI_MODEL` into
+          # this step's environment; the API key remains a secret.
+          # shellcheck disable=SC1091
+          . .github/dogfooding-config.env
+
+          # Fail fast on missing / blank model config so we do not
+          # project an incomplete dotenv that the backend would only
+          # surface as `provider_error` per rule (#266 strict guard).
+          if [ -z "${GATE_KEEPER_OPENAI_MODEL:-}" ]; then
+            echo "::error::GATE_KEEPER_OPENAI_MODEL is unset or blank in .github/dogfooding-config.env" >&2
+            exit 1
+          fi
+
           mkdir -p "$HOME/.config/hermes-projects"
           # Log the projection target BEFORE writing so a missing/wrong
           # parent directory is obvious; never log the dotenv contents.
           echo "dotenv projection target: $HOME/.config/hermes-projects/gate-keeper.env"
+          echo "model (from .github/dogfooding-config.env): $GATE_KEEPER_OPENAI_MODEL"
           ls -ld "$HOME/.config/hermes-projects" || true
           # printf + redirect — does not echo via `echo $VAR` and is not
           # affected by `-x` since we explicitly disabled it. The dotenv
           # file inherits the 077 umask (mode 600).
-          # `GATE_KEEPER_OPENAI_MODEL=gpt-5.4` is hard-pinned here because
-          # the CI-side restricted OpenAI key is allow-listed to gpt-5.4
-          # only; the backend default (`gpt-4o-mini`) would be rejected by
-          # the provider and surface as `provider_error` on every rule
-          # (issue #264). The model name is not a secret.
-          printf 'GATE_KEEPER_LLM_PROVIDER=openai\nGATE_KEEPER_OPENAI_MODEL=gpt-5.4\nOPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" \
+          # `GATE_KEEPER_OPENAI_MODEL` is sourced from
+          # `.github/dogfooding-config.env` because the CI-side restricted
+          # OpenAI key is allow-listed to a specific model; the backend
+          # default (`gpt-4o-mini`) would be rejected by the provider and
+          # surface as `provider_error` on every rule (issue #264).
+          # `GATE_KEEPER_REQUIRE_MODEL=1` switches the backend's
+          # `_resolve_model` into strict mode so a blank/missing model
+          # value here fails closed with a clear `provider_unconfigured`
+          # / `model_unconfigured` diagnostic rather than silently
+          # falling back (issue #266). The model name is not a secret.
+          printf 'GATE_KEEPER_LLM_PROVIDER=openai\nGATE_KEEPER_OPENAI_MODEL=%s\nGATE_KEEPER_REQUIRE_MODEL=1\nOPENAI_API_KEY=%s\n' \
+            "$GATE_KEEPER_OPENAI_MODEL" "$OPENAI_API_KEY" \
             > "$HOME/.config/hermes-projects/gate-keeper.env"
           chmod 600 "$HOME/.config/hermes-projects/gate-keeper.env"
           # Post-write confirmation: file exists, mode 600, owned by runner.
