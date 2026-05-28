@@ -487,6 +487,7 @@ verdict is rejected as ungrounded).  Failure modes recorded in
 | Failure | `status` | `evidence[0].kind` | `data.failure_mode` |
 | --- | --- | --- | --- |
 | File missing or provider unset | `unavailable` | `provider_unconfigured` | n/a |
+| Blank/missing model under strict mode (#266) | `unavailable` | `provider_unconfigured` | `model_unconfigured` |
 | SDK/HTTP error, timeout, etc. | `unavailable` | `provider_error` | exception class name |
 | Response is not the expected JSON shape | `unavailable` | `provider_error` | `unparseable_response` |
 | Quotes not substrings of artifact (#172) | `unsupported` | `llm_quote_fabrication` | n/a (offending quotes in `data.fabricated_quotes`) |
