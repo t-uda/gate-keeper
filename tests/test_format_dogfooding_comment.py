@@ -364,22 +364,52 @@ def test_provider_error_detail_is_truncated_at_renderer(tmp_path: Path) -> None:
 
 
 def test_provider_error_no_openai_key_leakage(tmp_path: Path) -> None:
-    """Rendered output MUST NOT contain literal ``OPENAI_API_KEY`` or ``sk-`` (#263).
+    """Renderer MUST NOT introduce ``OPENAI_API_KEY`` / ``sk-`` on its own (#263).
 
-    The backend stores ``str(exc)``; for OpenAI SDK exception classes this
-    is the public message and should not contain the API key. This guard
-    catches any future regression — e.g. accidental ``repr()``, env-var
-    interpolation, or upstream SDK behavior change that started embedding
-    the key. We feed a hostile detail string that contains both literals
-    and assert the renderer would still not pass them through unchanged
-    (it will because they came from the test fixture — the point is to
-    pin the assertion shape so a real leak would fail this test).
+    Threat model — what this test actually guards and what it does NOT:
+
+    - The renderer is **intentionally pass-through**: it joins ``provider``,
+      ``failure_mode``, and ``detail`` as-is (modulo length truncation and
+      Markdown-pipe escaping). It does NOT sanitize the strings.
+    - The **real defense against secret leakage** is upstream in
+      ``_unavailable_provider_error`` (``src/gate_keeper/backends/llm_rubric.py``):
+      it stores ``str(exc)`` (not ``repr(exc)``) of the SDK exception. For
+      OpenAI SDK exception classes (``AuthenticationError``,
+      ``PermissionDeniedError``, ``BadRequestError``, ``RateLimitError``,
+      etc.) ``str(exc)`` is the public error message and does NOT contain
+      the API key.
+    - This test pins the **renderer-injection guard**: with a realistic
+      (non-hostile) fixture the rendered output never contains
+      ``OPENAI_API_KEY`` or ``sk-``. If the renderer ever started
+      interpolating environment variables, attaching debug context that
+      includes the env, etc., this would catch it.
+    - The companion assertion on a hostile fixture **documents the
+      pass-through behavior**: if the upstream evidence-capture ever
+      regressed (e.g. switched to ``repr(exc)``, or the SDK started
+      embedding the key in ``str(exc)``), the renderer would faithfully
+      render the leaked substring. That regression must be caught
+      upstream, not here.
+
+    Cross-reference: ``tests/test_llm_rubric_backend.py`` should pin
+    the upstream contract that ``_unavailable_provider_error`` uses
+    ``str(exc)`` (a separate test surface, out of scope for #263).
     """
-    # Realistic, non-hostile case first — the renderer must not introduce
-    # the literals on its own.
+    # (1) Renderer-injection guard — the realistic case.
     out = _run(tmp_path, {"diagnostics": [_diag_provider_error()]})
     assert "OPENAI_API_KEY" not in out
     assert "sk-" not in out
+
+    # (2) Pass-through documentation — hostile fixture confirms the
+    # renderer does not sanitize. If a leaked substring ever arrives in
+    # `detail`, it will render verbatim. Upstream `_unavailable_provider_error`
+    # is the real defense; this assertion exists so a future change that
+    # adds renderer-side scrubbing must be deliberate (it will break this
+    # assertion and force the author to document the new threat model).
+    hostile_detail = "OPENAI_API_KEY=sk-proj-deadbeef0123456789 surfaced in exception"
+    hostile = _diag_provider_error(detail=hostile_detail)
+    out_hostile = _run(tmp_path, {"diagnostics": [hostile]})
+    assert "OPENAI_API_KEY" in out_hostile
+    assert "sk-proj-deadbeef" in out_hostile
 
 
 def test_provider_error_has_no_forbidden_wording(tmp_path: Path) -> None:

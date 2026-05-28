@@ -150,7 +150,14 @@ def _provider_error_reason(diag: dict[str, Any]) -> str | None:
             tail_segments.append(failure_mode)
         if detail:
             # Re-truncate detail BEFORE joining so the cap applies to the
-            # detail snippet itself, not the whole composite string.
+            # detail snippet itself, not the whole composite string. The cap
+            # is on the **pre-escape** length: ``_safe_truncate`` later
+            # escapes ``|`` to ``\|`` for Markdown-table safety, which can
+            # extend a detail full of pipes from 160 to ~320 chars in the
+            # final cell. In practice ``str(exc)`` for OpenAI SDK
+            # exceptions does not contain pipes, so the approximation is
+            # accepted (cosmetic-only; not a correctness or secret-safety
+            # concern).
             if len(detail) > _PROVIDER_ERROR_DETAIL_LIMIT:
                 detail = detail[: _PROVIDER_ERROR_DETAIL_LIMIT - 1].rstrip() + "..."
             tail_segments.append(detail)
