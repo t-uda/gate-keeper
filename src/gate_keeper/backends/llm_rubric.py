@@ -983,8 +983,7 @@ def _render_multi_target_block(specs: list[MultiTargetSpec], texts: dict[str, st
         text = texts.get(spec.id, "")
         path_line = f"Path: {spec.path}\n\n" if spec.path is not None else "Path: null\n\n"
         sections.append(
-            f"### Target {spec.id} (kind: {spec.kind.value})\n\n"
-            f"{path_line}{_render_numbered_lines(text)}\n"
+            f"### Target {spec.id} (kind: {spec.kind.value})\n\n{path_line}{_render_numbered_lines(text)}\n"
         )
     return "\n".join(sections)
 
@@ -1763,8 +1762,8 @@ def _resolve_evidence_artifacts(
 
 
 def _render_numbered_artifact_text(artifact: EvidenceArtifact) -> str:
-    """Return optional path metadata + numbered text block for one artifact."""
-    header = f"Path: {artifact.path}\n\n" if artifact.path else ""
+    """Return path metadata + numbered text block for one artifact."""
+    header = f"Path: {artifact.path}\n\n" if artifact.path is not None else "Path: null\n\n"
     return f"{header}{_render_numbered_lines(artifact.text)}"
 
 
@@ -2242,7 +2241,13 @@ def _quote_span_from_line_range(
     lines_plain = artifact.lines
     start_offset = sum(len(line) for line in lines_keepends[: line_start - 1])
     end_offset = sum(len(line) for line in lines_keepends[:line_end])
-    if end_offset > start_offset and artifact.text and artifact.text[end_offset - 1 : end_offset] == "\n":
+    # Trim trailing line-break bytes so CRLF/LF artifacts map to the same
+    # quote boundary as reconstructed line-joined evidence text.
+    while (
+        end_offset > start_offset
+        and artifact.text
+        and artifact.text[end_offset - 1 : end_offset] in ("\n", "\r")
+    ):
         end_offset -= 1
     end_line_text = lines_plain[line_end - 1]
     return QuoteSpan(
@@ -2295,9 +2300,7 @@ def _validate_and_reconstruct_evidence_refs(
                 [],
                 [],
                 InvalidEvidenceReference(
-                    detail=(
-                        f"supporting_evidence_refs[{i}]: expected object, got {type(entry).__name__}."
-                    ),
+                    detail=(f"supporting_evidence_refs[{i}]: expected object, got {type(entry).__name__}."),
                     refs_raw=refs_raw,
                 ),
             )
@@ -2778,9 +2781,7 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
             **strategy_meta,
         }
         if len(artifacts) > 1:
-            evidence_data["supporting_evidence_quote_target_ids"] = [
-                ref["target_id"] for ref in refs_payload
-            ]
+            evidence_data["supporting_evidence_quote_target_ids"] = [ref["target_id"] for ref in refs_payload]
         evidence = Evidence(kind="llm_judgment", data=evidence_data)
         if status is Status.PASS:
             return Diagnostic(
@@ -3005,7 +3006,7 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
 
     system, user = _build_prompt(rule, target, artifact_kind)
     artifacts = _resolve_evidence_artifacts(rule, target, artifact_kind)
-    artifact_text = _resolve_artifact_text(target, artifact_kind)
+    artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
 
     # --- Run N independent provider calls ---
     judge_results: list[dict[str, object]] = []
@@ -3654,7 +3655,7 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
                 detail=primary_refs_error.detail,
             )
     elif primary_parsed.judgment in ("pass", "fail"):
-        artifact_text = _resolve_artifact_text(target, artifact_kind)
+        artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
         fabricated = _find_fabricated_quotes(primary_parsed.supporting_evidence_quotes, artifact_text)
         if fabricated:
             return Diagnostic(

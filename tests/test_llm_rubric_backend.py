@@ -2485,6 +2485,7 @@ class TestArtifactKindStripsFilenameFromPrompt:
         assert "fix(parser): handle CRLF in evidence blocks" in user
         assert "related to #foo" in user
         assert "1 | fix(parser): handle CRLF in evidence blocks" in user
+        assert "Path: null" in user
 
     def test_nonexistent_path_with_artifact_kind_falls_back_to_string(self, tmp_path):
         """A non-existent path with ``artifact_kind`` set must not raise;
@@ -4457,6 +4458,89 @@ class TestEvidenceRefsPrimaryContract:
         assert ev_data["supporting_evidence_refs"][0]["line_start"] == 2
         verbose = render_text([diag], verbose=True)
         assert 'evidence  : "beta"' in verbose
+
+    def test_crlf_ref_span_excludes_dangling_carriage_return(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        artifact = "alpha\r\nbeta\r\n"
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_refs": [
+                    {"target_id": None, "path": None, "line_start": 1, "line_end": 2}
+                ],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        diag = llm_backend.check(_semantic_rule(), artifact)
+        assert diag.status is Status.PASS
+        span = diag.evidence[0].data["supporting_evidence_spans"][0]
+        # CRLF boundary must not leave a dangling '\r' at end of span.
+        assert artifact[span["end_offset"] - 1] == "a"
+        assert span["end_line"] == 2
+
+
+class TestLegacyQuoteFallbackRuleAwareGrounding:
+    """#268 fallback path should still ground against prompt-visible multi-target corpus."""
+
+    _ENV = {"GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+
+    def test_consensus_legacy_quote_fallback_uses_multi_target_grounding(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_b = tmp_path / "b.md"
+        target_a.write_text("alpha quote substring here.", encoding="utf-8")
+        target_b.write_text("beta quote substring here.", encoding="utf-8")
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_quotes": ["alpha quote substring"],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        rule = dataclasses.replace(
+            rule, params={**rule.params, "strategy": "consensus", "consensus_panel_size": 2}
+        )
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+        assert diag.evidence[0].data["llm_strategy"] == "consensus"
+
+    def test_review_legacy_quote_fallback_uses_multi_target_grounding(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_b = tmp_path / "b.md"
+        target_a.write_text("alpha quote substring here.", encoding="utf-8")
+        target_b.write_text("beta quote substring here.", encoding="utf-8")
+        primary_response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_quotes": ["alpha quote substring"],
+                "suggested_action": None,
+            }
+        )
+        reviewer_response = json.dumps({"review_verdict": "agree", "review_reason": "Grounded."})
+        calls = iter([primary_response, reviewer_response])
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(next(calls)))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        rule = dataclasses.replace(rule, params={**rule.params, "strategy": "review"})
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+        assert diag.evidence[0].data["llm_strategy"] == "review"
 
 
 class TestMultiTargetQuoteParsing:

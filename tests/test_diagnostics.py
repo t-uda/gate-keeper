@@ -610,3 +610,13 @@ def test_json_invalid_evidence_reference_maps_to_grader_error():
     diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
     parsed = json.loads(render_json(diags))
     assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"
+
+
+def test_json_invalid_evidence_reference_non_string_defaults_to_grader_error():
+    ev = Evidence(
+        kind="invalid_evidence_reference",
+        data={"failure_mode": None, "detail": "bad refs"},
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"
