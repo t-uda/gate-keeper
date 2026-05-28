@@ -181,7 +181,13 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 # file *path* (and the substring grounding check follows the same
 # substitution). Reproducibility records keyed on ``prompt_version``
 # continue to mean the same thing.
-PROMPT_VERSION = "v6"
+# - v7 (#268): primary evidence contract moves from model-generated free-form
+#   ``supporting_evidence_quotes`` to line-range references
+#   (``supporting_evidence_refs``). Prompt-rendered artifacts now include stable
+#   line numbers, and backend-side reconstruction populates
+#   ``supporting_evidence_quotes`` mechanically from validated ranges. Legacy
+#   quote-shaped responses remain accepted only as a defensive fallback path.
+PROMPT_VERSION = "v7"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -254,6 +260,12 @@ class LlmJudgment(BaseModel):
         ``primary_reason``, and at least one entry should reflect the
         strongest evidence for or against the rule's predicate rather than
         only the artifact's opening lines.
+    supporting_evidence_refs:
+        Primary evidence shape for #268. Each entry is a model-provided line
+        reference object (target/path/line range) that the backend validates
+        and resolves to concrete quote text. Stored as raw list entries here;
+        structural/range validation happens against the resolved artifact corpus
+        after parsing.
     suggested_action:
         Concrete remediation step. Required on fail; MUST be ``None`` on
         pass and on unsupported.
@@ -275,6 +287,7 @@ class LlmJudgment(BaseModel):
     judgment: Literal["pass", "fail", "unsupported"]
     primary_reason: str
     supporting_evidence_quotes: list[str]
+    supporting_evidence_refs: list[Any] | None = None
     suggested_action: str | None
     supporting_evidence_quote_target_ids: list[str | None] | None = None
 
@@ -287,8 +300,13 @@ class LlmJudgment(BaseModel):
 
     @model_validator(mode="after")
     def _cross_field_constraints(self) -> "LlmJudgment":
-        # pass and fail must have at least one grounding quote (#168).
-        if self.judgment in ("pass", "fail") and len(self.supporting_evidence_quotes) == 0:
+        # #168 legacy contract: pass/fail require at least one quote when the
+        # new #268 refs field is absent.
+        if (
+            self.judgment in ("pass", "fail")
+            and self.supporting_evidence_refs is None
+            and len(self.supporting_evidence_quotes) == 0
+        ):
             raise ValueError(
                 "supporting_evidence_quotes must contain at least one entry"
                 f" when judgment is {self.judgment!r}"
@@ -482,6 +500,9 @@ artifact satisfies the given rule.
 {{
   "judgment": "pass" | "fail" | "unsupported",
   "primary_reason": "<one sentence>",
+  "supporting_evidence_refs": [
+    {{"target_id": null, "path": "<path-or-null>", "line_start": 1, "line_end": 1}}
+  ],
   "supporting_evidence_quotes": ["<near-verbatim substring of the target>", ...],
   "suggested_action": "<concrete step to fix>" | null
 }}
@@ -492,11 +513,16 @@ Constraints:
   ONLY valid when an `## Artifact kind` block is present above. If no
   `## Artifact kind` block is rendered, return `"pass"` or `"fail"` only.
 - `primary_reason` must be a single sentence (no newlines).
+- `supporting_evidence_refs` is the primary evidence field. For pass/fail
+  it must contain at least one reference object. Each object must include
+  integer `line_start` and `line_end` values (1-indexed, inclusive), and
+  `line_start <= line_end`. Use the numbered lines from the target block
+  above. `target_id` is required for multi-target prompts and null/omitted
+  for single-target prompts. `path` must match the rendered path metadata
+  for that target (or null for inline/no-path targets).
 - `supporting_evidence_quotes` must contain **at least one entry** for
-  **every pass or fail verdict**. An empty list is invalid for `"pass"`
-  and `"fail"`. For an `"unsupported"` verdict the list may be empty:
-  when the rule does not address the artifact kind, no artifact
-  substring exists that could ground a verdict.
+  **every pass or fail verdict** only on the legacy fallback shape when
+  `supporting_evidence_refs` is absent.
 - Each quote must be a **near-verbatim substring of the target text** —
   copy the words from the artifact. Do **not** paraphrase
   `primary_reason`, do **not** invent meta-statements about the artifact,
@@ -575,6 +601,9 @@ artifact satisfies the given rule.
 {{
   "judgment": "pass" | "fail" | "unsupported",
   "primary_reason": "<one sentence>",
+  "supporting_evidence_refs": [
+    {{"target_id": "<id>", "path": "<path-or-null>", "line_start": 1, "line_end": 1}}
+  ],
   "supporting_evidence_quotes": ["<near-verbatim substring of the target>", ...],
   "suggested_action": "<concrete step to fix>" | null
 }}
@@ -585,11 +614,16 @@ Constraints:
   ONLY valid when an `## Artifact kind` block is present above. If no
   `## Artifact kind` block is rendered, return `"pass"` or `"fail"` only.
 - `primary_reason` must be a single sentence (no newlines).
+- `supporting_evidence_refs` is the primary evidence field. For pass/fail
+  it must contain at least one reference object. Each object must include
+  integer `line_start` and `line_end` values (1-indexed, inclusive), and
+  `line_start <= line_end`. Use the numbered lines from the corresponding
+  target section. `target_id` is required for multi-target prompts and must
+  match a declared target id. `path` must match the rendered path metadata
+  for that target (or null for no-path targets).
 - `supporting_evidence_quotes` must contain **at least one entry** for
-  **every pass or fail verdict**. An empty list is invalid for `"pass"`
-  and `"fail"`. For an `"unsupported"` verdict the list may be empty:
-  when the rule does not address the artifact kind, no artifact
-  substring exists that could ground a verdict.
+  **every pass or fail verdict** only on the legacy fallback shape when
+  `supporting_evidence_refs` is absent.
 - Each quote must be a **near-verbatim substring of the target text** —
   copy the words from the artifact. Do **not** paraphrase
   `primary_reason`, do **not** invent meta-statements about the artifact,
@@ -947,20 +981,20 @@ def _render_multi_target_block(specs: list[MultiTargetSpec], texts: dict[str, st
     sections: list[str] = ["## Target artifacts (multi)\n"]
     for spec in specs:
         text = texts.get(spec.id, "")
-        sections.append(f"### Target {spec.id} (kind: {spec.kind.value})\n\n{text}\n")
+        path_line = f"Path: {spec.path}\n\n" if spec.path is not None else "Path: null\n\n"
+        sections.append(
+            f"### Target {spec.id} (kind: {spec.kind.value})\n\n{path_line}{_render_numbered_lines(text)}\n"
+        )
     return "\n".join(sections)
 
 
 _MULTI_TARGET_INSTRUCTION_BLOCK = """\
 - This rule is evaluated against **multiple labelled target artifacts** (see \
 the ``## Target artifacts (multi)`` block above). When you cite supporting \
-evidence, each entry of ``supporting_evidence_quotes`` MUST be an object of \
-the form ``{"target_id": "<id>", "quote": "<near-verbatim substring>"}`` \
-where ``<id>`` matches one of the labelled artifact ids above. The \
-``target_id`` field is **required**: plain-string entries without a \
-``target_id`` are not accepted for multi-target rules. The ``quote`` value \
-must be a near-verbatim substring drawn from the artifact identified by \
-``target_id``; it must not be drawn from a different artifact.
+evidence, each entry of ``supporting_evidence_refs`` MUST be an object of the \
+form ``{"target_id": "<id>", "path": "<path-or-null>", "line_start": 10, \
+"line_end": 12}`` where ``<id>`` matches one of the labelled artifact ids \
+above. The ``target_id`` field is **required** for multi-target rules.
 """
 
 
@@ -1057,9 +1091,12 @@ def _build_prompt(
     if multi_targets:
         return _build_multi_target_prompt(rule, multi_targets)
     system = RUBRIC_SYSTEM_PROMPT
+    numbered_target = _render_numbered_artifact_text(
+        _resolve_evidence_artifacts(rule, target, artifact_kind)[0]
+    )
     user = RUBRIC_PROMPT_TEMPLATE.format(
         rule_text=rule.text,
-        target=_resolve_artifact_input(target, artifact_kind),
+        target=numbered_target,
         target_kind_block=_render_target_kind_block(rule.target_kind),
         unsupported_instruction=_render_unsupported_instruction(rule.target_kind),
         unsupported_example_block=_render_unsupported_example_block(rule.target_kind),
@@ -1349,7 +1386,7 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         )
 
     # Required fields
-    for required_field in ("judgment", "primary_reason", "supporting_evidence_quotes"):
+    for required_field in ("judgment", "primary_reason"):
         if required_field not in obj:
             return LlmJudgmentParseError(
                 failure_mode="missing_field",
@@ -1373,11 +1410,28 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             raw_response_excerpt=excerpt,
         )
 
-    quotes_raw = obj["supporting_evidence_quotes"]
+    refs_present = "supporting_evidence_refs" in obj
+    refs_raw = obj.get("supporting_evidence_refs")
+    refs: list[Any] | None
+    if refs_present:
+        if refs_raw is None:
+            refs = []
+        elif isinstance(refs_raw, list):
+            refs = refs_raw
+        else:
+            # #268: keep parse-time tolerant so malformed evidence coordinates
+            # route through the grader-error classifier rather than provider_error.
+            refs = [refs_raw]
+    else:
+        refs = None
+
+    quotes_raw = obj.get("supporting_evidence_quotes")
+    if quotes_raw is None:
+        quotes_raw = []
     if not isinstance(quotes_raw, list):
         return LlmJudgmentParseError(
             failure_mode="missing_field",
-            detail="supporting_evidence_quotes must be a list.",
+            detail="supporting_evidence_quotes must be a list when present.",
             raw_response_excerpt=excerpt,
         )
 
@@ -1425,11 +1479,12 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             raw_response_excerpt=excerpt,
         )
 
-    # #168 — both pass and fail must be grounded by at least one quote.
+    # #168 — both pass and fail must be grounded by at least one quote on the
+    # legacy shape where #268 refs are absent.
     # #169 — `unsupported` may carry an empty list: when the rule's premise
     # does not address the artifact kind, no artifact substring exists that
     # could ground a verdict.
-    if judgment in ("pass", "fail") and len(quotes) == 0:
+    if judgment in ("pass", "fail") and refs is None and len(quotes) == 0:
         return LlmJudgmentParseError(
             failure_mode="missing_field",
             detail=(
@@ -1455,6 +1510,7 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             judgment=judgment,
             primary_reason=primary_reason,
             supporting_evidence_quotes=quotes,
+            supporting_evidence_refs=refs,
             suggested_action=suggested_action,
             # Only attach the parallel target-id list when at least one
             # quote arrived in the object form — single-target / legacy
@@ -1635,6 +1691,80 @@ def _resolve_artifact_texts_for_rule(
         # Artifacts whose paths could not be read are intentionally un-quotable.
         return {sid: text for sid, text in texts.items() if sid not in placeholder_ids}
     return {_SINGLE_TARGET_SENTINEL_ID: _resolve_artifact_text(target, artifact_kind)}
+
+
+@dataclass(frozen=True)
+class EvidenceArtifact:
+    """Resolved artifact payload shared by prompt rendering and #268 evidence refs."""
+
+    target_id: str | None
+    path: str | None
+    text: str
+    quotable: bool
+
+    @property
+    def lines(self) -> list[str]:
+        split = self.text.splitlines()
+        return split if split else [""]
+
+
+def _render_numbered_lines(text: str) -> str:
+    """Render *text* as stable 1-based numbered lines for prompt grounding (#268)."""
+    numbered: list[str] = []
+    split = text.splitlines()
+    if not split:
+        split = [""]
+    for i, line in enumerate(split, start=1):
+        numbered.append(f"{i:>4} | {line}")
+    return "\n".join(numbered)
+
+
+def _resolve_single_target_path(target: str | Path) -> str | None:
+    """Return a filesystem path string when *target* resolves to a real file."""
+    try:
+        path = target if isinstance(target, Path) else Path(str(target))
+        if path.is_file():
+            return str(path)
+    except OSError:
+        return None
+    return None
+
+
+def _resolve_evidence_artifacts(
+    rule: Rule,
+    target: str | Path,
+    artifact_kind: TargetKind | None = None,
+) -> list[EvidenceArtifact]:
+    """Return prompt-visible artifacts plus quotability metadata (#268)."""
+    specs = _parse_multi_targets(rule)
+    if specs:
+        texts, placeholder_ids = _load_multi_target_texts(specs)
+        artifacts: list[EvidenceArtifact] = []
+        for spec in specs:
+            artifacts.append(
+                EvidenceArtifact(
+                    target_id=spec.id,
+                    path=spec.path,
+                    text=texts.get(spec.id, ""),
+                    quotable=spec.id not in placeholder_ids,
+                )
+            )
+        return artifacts
+    rendered = _resolve_artifact_input(target, artifact_kind)
+    return [
+        EvidenceArtifact(
+            target_id=None,
+            path=_resolve_single_target_path(target),
+            text=rendered,
+            quotable=True,
+        )
+    ]
+
+
+def _render_numbered_artifact_text(artifact: EvidenceArtifact) -> str:
+    """Return path metadata + numbered text block for one artifact."""
+    header = f"Path: {artifact.path}\n\n" if artifact.path is not None else "Path: null\n\n"
+    return f"{header}{_render_numbered_lines(artifact.text)}"
 
 
 #: Sentinel id used by :func:`_resolve_artifact_texts_for_rule` for the
@@ -2088,6 +2218,241 @@ def _resolve_quote_spans(quotes: list[str], artifact_text: str) -> list[QuoteSpa
     return spans
 
 
+@dataclass(frozen=True)
+class InvalidEvidenceReference:
+    """Structured #268 grader-contract failure."""
+
+    detail: str
+    refs_raw: list[Any] | None
+
+
+def _quote_span_from_line_range(
+    artifact: EvidenceArtifact,
+    quote: str,
+    line_start: int,
+    line_end: int,
+    *,
+    artifact_index: int,
+) -> QuoteSpan:
+    """Build deterministic span metadata directly from validated line ranges."""
+    lines_keepends = artifact.text.splitlines(keepends=True)
+    if not lines_keepends:
+        lines_keepends = [""]
+    lines_plain = artifact.lines
+    start_offset = sum(len(line) for line in lines_keepends[: line_start - 1])
+    end_offset = sum(len(line) for line in lines_keepends[:line_end])
+    # Trim trailing line-break bytes so CRLF/LF artifacts map to the same
+    # quote boundary as reconstructed line-joined evidence text.
+    while (
+        end_offset > start_offset
+        and artifact.text
+        and artifact.text[end_offset - 1 : end_offset] in ("\n", "\r")
+    ):
+        end_offset -= 1
+    end_line_text = lines_plain[line_end - 1]
+    return QuoteSpan(
+        quote=quote,
+        artifact_index=artifact_index,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        start_line=line_start,
+        start_column=1,
+        end_line=line_end,
+        end_column=len(end_line_text) + 1,
+        match_normalisation="exact",
+    )
+
+
+def _validate_and_reconstruct_evidence_refs(
+    rule: Rule,
+    parsed: LlmJudgment,
+    artifacts: list[EvidenceArtifact],
+) -> tuple[list[str], list[dict[str, Any]], list[QuoteSpan], InvalidEvidenceReference | None]:
+    """Validate #268 line-range refs and reconstruct evidence strings/spans."""
+    refs_raw = parsed.supporting_evidence_refs
+    if refs_raw is None:
+        return [], [], [], None
+    if parsed.judgment in ("pass", "fail") and len(refs_raw) == 0:
+        return (
+            [],
+            [],
+            [],
+            InvalidEvidenceReference(
+                detail=(
+                    "supporting_evidence_refs must contain at least one entry "
+                    f"when judgment is {parsed.judgment!r}."
+                ),
+                refs_raw=refs_raw,
+            ),
+        )
+    is_multi = bool(_parse_multi_targets(rule))
+    by_target_id: dict[str, tuple[int, EvidenceArtifact]] = {}
+    for idx, artifact in enumerate(artifacts):
+        if artifact.target_id is not None:
+            by_target_id[artifact.target_id] = (idx, artifact)
+    refs_out: list[dict[str, Any]] = []
+    quotes_out: list[str] = []
+    spans_out: list[QuoteSpan] = []
+    for i, entry in enumerate(refs_raw):
+        if not isinstance(entry, dict):
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=(f"supporting_evidence_refs[{i}]: expected object, got {type(entry).__name__}."),
+                    refs_raw=refs_raw,
+                ),
+            )
+        target_id_raw = entry.get("target_id")
+        path_raw = entry.get("path")
+        line_start_raw = entry.get("line_start")
+        line_end_raw = entry.get("line_end")
+
+        if is_multi:
+            if not isinstance(target_id_raw, str) or not target_id_raw:
+                return (
+                    [],
+                    [],
+                    [],
+                    InvalidEvidenceReference(
+                        detail=(
+                            f"supporting_evidence_refs[{i}].target_id: "
+                            "required non-empty string for multi-target."
+                        ),
+                        refs_raw=refs_raw,
+                    ),
+                )
+            if target_id_raw not in by_target_id:
+                return (
+                    [],
+                    [],
+                    [],
+                    InvalidEvidenceReference(
+                        detail=f"supporting_evidence_refs[{i}].target_id: unknown id {target_id_raw!r}.",
+                        refs_raw=refs_raw,
+                    ),
+                )
+            artifact_index, artifact = by_target_id[target_id_raw]
+            target_id: str | None = target_id_raw
+        else:
+            artifact_index = 0
+            artifact = artifacts[0]
+            if target_id_raw is not None:
+                return (
+                    [],
+                    [],
+                    [],
+                    InvalidEvidenceReference(
+                        detail=(
+                            f"supporting_evidence_refs[{i}].target_id: "
+                            "must be null/omitted on single-target rules."
+                        ),
+                        refs_raw=refs_raw,
+                    ),
+                )
+            target_id = None
+
+        if path_raw is not None and not isinstance(path_raw, str):
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=(
+                        f"supporting_evidence_refs[{i}].path: expected str or null, "
+                        f"got {type(path_raw).__name__}."
+                    ),
+                    refs_raw=refs_raw,
+                ),
+            )
+        expected_path = artifact.path
+        if path_raw != expected_path:
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=(
+                        f"supporting_evidence_refs[{i}].path: expected {expected_path!r}, got {path_raw!r}."
+                    ),
+                    refs_raw=refs_raw,
+                ),
+            )
+        if isinstance(line_start_raw, bool) or not isinstance(line_start_raw, int):
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=f"supporting_evidence_refs[{i}].line_start: expected integer.",
+                    refs_raw=refs_raw,
+                ),
+            )
+        if isinstance(line_end_raw, bool) or not isinstance(line_end_raw, int):
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=f"supporting_evidence_refs[{i}].line_end: expected integer.",
+                    refs_raw=refs_raw,
+                ),
+            )
+        line_count = len(artifact.lines)
+        if (
+            line_start_raw < 1
+            or line_end_raw < 1
+            or line_start_raw > line_end_raw
+            or line_end_raw > line_count
+        ):
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=(
+                        f"supporting_evidence_refs[{i}]: invalid range {line_start_raw}-{line_end_raw} "
+                        f"for artifact line_count={line_count}."
+                    ),
+                    refs_raw=refs_raw,
+                ),
+            )
+        if not artifact.quotable:
+            return (
+                [],
+                [],
+                [],
+                InvalidEvidenceReference(
+                    detail=(
+                        f"supporting_evidence_refs[{i}]: target_id={target_id!r} is unquotable "
+                        "(artifact content unavailable)."
+                    ),
+                    refs_raw=refs_raw,
+                ),
+            )
+        quote = "\n".join(artifact.lines[line_start_raw - 1 : line_end_raw])
+        quotes_out.append(quote)
+        refs_out.append(
+            {
+                "target_id": target_id,
+                "path": expected_path,
+                "line_start": line_start_raw,
+                "line_end": line_end_raw,
+            }
+        )
+        spans_out.append(
+            _quote_span_from_line_range(
+                artifact,
+                quote,
+                line_start_raw,
+                line_end_raw,
+                artifact_index=artifact_index,
+            )
+        )
+    return quotes_out, refs_out, spans_out, None
+
+
 # ---------------------------------------------------------------------------
 # Diagnostic constructors — #51 contract preserved byte-for-byte
 # ---------------------------------------------------------------------------
@@ -2137,6 +2502,54 @@ def _unavailable_provider_error(
         remediation=(
             "Investigate the provider error (see evidence for failure mode) "
             "and rerun once the provider is healthy."
+        ),
+    )
+
+
+def _unavailable_invalid_evidence_reference(
+    *,
+    rule: Rule,
+    rubric_input: dict[str, Any],
+    model: str,
+    telemetry: dict[str, int],
+    cost_estimate_usd: float | None,
+    strategy_meta: dict[str, Any],
+    parsed: LlmJudgment,
+    detail: str,
+) -> Diagnostic:
+    """Return #268 grader-contract failure diagnostic."""
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message="LLM rubric returned malformed evidence references; skipping rule.",
+        evidence=[
+            Evidence(
+                kind="invalid_evidence_reference",
+                data={
+                    **rubric_input,
+                    "model": model,
+                    "prompt_version": PROMPT_VERSION,
+                    "failure_mode": "grader_error",
+                    "detail": detail[:500],
+                    "judgment": parsed.judgment,
+                    "primary_reason": parsed.primary_reason,
+                    "supporting_evidence_refs": parsed.supporting_evidence_refs,
+                    "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+                    "suggested_action": parsed.suggested_action,
+                    "latency_ms": telemetry["latency_ms"],
+                    "tokens_in": telemetry["tokens_in"],
+                    "tokens_out": telemetry["tokens_out"],
+                    "cost_estimate_usd": cost_estimate_usd,
+                    **strategy_meta,
+                },
+            )
+        ],
+        remediation=(
+            "The grader returned malformed supporting_evidence_refs. Re-run the "
+            "rule; if this persists, update the prompt/model contract."
         ),
     )
 
@@ -2334,37 +2747,79 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
             ),
         )
 
-    # #172 — parser-side enforcement of the v2 prompt's substring-grounding
-    # contract. If any quote is not a substring of the artifact text, reject
-    # the verdict and surface UNSUPPORTED with llm_quote_fabrication evidence.
-    # #191 — when ``artifact_kind`` is declared and the target is a real file,
-    # ``_resolve_artifact_text`` returns the file content (mirroring what
-    # ``_build_prompt`` injected). Quotes are validated against what the
-    # model actually saw.
-    # #225 (slice 2) — multi-target rules now perform strict per-target
-    # grounding: a quote claiming ``target_id=A`` must be a substring of
-    # artifact A's text specifically, not merely of the concatenated prompt.
-    # Unknown or missing ``target_id`` values fail closed. The single-target
-    # path is unchanged.
+    artifacts = _resolve_evidence_artifacts(rule, target, artifact_kind)
+    refs_quotes, refs_payload, refs_spans, refs_error = _validate_and_reconstruct_evidence_refs(
+        rule, parsed, artifacts
+    )
+    strict_target_ids: list[str] | None = None
+    if parsed.supporting_evidence_refs is not None:
+        if refs_error is not None:
+            return _unavailable_invalid_evidence_reference(
+                rule=rule,
+                rubric_input=rubric_input,
+                model=model,
+                telemetry=telemetry,
+                cost_estimate_usd=cost,
+                strategy_meta=strategy_meta,
+                parsed=parsed,
+                detail=refs_error.detail,
+            )
+        status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
+        evidence_data: dict[str, Any] = {
+            "model": model,
+            "prompt_version": PROMPT_VERSION,
+            "judgment": parsed.judgment,
+            "primary_reason": parsed.primary_reason,
+            "supporting_evidence_quotes": refs_quotes,
+            "supporting_evidence_refs": refs_payload,
+            "supporting_evidence_spans": [span.to_dict() for span in refs_spans],
+            "suggested_action": parsed.suggested_action,
+            "latency_ms": telemetry["latency_ms"],
+            "tokens_in": telemetry["tokens_in"],
+            "tokens_out": telemetry["tokens_out"],
+            "cost_estimate_usd": cost,
+            **strategy_meta,
+        }
+        if len(artifacts) > 1:
+            evidence_data["supporting_evidence_quote_target_ids"] = [ref["target_id"] for ref in refs_payload]
+        evidence = Evidence(kind="llm_judgment", data=evidence_data)
+        if status is Status.PASS:
+            return Diagnostic(
+                rule_id=rule.id,
+                source=rule.source,
+                backend=Backend.LLM_RUBRIC,
+                status=status,
+                severity=rule.severity,
+                message=parsed.primary_reason,
+                evidence=[evidence],
+            )
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=status,
+            severity=rule.severity,
+            message=parsed.primary_reason,
+            evidence=[evidence],
+            remediation=parsed.suggested_action,
+        )
+
+    # Legacy fallback path (#268 defensive compatibility): quote fabrication
+    # validator remains enabled for quote-shaped model outputs.
     multi_targets = _parse_multi_targets(rule)
     if multi_targets:
-        # Strict per-target grounding path for multi-target rules.
         texts_by_id = _resolve_artifact_texts_for_rule(rule, target, artifact_kind)
         strict_target_ids = _resolve_quote_target_ids_strict(rule, parsed)
-        assert strict_target_ids is not None  # non-empty multi_targets guarantees this
+        assert strict_target_ids is not None
         fabricated = _find_per_target_fabricated_quotes(
             parsed.supporting_evidence_quotes,
             strict_target_ids,
             texts_by_id,
         )
-        # Flat text for span resolution (best-effort; per-artifact span
-        # attribution is deferred to a future slice).
         artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
     else:
-        # Single-target legacy path: flat substring check unchanged.
         artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
         fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
-        strict_target_ids = None
     if fabricated:
         return Diagnostic(
             rule_id=rule.id,
@@ -2406,11 +2861,6 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
         )
 
     status = Status.PASS if parsed.judgment == "pass" else Status.FAIL
-    # #179 — once the fabrication validator has confirmed every quote is a
-    # normalised substring of the artifact, resolve each to a span pointing
-    # back into the original artifact text. Spans are additive: the
-    # ``supporting_evidence_quotes`` field remains the stable compatibility
-    # surface, ``supporting_evidence_spans`` is the new offset-bearing field.
     spans = _resolve_quote_spans(parsed.supporting_evidence_quotes, artifact_text)
     evidence_data: dict[str, Any] = {
         "model": model,
@@ -2555,7 +3005,8 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
     panel_size = max(_CONSENSUS_PANEL_SIZE_MIN, min(_CONSENSUS_PANEL_SIZE_MAX, panel_size))
 
     system, user = _build_prompt(rule, target, artifact_kind)
-    artifact_text = _resolve_artifact_text(target, artifact_kind)
+    artifacts = _resolve_evidence_artifacts(rule, target, artifact_kind)
+    artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
 
     # --- Run N independent provider calls ---
     judge_results: list[dict[str, object]] = []
@@ -2614,25 +3065,6 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
             )
             continue
 
-        # Quote-fabrication check per judge.
-        fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
-        if fabricated:
-            judge_results.append(
-                {
-                    "judge_index": judge_index,
-                    "model": model,
-                    "verdict": "unsupported",
-                    "failure_mode": "quote_fabrication",
-                    "claimed_judgment": parsed.judgment,
-                    "fabricated_quotes": fabricated,
-                    "latency_ms": telemetry["latency_ms"],
-                    "tokens_in": telemetry["tokens_in"],
-                    "tokens_out": telemetry["tokens_out"],
-                    "cost_estimate_usd": call_cost,
-                }
-            )
-            continue
-
         # Mirror the single-strategy contract: an "unsupported" verdict on a
         # rule without ``target_kind`` is a contract violation — the
         # artifact-kind block was never injected, so the model had no basis to
@@ -2659,13 +3091,58 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
             )
             continue
 
+        resolved_quotes = parsed.supporting_evidence_quotes
+        resolved_refs: list[dict[str, Any]] = []
+        # #268 primary contract: validate refs when present.
+        if parsed.judgment in ("pass", "fail") and parsed.supporting_evidence_refs is not None:
+            refs_quotes, refs_payload, _refs_spans, refs_error = _validate_and_reconstruct_evidence_refs(
+                rule, parsed, artifacts
+            )
+            if refs_error is not None:
+                judge_results.append(
+                    {
+                        "judge_index": judge_index,
+                        "model": model,
+                        "verdict": "unsupported",
+                        "failure_mode": "invalid_evidence_reference",
+                        "detail": refs_error.detail[:500],
+                        "latency_ms": telemetry["latency_ms"],
+                        "tokens_in": telemetry["tokens_in"],
+                        "tokens_out": telemetry["tokens_out"],
+                        "cost_estimate_usd": call_cost,
+                    }
+                )
+                continue
+            resolved_quotes = refs_quotes
+            resolved_refs = refs_payload
+        elif parsed.judgment in ("pass", "fail"):
+            # Legacy fallback only.
+            fabricated = _find_fabricated_quotes(parsed.supporting_evidence_quotes, artifact_text)
+            if fabricated:
+                judge_results.append(
+                    {
+                        "judge_index": judge_index,
+                        "model": model,
+                        "verdict": "unsupported",
+                        "failure_mode": "quote_fabrication",
+                        "claimed_judgment": parsed.judgment,
+                        "fabricated_quotes": fabricated,
+                        "latency_ms": telemetry["latency_ms"],
+                        "tokens_in": telemetry["tokens_in"],
+                        "tokens_out": telemetry["tokens_out"],
+                        "cost_estimate_usd": call_cost,
+                    }
+                )
+                continue
+
         judge_results.append(
             {
                 "judge_index": judge_index,
                 "model": model,
                 "verdict": parsed.judgment,
                 "primary_reason": parsed.primary_reason,
-                "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+                "supporting_evidence_quotes": resolved_quotes,
+                "supporting_evidence_refs": resolved_refs,
                 "suggested_action": parsed.suggested_action,
                 "latency_ms": telemetry["latency_ms"],
                 "tokens_in": telemetry["tokens_in"],
@@ -2704,6 +3181,8 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
     seen_quotes: set[str] = set()
     majority_primary_reason: str = ""
     majority_suggested_action: str | None = None
+    majority_refs: list[dict[str, Any]] = []
+    seen_refs: set[tuple[Any, ...]] = set()
     for r in judge_results:
         if r["verdict"] != majority_verdict:
             continue
@@ -2714,6 +3193,19 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
             if isinstance(q, str) and q not in seen_quotes:
                 seen_quotes.add(q)
                 majority_quotes.append(q)
+        for ref in r.get("supporting_evidence_refs", []):  # type: ignore[union-attr]
+            if not isinstance(ref, dict):
+                continue
+            key = (
+                ref.get("target_id"),
+                ref.get("path"),
+                ref.get("line_start"),
+                ref.get("line_end"),
+            )
+            if key in seen_refs:
+                continue
+            seen_refs.add(key)
+            majority_refs.append(dict(ref))
 
     consensus_evidence_base: dict[str, object] = {
         "llm_strategy": "consensus",
@@ -2781,6 +3273,7 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
         **consensus_evidence_base,
         "primary_reason": majority_primary_reason,
         "supporting_evidence_quotes": majority_quotes,
+        "supporting_evidence_refs": majority_refs,
         "suggested_action": majority_suggested_action,
     }
     evidence = Evidence(kind="llm_consensus", data=evidence_data)
@@ -3133,54 +3626,90 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
             ),
         )
 
-    artifact_text = _resolve_artifact_text(target, artifact_kind)
-    fabricated = _find_fabricated_quotes(primary_parsed.supporting_evidence_quotes, artifact_text)
-    if fabricated:
-        return Diagnostic(
-            rule_id=rule.id,
-            source=rule.source,
-            backend=Backend.LLM_RUBRIC,
-            status=Status.UNSUPPORTED,
-            severity=rule.severity,
-            message=(
-                "LLM rubric verdict rejected: the model returned "
-                f"{len(fabricated)} of {len(primary_parsed.supporting_evidence_quotes)} "
-                "supporting quotes that are not substrings of the artifact "
-                "(quote fabrication)."
-            ),
-            evidence=[
-                Evidence(
-                    kind="llm_quote_fabrication",
-                    data={
-                        "model": model,
-                        "prompt_version": PROMPT_VERSION,
-                        "claimed_judgment": primary_parsed.judgment,
-                        "primary_reason": primary_parsed.primary_reason,
-                        "supporting_evidence_quotes": primary_parsed.supporting_evidence_quotes,
-                        "fabricated_quotes": fabricated,
-                        "suggested_action": primary_parsed.suggested_action,
-                        "latency_ms": primary_telemetry["latency_ms"],
-                        "tokens_in": primary_telemetry["tokens_in"],
-                        "tokens_out": primary_telemetry["tokens_out"],
-                        "cost_estimate_usd": primary_cost,
-                        "llm_strategy": "review",
-                        "llm_call_count": 1,
-                        "models": [model],
-                        "cost_estimate_usd_total": primary_cost,
-                        "latency_ms_total": primary_telemetry["latency_ms"],
-                    },
-                )
-            ],
-            remediation=(
-                "The model violated the substring-grounding contract for "
-                "supporting_evidence_quotes (v2 prompt, #168). Re-run the "
-                "rule; if the failure persists, investigate prompt drift or "
-                "switch model. Do not act on this verdict."
-            ),
+    artifacts = _resolve_evidence_artifacts(rule, target, artifact_kind)
+    primary_refs_quotes: list[str] = []
+    primary_refs_payload: list[dict[str, Any]] = []
+    primary_refs_spans: list[QuoteSpan] = []
+    if primary_parsed.judgment in ("pass", "fail") and primary_parsed.supporting_evidence_refs is not None:
+        (
+            primary_refs_quotes,
+            primary_refs_payload,
+            primary_refs_spans,
+            primary_refs_error,
+        ) = _validate_and_reconstruct_evidence_refs(rule, primary_parsed, artifacts)
+        if primary_refs_error is not None:
+            return _unavailable_invalid_evidence_reference(
+                rule=rule,
+                rubric_input=rubric_input,
+                model=model,
+                telemetry=primary_telemetry,
+                cost_estimate_usd=primary_cost,
+                strategy_meta={
+                    "llm_strategy": "review",
+                    "llm_call_count": 1,
+                    "models": [model],
+                    "cost_estimate_usd_total": primary_cost,
+                    "latency_ms_total": primary_telemetry["latency_ms"],
+                },
+                parsed=primary_parsed,
+                detail=primary_refs_error.detail,
+            )
+    elif primary_parsed.judgment in ("pass", "fail"):
+        artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
+        fabricated = _find_fabricated_quotes(primary_parsed.supporting_evidence_quotes, artifact_text)
+        if fabricated:
+            return Diagnostic(
+                rule_id=rule.id,
+                source=rule.source,
+                backend=Backend.LLM_RUBRIC,
+                status=Status.UNSUPPORTED,
+                severity=rule.severity,
+                message=(
+                    "LLM rubric verdict rejected: the model returned "
+                    f"{len(fabricated)} of {len(primary_parsed.supporting_evidence_quotes)} "
+                    "supporting quotes that are not substrings of the artifact "
+                    "(quote fabrication)."
+                ),
+                evidence=[
+                    Evidence(
+                        kind="llm_quote_fabrication",
+                        data={
+                            "model": model,
+                            "prompt_version": PROMPT_VERSION,
+                            "claimed_judgment": primary_parsed.judgment,
+                            "primary_reason": primary_parsed.primary_reason,
+                            "supporting_evidence_quotes": primary_parsed.supporting_evidence_quotes,
+                            "fabricated_quotes": fabricated,
+                            "suggested_action": primary_parsed.suggested_action,
+                            "latency_ms": primary_telemetry["latency_ms"],
+                            "tokens_in": primary_telemetry["tokens_in"],
+                            "tokens_out": primary_telemetry["tokens_out"],
+                            "cost_estimate_usd": primary_cost,
+                            "llm_strategy": "review",
+                            "llm_call_count": 1,
+                            "models": [model],
+                            "cost_estimate_usd_total": primary_cost,
+                            "latency_ms_total": primary_telemetry["latency_ms"],
+                        },
+                    )
+                ],
+                remediation=(
+                    "The model violated the substring-grounding contract for "
+                    "supporting_evidence_quotes (v2 prompt, #168). Re-run the "
+                    "rule; if the failure persists, investigate prompt drift or "
+                    "switch model. Do not act on this verdict."
+                ),
+            )
+
+    if primary_refs_quotes:
+        primary_for_review = primary_parsed.model_copy(
+            update={"supporting_evidence_quotes": primary_refs_quotes}
         )
+    else:
+        primary_for_review = primary_parsed
 
     # ---- Pass 2: reviewer ----
-    rev_system, rev_user = _build_review_prompt(rule, target, primary_parsed, artifact_kind)
+    rev_system, rev_user = _build_review_prompt(rule, target, primary_for_review, artifact_kind)
 
     reviewer_text: str | None = None
     reviewer_telemetry: dict[str, int] | None = None
@@ -3260,7 +3789,7 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
     primary_judgment_record: dict[str, object] = {
         "judgment": primary_parsed.judgment,
         "primary_reason": primary_parsed.primary_reason,
-        "quotes": primary_parsed.supporting_evidence_quotes,
+        "quotes": primary_for_review.supporting_evidence_quotes,
     }
 
     # ---- Aggregation: route by reviewer_verdict ----
@@ -3309,7 +3838,13 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
 
     # agree or abstain: emit primary verdict.
     status = Status.PASS if primary_parsed.judgment == "pass" else Status.FAIL
-    spans = _resolve_quote_spans(primary_parsed.supporting_evidence_quotes, artifact_text)
+    if primary_refs_quotes:
+        resolved_quotes_for_output = primary_refs_quotes
+        spans = primary_refs_spans
+    else:
+        artifact_text = _resolve_artifact_text(target, artifact_kind)
+        resolved_quotes_for_output = primary_parsed.supporting_evidence_quotes
+        spans = _resolve_quote_spans(primary_parsed.supporting_evidence_quotes, artifact_text)
     evidence_data: dict[str, object] = {
         "llm_strategy": "review",
         "review_primary_judgment": primary_judgment_record,
@@ -3324,7 +3859,8 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
         "models": models_used,
         "cost_estimate_usd_total": total_cost,
         "latency_ms_total": total_latency_ms,
-        "supporting_evidence_quotes": primary_parsed.supporting_evidence_quotes,
+        "supporting_evidence_quotes": resolved_quotes_for_output,
+        "supporting_evidence_refs": primary_refs_payload,
         "supporting_evidence_spans": [span.to_dict() for span in spans],
         "suggested_action": primary_parsed.suggested_action,
     }

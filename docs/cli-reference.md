@@ -201,7 +201,7 @@ Provide either a single positional `rules` document **or** one or more
 | `--rules-format {markdown,ir}` | option | `markdown` | How to interpret `rules`. `markdown` (default) parses and classifies a Markdown rule document — the historical behaviour. `ir` loads a precompiled `RuleSet` JSON file (the same shape `compile` emits) using the strict IR parser and **bypasses the classifier**, so hand-authored `kind`, `backend_hint`, and `params` fields reach the validator unchanged. |
 | `--backend {auto,filesystem,github,llm-rubric,external}` | option | `auto` | Validation backend. `auto` delegates each rule to the backend the classifier (or the IR file) selected. |
 | `--format {text,json}` | option | `text` | Output format. |
-| `--verbose, -v` | flag | off | Expand structured LLM-rubric rationale (judgment, reason, evidence quotes, suggested action, model) as indented lines below each diagnostic. Has no effect for non-LLM backends. |
+| `--verbose, -v` | flag | off | Expand structured LLM-rubric rationale (judgment, reason, reconstructed evidence quotes, suggested action, model) as indented lines below each diagnostic. Has no effect for non-LLM backends. |
 | `--reproducibility N` | option | `1` | Run each LLM-rubric rule N times and record an agreement-rate `reproducibility_score` evidence entry. **No-op for non-LLM backends** (filesystem, GitHub, external ignore this flag). |
 | `--concurrency N` | option | `1` | Maximum number of rule checks executed in parallel via a bounded `ThreadPoolExecutor` (#249, Slice 1). Default `1` preserves strict sequential dispatch. Deterministic prechecks (target-kind mismatch, registry miss) short-circuit before scheduling, so no provider call is made for short-circuited rules. Diagnostics are emitted in `ruleset.rules` order regardless of completion order. See [Bounded rule-level concurrency (#249)](#bounded-rule-level-concurrency-249) for the cost-rate warning. |
 | `--allow-command-adapter` | flag | off | Enable the project-local `command` external adapter for this run only. **Security: pass this only for rule documents you fully trust** — the adapter executes whatever `params.argv` the rule document defines. Without this flag, every `external_check` rule whose `params.tool == "command"` returns `unavailable` / `command_adapter_disabled` and no subprocess runs. See [Project-local `command` adapter (#149)](#project-local-command-adapter-149) below. |
@@ -292,6 +292,9 @@ Each line: `path:line: severity: [backend/status] rule_id: message [evidence]`.
             "primary_reason": "The PR description does not specify the user-visible change.",
             "prompt_version": "v1",
             "suggested_action": "Rewrite the first sentence to state the user-visible change.",
+            "supporting_evidence_refs": [
+              {"target_id": null, "path": "README.md", "line_start": 12, "line_end": 18}
+            ],
             "supporting_evidence_quotes": ["..."],
             "tokens_in": 383,
             "tokens_out": 76
