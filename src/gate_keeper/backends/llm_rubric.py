@@ -3975,7 +3975,12 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
         resolved_quotes_for_output = primary_refs_quotes
         spans = primary_refs_spans
     else:
-        artifact_text = _resolve_artifact_text(target, artifact_kind)
+        # Legacy fallback: span resolution must use the rule-aware
+        # prompt-visible corpus so multi-target quotes can still be located
+        # (#275 follow-up to #270 — _resolve_artifact_text ignores rule
+        # multi-target params and would return ``str(target)`` for the
+        # placeholder target that multi-target rules pass through).
+        artifact_text = _build_artifact_text_for_grounding(rule, target, artifact_kind)
         resolved_quotes_for_output = primary_parsed.supporting_evidence_quotes
         spans = _resolve_quote_spans(primary_parsed.supporting_evidence_quotes, artifact_text)
     evidence_data: dict[str, object] = {

@@ -620,3 +620,40 @@ def test_json_invalid_evidence_reference_non_string_defaults_to_grader_error():
     diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
     parsed = json.loads(render_json(diags))
     assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"
+
+
+def test_json_invalid_evidence_reference_missing_field_defaults_to_grader_error():
+    """#275 follow-up: avoid emitting "failure_mode": "None" when the
+    ``failure_mode`` key is absent on ``invalid_evidence_reference`` evidence.
+    """
+    ev = Evidence(
+        kind="invalid_evidence_reference",
+        data={"detail": "bad refs"},  # no ``failure_mode`` key at all
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"
+
+
+def test_json_invalid_evidence_reference_non_string_int_defaults_to_grader_error():
+    """#275 follow-up: a non-string ``failure_mode`` (e.g. accidental int)
+    must not be coerced via ``str()`` — fall back to ``grader_error``."""
+    ev = Evidence(
+        kind="invalid_evidence_reference",
+        data={"failure_mode": 42, "detail": "bad refs"},
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"
+
+
+def test_json_invalid_evidence_reference_empty_string_defaults_to_grader_error():
+    """#275 follow-up: empty / whitespace-only string ``failure_mode`` is
+    treated as missing and falls back to ``grader_error``."""
+    ev = Evidence(
+        kind="invalid_evidence_reference",
+        data={"failure_mode": "   ", "detail": "bad refs"},
+    )
+    diags = [_diag(status=Status.UNAVAILABLE, evidence=[ev], backend=Backend.LLM_RUBRIC)]
+    parsed = json.loads(render_json(diags))
+    assert parsed["diagnostics"][0]["failure_mode"] == "grader_error"
