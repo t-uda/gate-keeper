@@ -4638,6 +4638,98 @@ class TestEvidenceRefsPrimaryContract:
         assert artifact[span["end_offset"] - 1] == "a"
         assert span["end_line"] == 2
 
+    def test_crlf_single_line_ref_span_consistency(self, monkeypatch):
+        """#275 follow-up: single-line CRLF ranges must produce LF-consistent
+        spans — the reconstructed quote, end_column, and end_offset must agree
+        on the trailing character (no dangling ``\\r`` slipping in).
+        """
+        _patch_env(monkeypatch, self._ENV)
+        artifact_lf = "alpha\nbeta\ngamma\n"
+        artifact_crlf = "alpha\r\nbeta\r\ngamma\r\n"
+        ref = {"target_id": None, "path": None, "line_start": 2, "line_end": 2}
+        response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_refs": [ref],
+                "suggested_action": None,
+            }
+        )
+
+        def run(artifact: str) -> dict:
+            monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(response))
+            diag = llm_backend.check(_semantic_rule(), artifact)
+            assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+            data = diag.evidence[0].data
+            return {
+                "span": data["supporting_evidence_spans"][0],
+                "quote": data["supporting_evidence_quotes"][0],
+            }
+
+        lf_result = run(artifact_lf)
+        crlf_result = run(artifact_crlf)
+
+        # Quote text is line-content only (no trailing line break of either flavour).
+        assert lf_result["quote"] == "beta"
+        assert crlf_result["quote"] == "beta"
+
+        # end_column points one past the last character of the line — must
+        # match the line's printable length + 1, independent of line endings.
+        assert lf_result["span"]["end_column"] == 5
+        assert crlf_result["span"]["end_column"] == 5
+
+        # end_offset must land on the last character of "beta" (not on a CR).
+        assert artifact_lf[lf_result["span"]["end_offset"] - 1] == "a"
+        assert artifact_crlf[crlf_result["span"]["end_offset"] - 1] == "a"
+
+
+class TestRenderNumberedArtifactText:
+    """#275 follow-up: ``_render_numbered_artifact_text`` shape contract.
+
+    The prompt rendering helper produces the model-facing artifact block.
+    The contract for inline / no-path single-target artifacts is to emit
+    an explicit ``Path: null`` line (not omit the header) so the model's
+    ``path`` field has an unambiguous source.
+    """
+
+    def test_no_path_renders_explicit_path_null_header(self):
+        artifact = llm_backend.EvidenceArtifact(
+            target_id=None,
+            path=None,
+            text="alpha\nbeta",
+            quotable=True,
+        )
+        rendered = llm_backend._render_numbered_artifact_text(artifact)
+        # Contract: an explicit ``Path: null`` header, blank line, then numbered body.
+        assert rendered.startswith("Path: null\n\n")
+        assert "   1 | alpha" in rendered
+        assert "   2 | beta" in rendered
+        # The substring ``Path: null`` is the literal contract — not ``Path: None``.
+        assert "Path: None" not in rendered
+
+    def test_concrete_path_renders_path_header(self):
+        artifact = llm_backend.EvidenceArtifact(
+            target_id="alpha",
+            path="docs/example.md",
+            text="line one",
+            quotable=True,
+        )
+        rendered = llm_backend._render_numbered_artifact_text(artifact)
+        assert rendered.startswith("Path: docs/example.md\n\n")
+        assert "   1 | line one" in rendered
+
+    def test_empty_text_still_emits_path_header_and_one_numbered_line(self):
+        """Empty body still produces a single numbered placeholder line."""
+        artifact = llm_backend.EvidenceArtifact(
+            target_id=None,
+            path=None,
+            text="",
+            quotable=True,
+        )
+        rendered = llm_backend._render_numbered_artifact_text(artifact)
+        assert rendered.startswith("Path: null\n\n")
+        assert "   1 | " in rendered
+
 
 class TestLegacyQuoteFallbackRuleAwareGrounding:
     """#268 fallback path should still ground against prompt-visible multi-target corpus."""
@@ -4699,6 +4791,91 @@ class TestLegacyQuoteFallbackRuleAwareGrounding:
         diag = llm_backend.check(rule, "ignored")
         assert diag.status is Status.PASS, diag.evidence[0].to_dict()
         assert diag.evidence[0].data["llm_strategy"] == "review"
+
+    def test_review_legacy_quote_fallback_resolves_span_against_multi_target_corpus(
+        self, monkeypatch, tmp_path
+    ):
+        """#275 follow-up: review-strategy span resolution on the legacy
+        quote-only path must use the rule-aware multi-target corpus.
+
+        Before the fix, span resolution called ``_resolve_artifact_text(target, ...)``
+        which returned ``str(target)`` (the placeholder ``"ignored"`` in this
+        test) — guaranteed not to contain the model's quote, so the span list
+        was always empty.  With the fix, spans are resolved against the
+        flat multi-target grounding corpus and the legitimate quote lands.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_b = tmp_path / "b.md"
+        target_a.write_text("alpha quote substring here.", encoding="utf-8")
+        target_b.write_text("beta quote substring here.", encoding="utf-8")
+        primary_response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_quotes": ["alpha quote substring"],
+                "suggested_action": None,
+            }
+        )
+        reviewer_response = json.dumps({"review_verdict": "agree", "review_reason": "Grounded."})
+        calls = iter([primary_response, reviewer_response])
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(next(calls)))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        rule = dataclasses.replace(rule, params={**rule.params, "strategy": "review"})
+        diag = llm_backend.check(rule, "ignored")
+        assert diag.status is Status.PASS, diag.evidence[0].to_dict()
+        ev_data = diag.evidence[0].data
+        assert ev_data["llm_strategy"] == "review"
+        # Quote landed against the rule-aware corpus, not str("ignored"):
+        # spans should be non-empty and locate the alpha-target substring.
+        spans = ev_data["supporting_evidence_spans"]
+        assert len(spans) == 1, spans
+        assert spans[0]["quote"] == "alpha quote substring"
+
+    def test_review_legacy_quote_fallback_rejects_quote_fabricated_against_multi_target_corpus(
+        self, monkeypatch, tmp_path
+    ):
+        """#275 follow-up: defensive fabrication validation on the review
+        strategy's legacy fallback path must use the rule-aware multi-target
+        corpus.  A quote that exists in the str(target) placeholder
+        ("contains 'alpha'") but not in either real artifact body MUST still
+        be rejected as fabrication when the artifact corpus does not contain it.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        target_a = tmp_path / "a.md"
+        target_b = tmp_path / "b.md"
+        target_a.write_text("alpha body only", encoding="utf-8")
+        target_b.write_text("beta body only", encoding="utf-8")
+        # The placeholder target string contains "ignored placeholder" but
+        # neither artifact body contains those words. The model emits a
+        # legacy quote drawn from the placeholder string. The fabrication
+        # check must use the multi-target corpus and reject the quote.
+        primary_response = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "Grounded.",
+                "supporting_evidence_quotes": ["ignored placeholder"],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(llm_backend, "_call_openai", lambda *a, **k: _stub_response(primary_response))
+        rule = _multi_target_rule(
+            [
+                {"id": "alpha", "kind": "documentation", "path": str(target_a)},
+                {"id": "beta", "kind": "documentation", "path": str(target_b)},
+            ]
+        )
+        rule = dataclasses.replace(rule, params={**rule.params, "strategy": "review"})
+        diag = llm_backend.check(rule, "ignored placeholder")
+        # Quote is NOT in either real artifact body → fabrication MUST trip.
+        assert diag.status is Status.UNSUPPORTED, diag.evidence[0].to_dict()
+        assert diag.evidence[0].kind == "llm_quote_fabrication"
+        assert "ignored placeholder" in diag.evidence[0].data["fabricated_quotes"]
 
 
 class TestMultiTargetQuoteParsing:

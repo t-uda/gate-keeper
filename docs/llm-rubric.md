@@ -327,6 +327,11 @@ The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version
 
 Primary contract (#268):
 - Prompt target blocks are rendered with stable 1-based line numbers.
+- Each rendered artifact carries an explicit `Path:` header — either a
+  filesystem path (`Path: <path>`) or the literal `Path: null` for inline /
+  no-path single-target artifacts. The model's evidence-ref `path` field
+  must match the rendered header (or be `null` when the header is
+  `Path: null`).
 - `supporting_evidence_refs` is validated against the exact prompt-visible
   corpus (single-target and multi-target paths share the same resolver).
 - On success, gate-keeper reconstructs `supporting_evidence_quotes`
