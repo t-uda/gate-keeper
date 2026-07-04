@@ -1,0 +1,77 @@
+# Explicit exemptions for the manifest-coverage validator.
+# Schema: docs/design/dependency-gates.md §6.2.
+#
+# Each entry exempts a single repo-relative path from the
+# ``uncovered_file`` gate. A changed file that is neither covered by a
+# manifest edge nor listed here causes a FAIL.
+#
+# Category values:
+#   manual      — owner/agent has explicitly acknowledged the path; no
+#                 further semantic review required.
+#   llm_required — reserved for Layer 2 (issue #281); deterministic
+#                 checks found an ambiguous relationship that needs LLM
+#                 narrowing. Not exercised in this slice.
+#
+# Bootstrap entries: files in this repo that are intentionally not (yet)
+# manifest nodes. These cover common tooling, tests, and config that do
+# not participate in a doc↔code dependency relationship.
+
+exemptions:
+  # ---- scripts / tooling ----
+  - path: scripts/dependency_gates/check_cli_reference.py
+    category: manual
+    reason: "validator script — tooling, not a document artifact"
+  - path: scripts/dependency_gates/check_manifest_coverage.py
+    category: manual
+    reason: "validator script — tooling, not a document artifact"
+  - path: scripts/dependency_gates/check_repo_refs.py
+    category: manual
+    reason: "validator script — tooling, not a document artifact"
+  - path: scripts/dependency_gates/_changed_files.py
+    category: manual
+    reason: "shared helper — re-export shim, not a document artifact"
+  - path: scripts/dependency_gates/_repo_ref_scan.py
+    category: manual
+    reason: "shared helper — extractor module, not a document artifact"
+  - path: scripts/dependency_gates/_stamp.py
+    category: manual
+    reason: "shared helper — stamp parser, not a document artifact"
+  - path: scripts/dependency_gates/manifest.py
+    category: manual
+    reason: "shared helper — manifest loader, not a document artifact"
+  - path: scripts/dependency_gates/__init__.py
+    category: manual
+    reason: "package init — not a document artifact"
+
+  # ---- dependency-gate rule files and config ----
+  - path: docs/dependency-gate-rules.json
+    category: manual
+    reason: "rule registry — configuration artifact, not a tracked doc"
+  - path: .gate-keeper/dependency-manifest.yml
+    category: manual
+    reason: "manifest itself — bootstrap; not a dependency target"
+  - path: .gate-keeper/ref-exemptions.yml
+    category: manual
+    reason: "this file — bootstrap exemption list"
+
+  # ---- design documents ----
+  - path: docs/design/dependency-gates.md
+    category: manual
+    reason: "internal process design note — not a paired artifact"
+
+  # ---- tests ----
+  - path: tests/test_manifest_coverage.py
+    category: manual
+    reason: "test file — tooling, not a document artifact"
+  - path: tests/test_dependency_manifest.py
+    category: manual
+    reason: "test file — tooling, not a document artifact"
+  - path: tests/test_dependency_validator.py
+    category: manual
+    reason: "test file — tooling, not a document artifact"
+  - path: tests/test_dependency_stamp.py
+    category: manual
+    reason: "test file — tooling, not a document artifact"
+  - path: tests/test_repo_ref_scanner.py
+    category: manual
+    reason: "test file — tooling, not a document artifact"
