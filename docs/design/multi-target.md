@@ -26,6 +26,17 @@ Tracking issue: #74. Design phase only — no IR or backend changes in this doc.
 > heuristic relevance ranking, streaming evaluation. The user-facing
 > reference is `docs/cli-reference.md` § "Multi-target evaluation".
 
+> **Ratification status (S3 — per-rule target scope, #279).** §9 ratifies the
+> per-rule target-scope contract under umbrella #277 (incremental audit trunk).
+> This is a *distinct* axis from the §2.1/§2.2 exploration above: those asked how
+> a rule assembles several artifacts into one evaluation (`params.targets`,
+> realized by #182); §9 fixes how a rule declares *which candidate files it runs
+> against* (`params.target_scope`) so the engine can compute per-rule effective
+> sets `scope ∩ run-level candidate set` without running every rule against every
+> file. It builds on the shipped S1 changed-set surface (`--target-changed` /
+> `--base-ref`, issue #278) and leaves all backends untouched. §2.1 and §2.2
+> carry ratification pointers into §9.
+
 ---
 
 ## 1. Problem Statement
@@ -55,6 +66,12 @@ that say "doc matches code" have no content to judge against.
 ## 2. Design Questions
 
 ### 2.1 How does a rule signal it wants multi-file context?
+
+> **Ratified (S3, #279) — see §9.** The question below concerns *content
+> assembly* (several artifacts into one prompt) and was realized as
+> `params.targets` by #182. The separate question of *per-rule target scope*
+> (which candidate files a rule runs against) is ratified in §9 with a distinct
+> `params.target_scope` grammar; §9.1 records why they are separate keys.
 
 **Recommendation: explicit IR param (`params.targets`) on the existing
 `semantic_rubric` / `external_check` / filesystem rule kinds, populated by the
@@ -93,6 +110,15 @@ on a rule that needs multi-file context will produce a single-file result with
 ---
 
 ### 2.2 File-set selection
+
+> **Ratified (S3, #279) — see §9.** Per-rule scope selection — intersecting a
+> rule's declared `params.target_scope` with the run-level candidate set
+> (explicit `--target` and/or the shipped S1 `--target-changed` set) — is
+> ratified in §9, including empty-set semantics (§9.4), the per-rule file cap
+> (§9.5), and the shared-expansion memo (§9.6). The LLM-rubric *dynamic content
+> assembly* half of this section (below) stays S5 (#281) territory: an oversized
+> per-rule effective set routed to `llm-rubric` remains `multi_target_unsupported`
+> after S3.
 
 **Recommendation: user-controlled glob(s) expressed in `params.targets`, with
 a strict limit on files sent to LLM contexts; heuristic subset is a fallback
@@ -427,3 +453,218 @@ Finalize the `--target` append-action CLI, update `--help` text and
 `docs/backend-external.md` adapter contract to document `TargetSpec` and
 opt-in multi-target support. Acceptance: three concrete invocation examples
 from §4 work end-to-end.
+
+---
+
+## 9. Ratified: Per-Rule Target Scope (S3, #279)
+
+> Status: ratified contract. Slice S3 under umbrella #277 (incremental audit
+> trunk) implements this section. It supersedes the exploratory register of
+> §2.1/§2.2 for the per-rule-scope axis only; the content-assembly axis of those
+> sections remains as written.
+
+S3 makes rulesets self-contained for incremental auditing: a rule declares the
+file domain it governs, and the engine runs each rule only against the
+candidate files inside that domain. `validate rules.md --target-changed` then
+becomes a full incremental audit without the caller enumerating which rules care
+about which files.
+
+The mechanism is **engine-side only** (CLI / `validator.py`). No backend
+signature changes; backends keep receiving a `TargetSpec` and never learn that a
+scope was applied. A rule with no scope is dispatched byte-for-byte as today.
+
+### 9.1 Grammar — new `params.target_scope`, not an extension of `params.targets`
+
+**Decision: per-rule scope is a new sibling key `params.target_scope`, a list of
+repo-relative glob strings. It is *not* an extension of `params.targets`.**
+
+| Option | Verdict |
+|--------|---------|
+| Extend `params.targets` to accept glob entries | Rejected |
+| New sibling `params.target_scope: list[str]` | **Ratified** |
+
+`params.targets` is already claimed by #182 for a different purpose: it is a list
+of `{id, kind, path}` artifact specs, parsed by `_parse_multi_targets`
+(`backends/llm_rubric.py`), capped at 5 literal entries, with `kind` required and
+per-entry `id` used for in-prompt quote attribution. It answers "which artifacts
+are assembled into one prompt," a *backend* concern. Overloading it with glob
+strings would force `_parse_multi_targets` to distinguish a scope glob from an
+artifact spec, break its "≤5 literal `{id,kind,path}` entries" contract, and
+conflate two layers.
+
+`params.target_scope` answers a different, *engine*-level question — "which
+candidate files does this rule run against" — and lives where the engine already
+resolves targets. Keeping them separate keys preserves `_parse_multi_targets`
+backward compatibility byte-for-byte (a rule may legitimately carry both: a
+scope that selects files, and a `targets` list that assembles artifacts once
+S5 lands), and keeps each key at its own layer. Grammar:
+
+```jsonc
+// Rule.params for a scoped rule:
+{
+  "target_scope": ["docs/**/*.md"]   // list[str] of repo-relative globs
+}
+```
+
+Glob semantics match the existing target machinery (`resolve_targets` /
+`looks_like_glob`): `**` spans path segments, `*` matches within a segment, `?`
+one non-`/` char. `params.target_scope` absent ⇒ the rule is unscoped and keeps
+today's behaviour (§9.9). An empty list or a non-list value is a rule
+misconfiguration → per-rule `UNAVAILABLE` with `scope_invalid` evidence
+(fail-closed at the parse seam, mirroring `_parse_multi_targets`).
+
+### 9.2 Semantics — effective set is scope ∩ candidate
+
+For each rule the engine computes:
+
+```
+effective_set = scope_expansion(rule.params.target_scope) ∩ run_level_candidate_set
+```
+
+- `scope_expansion(...)` expands the rule's globs against the repository root (§9.6
+  memoizes this).
+- `run_level_candidate_set` is the resolved run-level `TargetSpec.paths` — the
+  same set every rule sees today (§9.3).
+- The engine builds a per-rule `TargetSpec` from `effective_set` and dispatches
+  the rule against it. A single-file effective set dispatches as a single-target
+  `TargetSpec` (backends unchanged); a multi-file effective set dispatches as
+  `is_multi=True` (filesystem aggregates per file; `llm-rubric` returns
+  `multi_target_unsupported` until S5 — §9.7 / §9.10).
+
+The intersection is a path-set operation on normalized repo-relative POSIX paths
+(the same normalization S1 established for changed-set intersection, #278 R4), so
+scope globs and the candidate set meet in one path vocabulary regardless of the
+CWD `validate` was invoked from.
+
+### 9.3 Run-level candidate set (builds on shipped S1)
+
+The candidate set is exactly the run-level target pool S1 (#278, merged) already
+produces:
+
+- explicit `--target` paths / dirs / globs, and/or
+- the `--target-changed` set (files changed since `--base-ref`, filtered through
+  the text-readable + 200-file-cap machinery), and
+- when both are given, their intersection.
+
+S3 adds a second, per-rule intersection *on top of* that pool. It does not change
+how the pool itself is computed; `changed_set_empty` (the run-level empty-pool
+evidence from S1) is unchanged and orthogonal to the per-rule `scope_empty`
+below.
+
+### 9.4 Empty effective set — `scope_empty` (PASS) vs `scope_invalid` (UNAVAILABLE)
+
+An empty per-rule effective set is **never a run abort and never a silent pass.**
+Two distinct causes get two distinct verdicts:
+
+| Cause | Status | Evidence kind |
+|-------|--------|---------------|
+| Scope valid (expands to ≥1 file repo-wide) but `scope ∩ candidate = ∅` | `PASS` | `scope_empty` |
+| Scope malformed, empty list, non-list, or expands to zero files repo-wide | `UNAVAILABLE` | `scope_invalid` |
+
+The `scope_empty` PASS is the designed steady state of incremental auditing: a
+rule scoped to `docs/**/*.md` in a run whose candidate set has no docs has
+nothing to check *this run*, and says so with an explicit, auditable evidence
+record. This mirrors the repo's own not-applicable precedents that resolve to
+PASS — `edge_not_applicable` and `dependent_artifact_unaffected` in
+`docs/design/dependency-gates.md` §2.7.
+
+This deliberately differs from the filesystem backend's "empty resolved set →
+`UNAVAILABLE`" rule (§6 / first-slice status). There, an empty set means the
+caller's *explicit* target glob matched nothing — a likely misconfiguration. Here,
+an empty *intersection with the candidate set* is expected and common, so forcing
+`UNAVAILABLE` would make every incremental run fail-noisy. The misconfiguration
+case is still caught: a scope that matches nothing anywhere in the tree is
+`scope_invalid` / `UNAVAILABLE` (fail-closed), distinct from a valid scope that
+simply does not intersect this run's candidates.
+
+`scope_empty` carries the expanded scope size and the (empty) intersection in its
+evidence data so a reader can tell "nothing in scope changed" from "scope is
+broken."
+
+### 9.5 Per-rule file-limit breach — per-rule diagnostic, not run abort
+
+**Decision: a per-rule effective set exceeding `DEFAULT_FILE_LIMIT` (200) is a
+per-rule `UNAVAILABLE` with `scope_file_limit_exceeded` evidence — not a
+`TargetExpansionError` that aborts the whole run.**
+
+Today `resolve_targets` raises `TargetExpansionError` on cap breach, which the
+CLI turns into a run-level usage error. That run-level cap on the *candidate
+pool* stays exactly as-is. S3 adds a *second, per-rule* cap check on each
+`effective_set`: one over-broad rule (e.g. `src/**` intersected with a large
+changed set) must not sink the audit of every other rule in the file. The
+breaching rule alone reports `UNAVAILABLE` / `scope_file_limit_exceeded` (carrying
+the resolved count and the cap); all other rules evaluate normally. Fail-closed:
+the over-broad rule is not silently truncated to the first 200 files.
+
+### 9.6 Shared-expansion memo (R9)
+
+**Decision: each distinct `target_scope` glob pattern is expanded once per run
+and memoized, keyed by `(pattern, repo_root)`; the result is reused across every
+rule that declares it.**
+
+Naïvely, `scope_expansion` per rule is O(rules × files). Rules commonly share
+scopes (`src/**/*.py`, `docs/**/*.md`), so a per-run memo collapses the cost to
+O(distinct patterns × files) for expansion plus O(rules × |candidate set|) for the
+cheap set intersections. The memo is per-run (never persisted; the working tree
+can change between runs) and is purely a performance concession — it changes no
+verdict. This satisfies #279 R9 without raising the 200-file cap or adding a
+persistent index.
+
+### 9.7 R1 — the #178 `target_kind` precheck stays run-level
+
+The deterministic `target_kind`-mismatch precheck (#178, `validator.py`) compares
+the *run-level* `--artifact-kind` against each rule's `target_kind` annotation
+before dispatch, short-circuiting to `target_kind_mismatch` without a provider
+call. **S3 leaves this precheck exactly where it is — run-level, untouched.**
+
+Per-rule effective sets can mix file kinds (a rule scoped across `.py` and `.md`),
+but S3 does not inspect per-file kinds and does not move the precheck per-file.
+Mixed-kind effective-set semantics — what `target_kind` means when one rule spans
+several artifact kinds — are explicitly **deferred to S5 (#281)**, which owns the
+llm-rubric dynamic-assembly path where per-file kind actually matters. Recording
+this here satisfies #279 R1: S3 changes neither the precheck's position nor its
+run-level semantics.
+
+### 9.8 Evidence vocabulary (S3 additions)
+
+| Kind | Status | Meaning |
+|------|--------|---------|
+| `scope_effective_set` | (rides on the rule's normal verdict) | Records the resolved per-rule effective set (scope size, candidate size, intersection) so every scoped verdict is auditable. |
+| `scope_empty` | `PASS` | Scope valid; `scope ∩ candidate` is empty (nothing in scope this run). |
+| `scope_invalid` | `UNAVAILABLE` | `target_scope` malformed / empty / non-list, or expands to zero files repo-wide. |
+| `scope_file_limit_exceeded` | `UNAVAILABLE` | Per-rule effective set exceeds `DEFAULT_FILE_LIMIT`. |
+
+`Status` enum values are unchanged; only the evidence vocabulary grows.
+
+### 9.9 Backward compatibility
+
+- A rule without `params.target_scope` is dispatched against the run-level
+  `TargetSpec` byte-for-byte as today — no effective-set computation, no new
+  evidence. All existing `params.targets` literal-path rules and every current
+  behaviour are unchanged (#279 AC5).
+- The `validate()` public contract is unchanged: `target_scope` is read from
+  `rule.params` (already an unvalidated `dict[str, Any]`), so `Rule.from_dict`
+  and every fixture stay byte-identical (no IR schema change).
+
+### 9.10 Deferred to S5 (#281) and beyond
+
+- **LLM-rubric dynamic content assembly for oversized effective sets.** A
+  multi-file effective set routed to `llm-rubric` stays `multi_target_unsupported`
+  after S3 (same as #278 R5). S5 assembles the narrowed affected context; only
+  then does a scoped multi-file llm-rubric rule evaluate.
+- **Mixed-kind effective-set semantics** (§9.7) — S5.
+- **Relevance ranking / heuristic ordering** of the effective set — out of scope
+  (matches §2.2 and #279 non-goals).
+- **Raising the 200-file cap** — out of scope (#279 non-goals).
+- **Auto-populating `target_scope`** via a classifier or static analysis — out of
+  scope (#279 non-goals); scopes are author-supplied.
+
+### 9.11 Acceptance-criteria mapping (#279)
+
+| #279 AC | Where ratified |
+|---------|----------------|
+| AC1 — two scopes evaluate disjoint subsets; per-rule effective set in evidence | §9.2, §9.8 (`scope_effective_set`) |
+| AC2 — scope ∩ changed-set with S1 flags | §9.2, §9.3 |
+| AC3 — empty effective set → explicit `scope_empty`, not a run abort | §9.4 |
+| AC4 — per-rule `DEFAULT_FILE_LIMIT` breach → per-rule diagnostic | §9.5 |
+| AC5 — existing literal-path rules and `validate()` unchanged | §9.9 |
