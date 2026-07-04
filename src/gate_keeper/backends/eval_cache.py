@@ -160,6 +160,15 @@ def _build_target_entries(
         ]
 
     # Single-target path.
+    # Mirror the unwrapping that llm_rubric.check() applies: a single-file
+    # TargetSpec (is_multi=False) is normalised to its underlying path so that
+    # _resolve_artifact_input reads the real file bytes (not str(TargetSpec))
+    # and _resolve_single_target_path returns the actual path (not None).
+    # Without this, edits to the file leave the cache key unchanged — stale hit.
+    from gate_keeper.targets import TargetSpec  # noqa: PLC0415
+
+    if isinstance(target, TargetSpec) and not target.is_multi:
+        target = target.paths[0] if target.paths else ""
     rendered_text = _llm._resolve_artifact_input(target, artifact_kind)
     path = _llm._resolve_single_target_path(target)
     return [{"id": None, "path": path, "content_sha256": _sha256_hex(rendered_text)}]
@@ -445,9 +454,12 @@ def try_lookup(
         import gate_keeper.backends.llm_rubric as _llm  # noqa: PLC0415
 
         env = _llm._load_env_file()
-        provider = env.get("GATE_KEEPER_LLM_PROVIDER", "").lower().strip()
-        if provider not in _SUPPORTED_PROVIDERS:
+        # Mirror _is_configured: require both a recognised provider name AND the
+        # matching API key.  A cache hit while the key is absent would mask a
+        # credential failure (the real backend would produce UNAVAILABLE).
+        if not _llm._is_configured(env):
             return None
+        provider = env.get("GATE_KEEPER_LLM_PROVIDER", "").lower().strip()
         model = _llm._resolve_model(provider, env)
 
         _dir = cache_dir if cache_dir is not None else get_cache_dir()
@@ -484,9 +496,12 @@ def try_store(
         import gate_keeper.backends.llm_rubric as _llm  # noqa: PLC0415
 
         env = _llm._load_env_file()
-        provider = env.get("GATE_KEEPER_LLM_PROVIDER", "").lower().strip()
-        if provider not in _SUPPORTED_PROVIDERS:
+        # Same guard as try_lookup: require full provider configuration (name +
+        # API key) before storing.  A missing key means the real backend would
+        # have returned UNAVAILABLE which §2.4 would not cache — skip storage.
+        if not _llm._is_configured(env):
             return
+        provider = env.get("GATE_KEEPER_LLM_PROVIDER", "").lower().strip()
         model = _llm._resolve_model(provider, env)
 
         raw_mb = env.get("GATE_KEEPER_EVAL_CACHE_MAX_MB", "").strip()
