@@ -458,20 +458,24 @@ from §4 work end-to-end.
 
 ## 9. Ratified: Per-Rule Target Scope (S3, #279)
 
-> Status: ratified contract. Slice S3 under umbrella #277 (incremental audit
-> trunk) implements this section. It supersedes the exploratory register of
-> §2.1/§2.2 for the per-rule-scope axis only; the content-assembly axis of those
-> sections remains as written.
+> Status: ratified contract — **design-only**. No code lands in this document.
+> `params.target_scope` is **not yet** accepted by `validate` / `validator.py`; a
+> repo-wide search finds only this design text. The forthcoming S3 implementation
+> PR (under umbrella #277, incremental audit trunk) will implement this section
+> against the contract fixed here. This ratification supersedes the exploratory
+> register of §2.1/§2.2 for the per-rule-scope axis only; the content-assembly
+> axis of those sections remains as written.
 
-S3 makes rulesets self-contained for incremental auditing: a rule declares the
-file domain it governs, and the engine runs each rule only against the
-candidate files inside that domain. `validate rules.md --target-changed` then
-becomes a full incremental audit without the caller enumerating which rules care
-about which files.
+Once implemented, S3 will make rulesets self-contained for incremental auditing:
+a rule declares the file domain it governs, and the engine runs each rule only
+against the candidate files inside that domain, so `validate rules.md
+--target-changed` becomes a full incremental audit without the caller enumerating
+which rules care about which files.
 
-The mechanism is **engine-side only** (CLI / `validator.py`). No backend
-signature changes; backends keep receiving a `TargetSpec` and never learn that a
-scope was applied. A rule with no scope is dispatched byte-for-byte as today.
+The contract is **engine-side only** (CLI / `validator.py`). It specifies no
+backend signature changes: backends keep receiving a `TargetSpec` and never learn
+that a scope was applied, and a rule with no scope is dispatched byte-for-byte as
+today.
 
 ### 9.1 Grammar — new `params.target_scope`, not an extension of `params.targets`
 
