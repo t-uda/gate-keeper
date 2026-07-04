@@ -482,6 +482,47 @@ When `--reproducibility N` aggregates `N` runs, the `latency_ms` / `tokens_in`
 reflect that single representative run, not an aggregate. The separate
 `reproducibility_score` evidence entry (#68) carries no telemetry.
 
+## Deterministic-mode sampling (`--deterministic`, #69)
+
+Pass `--deterministic` to inject provider-specific sampling parameters that
+reduce output variability across repeated runs. This is a Slice A feature;
+eval-cache deduplication (Slice B) is tracked separately.
+
+```sh
+gate-keeper validate rules.md --target artifact.md --deterministic
+```
+
+### Per-provider capability table
+
+| Provider / model class | Extra params sent | Rationale |
+| --- | --- | --- |
+| Anthropic (all models) | `temperature=0.0` | Lowers sampling randomness; accepted by all Anthropic models. |
+| OpenAI standard (e.g. `gpt-4o-mini`, `gpt-4o`) | `temperature=0.0` | Same effect as Anthropic. |
+| OpenAI reasoning-class (`gpt-5*`, `o1*`, `o3*`) | _(none)_ | Reasoning-class models reject `temperature`; sending it causes a provider error. The flag is still recorded in evidence for traceability. |
+
+The capability table (`_DETERMINISTIC_CAPABILITY_TABLE` in `llm_rubric.py`) is
+the authoritative source; the reasoning-class check uses the same longest-prefix
+match as the existing `_REASONING_EFFORT_TABLE`.
+
+### Evidence fields
+
+Two fields are added to every `llm_judgment` evidence entry regardless of
+whether `--deterministic` was requested:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `deterministic_mode` | `bool` | `true` when `--deterministic` was active, `false` otherwise. |
+| `deterministic_params` | `dict \| null` | The params dict injected (e.g. `{"temperature": 0.0}`) when `--deterministic` is active; `null` otherwise. For OpenAI reasoning models the value is `{}` (empty dict — flag was active but no params were sent). |
+
+### Fail-closed rejection handling
+
+If a provider rejects the injected params at runtime (e.g. a future model that
+does not accept `temperature`), the error is recorded as `provider_error`
+evidence with the exception class name in `data.failure_mode`. The backend
+never crashes; the rule is marked `unavailable`. Add the model prefix to
+`_DETERMINISTIC_CAPABILITY_TABLE["openai_reasoning"]` (or the equivalent
+Anthropic entry) to suppress the param for that model class.
+
 ## Failure modes
 
 Any provider failure path maps to `unavailable` — never to `pass` or `fail`.

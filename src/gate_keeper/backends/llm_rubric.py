@@ -67,6 +67,7 @@ class JudgmentRequest:
     rule: Rule
     target: str | Path
     artifact_kind: TargetKind | None = None
+    deterministic: bool = False
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1180,14 @@ def _build_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[str, dict[str, int]]:
+def _call_anthropic(
+    api_key: str,
+    system: str,
+    user: str,
+    model: str,
+    *,
+    deterministic: bool = False,
+) -> tuple[str, dict[str, int]]:
     """Call Anthropic and return ``(response_text, telemetry)``.
 
     Telemetry keys (#76):
@@ -1195,17 +1203,32 @@ def _call_anthropic(api_key: str, system: str, user: str, model: str) -> tuple[s
     object), raise :class:`RuntimeError`. The caller in :func:`check`
     catches this and dispatches a ``provider_error`` diagnostic; we never
     synthesise a zero token count.
+
+    When *deterministic* is ``True``, extra sampling kwargs from
+    :func:`_deterministic_sampling_params` are injected (``temperature=0.0``
+    for Anthropic).  The helper is defined later in this module; at the call
+    site the capability table has already been initialised.
     """
     from anthropic import Anthropic
 
     client = Anthropic(api_key=api_key)
     start = time.perf_counter()
-    msg = client.messages.create(
-        model=model,
-        max_tokens=600,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+    # Branch explicitly so pyright can resolve the overload without **kwargs.
+    if deterministic:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=600,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            temperature=0.0,
+        )
+    else:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=600,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
     latency_ms = int(round((time.perf_counter() - start) * 1000))
     parts: list[str] = []
     for block in msg.content:
@@ -1285,7 +1308,49 @@ def _reasoning_effort_for(model: str) -> str | None:
     return None
 
 
-def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str, dict[str, int]]:
+# ---------------------------------------------------------------------------
+# Deterministic-mode capability table (#69, Slice A)
+# ---------------------------------------------------------------------------
+#
+# Records, per provider and model class, the extra sampling kwargs sent when
+# ``--deterministic`` is active.  An empty dict means the model rejects the
+# parameter (e.g. OpenAI reasoning-class models reject ``temperature``); the
+# caller ``**``-unpacks the result, so an empty dict means no extra params.
+#
+# Capability matrix:
+#   anthropic       / any model  → temperature=0.0  (supported across all models)
+#   openai          / standard   → temperature=0.0  (completions-class models)
+#   openai          / reasoning  → {}  (gpt-5*, o1*, o3* reject temperature entirely)
+_DETERMINISTIC_CAPABILITY_TABLE: dict[str, dict[str, float]] = {
+    "anthropic": {"temperature": 0.0},
+    "openai_standard": {"temperature": 0.0},
+    "openai_reasoning": {},  # reasoning-class models reject temperature
+}
+
+
+def _deterministic_sampling_params(provider: str, model: str) -> dict[str, float]:
+    """Return extra sampling kwargs for ``--deterministic`` mode.
+
+    Consults :data:`_DETERMINISTIC_CAPABILITY_TABLE` for the applicable
+    params.  For OpenAI reasoning-class models (``gpt-5*``, ``o1*``,
+    ``o3*``) the table returns an empty dict because those models reject the
+    ``temperature`` parameter — sending it would produce a
+    ``provider_error``.  Callers may ``**``-unpack the return value safely.
+    """
+    if provider == "anthropic":
+        return dict(_DETERMINISTIC_CAPABILITY_TABLE["anthropic"])
+    key = "openai_reasoning" if _is_reasoning_class(model) else "openai_standard"
+    return dict(_DETERMINISTIC_CAPABILITY_TABLE[key])
+
+
+def _call_openai(
+    api_key: str,
+    system: str,
+    user: str,
+    model: str,
+    *,
+    deterministic: bool = False,
+) -> tuple[str, dict[str, int]]:
     """Call OpenAI Responses API and return ``(response_text, telemetry)``.
 
     Telemetry keys (#76):
@@ -1313,6 +1378,11 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
     via ``client.responses.create``. A restricted OpenAI key for
     gate-keeper needs only ``Responses (/v1/responses): Request`` enabled;
     ``Chat completions (/v1/chat/completions)`` may be set to ``None``.
+
+    When *deterministic* is ``True``, extra sampling kwargs from
+    :func:`_deterministic_sampling_params` are injected.  For
+    reasoning-class models the table returns an empty dict (those models
+    reject ``temperature``), so no extra params are sent for them.
     """
     from openai import OpenAI
 
@@ -1327,12 +1397,22 @@ def _call_openai(api_key: str, system: str, user: str, model: str) -> tuple[str,
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    # Branch explicitly so pyright can resolve the overload without **kwargs.
+    # Reasoning-class models reject temperature even in deterministic mode,
+    # so the capability table returns {} for them — no extra params either way.
     if effort is not None:
         resp = client.responses.create(
             model=model,
             max_output_tokens=max_tokens,
             input=input_messages,  # type: ignore[arg-type]
             reasoning={"effort": effort},  # type: ignore[arg-type]
+        )
+    elif deterministic:
+        resp = client.responses.create(
+            model=model,
+            max_output_tokens=max_tokens,
+            input=input_messages,  # type: ignore[arg-type]
+            temperature=0.0,
         )
     else:
         resp = client.responses.create(
@@ -2769,11 +2849,15 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
         return _unavailable_model_unconfigured(rule, rubric_input, exc)
     system, user = _build_prompt(rule, target, artifact_kind)
 
+    deterministic = request.deterministic
+    det_kwargs = {"deterministic": True} if deterministic else {}
     try:
         if provider == "anthropic":
-            response_text, telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
+            response_text, telemetry = _call_anthropic(
+                env["ANTHROPIC_API_KEY"], system, user, model, **det_kwargs
+            )
         else:
-            response_text, telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
+            response_text, telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model, **det_kwargs)
     except Exception as exc:  # noqa: BLE001 — fail-closed: any provider error → unavailable
         return _unavailable_provider_error(rule, rubric_input, provider, type(exc).__name__, str(exc))
 
@@ -2799,12 +2883,16 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
     # fields aggregate across calls. The legacy per-call ``latency_ms``
     # / ``tokens_in`` / ``tokens_out`` / ``cost_estimate_usd`` fields
     # remain on the evidence dict so existing consumers don't break.
+    # #69 — deterministic_mode and deterministic_params record which
+    # sampling constraints were applied (or None when not active).
     strategy_meta: dict[str, Any] = {
         "llm_strategy": "single",
         "llm_call_count": 1,
         "models": [model],
         "cost_estimate_usd_total": cost,
         "latency_ms_total": telemetry["latency_ms"],
+        "deterministic_mode": deterministic,
+        "deterministic_params": _deterministic_sampling_params(provider, model) if deterministic else None,
     }
 
     # #169 — when the model declines because the rule does not apply to the
@@ -3106,6 +3194,7 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
     rule = request.rule
     target = request.target
     artifact_kind = request.artifact_kind
+    deterministic = request.deterministic
 
     rubric_input = _build_rubric_input(rule, target)
 
@@ -3140,13 +3229,18 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
     total_cost: float | None = 0.0
     total_latency_ms: int = 0
     models_used: list[str] = []
+    det_kwargs = {"deterministic": True} if deterministic else {}
 
     for judge_index in range(panel_size):
         try:
             if provider == "anthropic":
-                response_text, telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
+                response_text, telemetry = _call_anthropic(
+                    env["ANTHROPIC_API_KEY"], system, user, model, **det_kwargs
+                )
             else:
-                response_text, telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
+                response_text, telemetry = _call_openai(
+                    env["OPENAI_API_KEY"], system, user, model, **det_kwargs
+                )
         except Exception as exc:  # noqa: BLE001
             judge_results.append(
                 {
@@ -3279,6 +3373,43 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
         )
 
     # --- Aggregate ---
+
+    # If every judge failed at the provider level (SDK error, rejected sampling
+    # param, timeout, etc.) there is no semantic signal in the panel — route to
+    # UNAVAILABLE/provider_error matching the single-strategy contract (#69).
+    all_provider_errors = judge_results and all(
+        str(r.get("failure_mode", "")) == "provider_error" for r in judge_results
+    )
+    if all_provider_errors:
+        first_detail = str(judge_results[0].get("detail", ""))
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNAVAILABLE,
+            severity=rule.severity,
+            message=(
+                f"All {len(judge_results)} consensus judges failed at the provider level. "
+                f"First failure: {first_detail[:200]}"
+            ),
+            evidence=[
+                Evidence(
+                    kind="provider_error",
+                    data={
+                        "failure_mode": "provider_error",
+                        "detail": first_detail,
+                        "llm_strategy": "consensus",
+                        "consensus_panel_size": panel_size,
+                        "judge_results": judge_results,
+                        "deterministic_mode": deterministic,
+                        "deterministic_params": (
+                            _deterministic_sampling_params(provider, model) if deterministic else None
+                        ),
+                    },
+                )
+            ],
+        )
+
     verdicts = [r["verdict"] for r in judge_results]
     pass_count = verdicts.count("pass")
     fail_count = verdicts.count("fail")
@@ -3345,6 +3476,8 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
         "models": models_used,
         "llm_call_count": panel_size,
         "judge_results": judge_results,
+        "deterministic_mode": deterministic,
+        "deterministic_params": _deterministic_sampling_params(provider, model) if deterministic else None,
     }
 
     if majority_verdict == "tie":
@@ -3667,6 +3800,7 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
     rule = request.rule
     target = request.target
     artifact_kind = request.artifact_kind
+    deterministic = request.deterministic
 
     rubric_input = _build_rubric_input(rule, target)
 
@@ -3685,12 +3819,17 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
 
     # ---- Pass 1: primary judge (same prompt as single strategy) ----
     system, user = _build_prompt(rule, target, artifact_kind)
+    det_kwargs = {"deterministic": True} if deterministic else {}
 
     try:
         if provider == "anthropic":
-            primary_text, primary_telemetry = _call_anthropic(env["ANTHROPIC_API_KEY"], system, user, model)
+            primary_text, primary_telemetry = _call_anthropic(
+                env["ANTHROPIC_API_KEY"], system, user, model, **det_kwargs
+            )
         else:
-            primary_text, primary_telemetry = _call_openai(env["OPENAI_API_KEY"], system, user, model)
+            primary_text, primary_telemetry = _call_openai(
+                env["OPENAI_API_KEY"], system, user, model, **det_kwargs
+            )
     except Exception as exc:  # noqa: BLE001
         return _unavailable_provider_error(rule, rubric_input, provider, type(exc).__name__, str(exc))
 
@@ -3852,11 +3991,11 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
     try:
         if provider == "anthropic":
             reviewer_text, reviewer_telemetry = _call_anthropic(
-                env["ANTHROPIC_API_KEY"], rev_system, rev_user, model
+                env["ANTHROPIC_API_KEY"], rev_system, rev_user, model, **det_kwargs
             )
         else:
             reviewer_text, reviewer_telemetry = _call_openai(
-                env["OPENAI_API_KEY"], rev_system, rev_user, model
+                env["OPENAI_API_KEY"], rev_system, rev_user, model, **det_kwargs
             )
     except Exception as exc:  # noqa: BLE001
         # Reviewer call failed: treat as abstain so primary verdict is preserved.
@@ -4001,6 +4140,8 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
         "supporting_evidence_refs": primary_refs_payload,
         "supporting_evidence_spans": [span.to_dict() for span in spans],
         "suggested_action": primary_parsed.suggested_action,
+        "deterministic_mode": deterministic,
+        "deterministic_params": _deterministic_sampling_params(provider, model) if deterministic else None,
     }
     evidence = Evidence(kind="llm_review", data=evidence_data)
 
@@ -4197,6 +4338,7 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
         rule=escalation_rule,
         target=request.target,
         artifact_kind=request.artifact_kind,
+        deterministic=request.deterministic,
     )
     if tier2_strategy == "review":
         tier2_diag = _run_review_strategy(escalation_request)
@@ -4316,6 +4458,7 @@ def check(
     target: str | Path | TargetSpec,
     *,
     artifact_kind: TargetKind | None = None,
+    deterministic: bool = False,
 ) -> Diagnostic:
     """Evaluate a semantic-rubric rule against *target*.
 
@@ -4366,6 +4509,16 @@ def check(
     artifact_kind:
         Optional caller-declared :class:`TargetKind` for *target* (#191).
         When supplied **and** *target* refers to a real file on disk, the
+    deterministic:
+        When ``True``, inject provider-specific sampling parameters that
+        reduce non-determinism (e.g. ``temperature=0.0``).  The applicable
+        params depend on the configured provider and model — see
+        :data:`_DETERMINISTIC_CAPABILITY_TABLE`.  For OpenAI reasoning-class
+        models (``gpt-5*``, ``o1*``, ``o3*``) no extra params are sent
+        because those models reject ``temperature``; the flag is still
+        recorded in evidence so downstream tools know deterministic mode was
+        requested.  Any provider rejection of the injected params surfaces as
+        a ``provider_error`` UNAVAILABLE result (fail-closed, R10).
         prompt's ``Target reference`` block is filled with the file
         content rather than the path string — gpt-4o-mini at v4 was
         observed to parrot filenames as artifact-kind evidence
@@ -4433,7 +4586,9 @@ def check(
     # judgment strategy; defaults to :data:`DEFAULT_STRATEGY` (``"single"``)
     # so unannotated rules preserve the pre-#183 single-call behaviour.
     strategy_id = _resolve_strategy_id(rule)
-    request = JudgmentRequest(rule=rule, target=target, artifact_kind=artifact_kind)
+    request = JudgmentRequest(
+        rule=rule, target=target, artifact_kind=artifact_kind, deterministic=deterministic
+    )
     strategy = _STRATEGIES.get(strategy_id)
     if strategy is not None:
         return strategy(request)
