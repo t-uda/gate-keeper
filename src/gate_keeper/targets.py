@@ -276,8 +276,9 @@ def resolve_changed_targets(
     Returns
     -------
     TargetSpec
-        A frozen spec carrying the deduplicated, sorted list of resolved paths
-        and ``is_multi=True`` (changed sets are always considered multi-source).
+        A frozen spec carrying the deduplicated, sorted list of resolved paths.
+        ``is_multi`` is ``True`` when the resolved count is not exactly one
+        (mirrors the semantics of :func:`resolve_targets`).
         ``paths`` may be empty when all changed files are non-text or deleted.
 
     Raises
@@ -309,7 +310,7 @@ def resolve_changed_targets(
     return TargetSpec(
         paths=accumulator,
         raw_targets=sorted(changed_posix_paths),
-        is_multi=True,
+        is_multi=len(accumulator) != 1,
     )
 
 

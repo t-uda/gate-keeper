@@ -179,15 +179,21 @@ class TestResolveChangedTargets:
         spec = resolve_changed_targets(frozenset(["a.md"]), tmp_path)
         assert len(spec.paths) == 1
 
-    def test_is_multi_always_true(self, tmp_path):
+    def test_is_multi_single_file(self, tmp_path):
         _write(tmp_path / "sole.md")
         spec = resolve_changed_targets(frozenset(["sole.md"]), tmp_path)
+        assert spec.is_multi is False
+
+    def test_is_multi_two_files(self, tmp_path):
+        _write(tmp_path / "a.md")
+        _write(tmp_path / "b.md")
+        spec = resolve_changed_targets(frozenset(["a.md", "b.md"]), tmp_path)
         assert spec.is_multi is True
 
     def test_empty_changed_set_returns_empty_spec(self, tmp_path):
         spec = resolve_changed_targets(frozenset(), tmp_path)
         assert spec.paths == []
-        assert spec.is_multi is True
+        assert spec.is_multi is True  # zero paths: not single-file, so is_multi
 
     def test_paths_are_absolute(self, tmp_path):
         _write(tmp_path / "sub" / "doc.md")

@@ -703,7 +703,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             changed_spec = TargetSpec(
                 paths=intersected,
                 raw_targets=sorted(changed_posix) + raw_targets,
-                is_multi=True,
+                is_multi=len(intersected) != 1,
             )
 
         # AC3: empty changed set → explicit evidence, not silent exit 0.
