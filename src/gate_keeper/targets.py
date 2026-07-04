@@ -250,6 +250,69 @@ def _expand_token_into(
     _check_cap(seen, file_limit)
 
 
+def resolve_changed_targets(
+    changed_posix_paths: frozenset[str],
+    repo_root: Path,
+    *,
+    file_limit: int | None = None,
+) -> TargetSpec:
+    """Resolve a changed-file set (from ``git diff --name-only``) into a :class:`TargetSpec`.
+
+    Unlike :func:`resolve_targets`, this function applies the text-readable
+    filter to each candidate path because ``git diff`` may include non-text
+    files (images, compiled binaries) and deleted files that no longer exist.
+
+    Parameters
+    ----------
+    changed_posix_paths:
+        Repo-root-relative POSIX paths returned by
+        ``gate_keeper.changed.compute_changed_files``.
+    repo_root:
+        Absolute path to the repository root (contains ``.git``).
+    file_limit:
+        Hard cap on the number of resolved files; exceeding it raises
+        :class:`TargetExpansionError`.  Defaults to :data:`DEFAULT_FILE_LIMIT`.
+
+    Returns
+    -------
+    TargetSpec
+        A frozen spec carrying the deduplicated, sorted list of resolved paths
+        and ``is_multi=True`` (changed sets are always considered multi-source).
+        ``paths`` may be empty when all changed files are non-text or deleted.
+
+    Raises
+    ------
+    TargetExpansionError
+        When the surviving file count exceeds *file_limit*.
+    """
+    if file_limit is None:
+        file_limit = DEFAULT_FILE_LIMIT
+
+    seen: set[str] = set()
+    accumulator: list[Path] = []
+
+    for posix_path in sorted(changed_posix_paths):
+        abs_path = (repo_root / posix_path).resolve()
+        if not abs_path.is_file():
+            continue  # deleted file or directory
+        if not _is_text_readable(abs_path):
+            continue
+        key = os.fspath(abs_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        accumulator.append(abs_path)
+        _check_cap(seen, file_limit)
+
+    accumulator.sort(key=os.fspath)
+
+    return TargetSpec(
+        paths=accumulator,
+        raw_targets=sorted(changed_posix_paths),
+        is_multi=True,
+    )
+
+
 def resolve_targets(
     raw_targets: list[str],
     *,
@@ -320,5 +383,6 @@ __all__ = [
     "TargetExpansionError",
     "TargetSpec",
     "looks_like_glob",
+    "resolve_changed_targets",
     "resolve_targets",
 ]
