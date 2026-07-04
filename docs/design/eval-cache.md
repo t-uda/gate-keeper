@@ -133,6 +133,41 @@ pre-provider outcomes (`multi_target_unsupported`, the #178
 `target_kind_mismatch` precheck) cost no provider call, so caching them buys
 nothing and they are left out of slice B; see §9.
 
+### 2.5 Rule identity is rehydrated on hit, not keyed
+
+**Decision: `rule_id`, `source`, and `severity` are excluded from the key (§3)
+and are re-applied from the *current* rule when a cached diagnostic is returned.
+The cache keys on what the model judges (predicate, params, target, model,
+prompt); those three fields are rule-identity / reporting metadata that do not
+change the judgment.**
+
+The judgment a semantic-rubric evaluation produces is a pure function of the
+rule *predicate* (text, kind, prompt-shaping params) and the model inputs — not
+of which `rule_id` carries that predicate, where in the source it sits, or what
+`severity` the author assigned. Two rules with byte-identical predicates
+evaluated against the same target, model, and prompt therefore produce the same
+judgment, and reusing one across the other is a legitimate, desirable hit.
+
+But the stored `Diagnostic` (§4) carries `rule_id`, `source`, and `severity`
+verbatim. If those fields were simply replayed, a hit for rule *B* keyed on a
+predicate first computed for rule *A* would return *A*'s id, source location, and
+severity — corrupting *B*'s report entry. Two safe resolutions exist; this design
+takes the second because it preserves cross-rule reuse:
+
+1. Fold `rule_id` / `source` / `severity` into the key. Correct, but it splits
+   the cache per rule even when the judgment is identical, discarding reuse
+   between duplicated-predicate rules.
+2. **Store the judgment and rehydrate identity on hit.** On a hit the engine
+   reconstructs the diagnostic from the cached payload and overrides `rule_id`,
+   `source`, and `severity` with the current rule's values (a
+   `dataclasses.replace`). `status`, `message`, `evidence`, and `remediation` —
+   all predicate-derived — come from the cache unchanged. No evidence field
+   embeds rule identity, so overriding the three top-level fields is sufficient.
+
+This is why the `rule_content_hash` component (§3) hashes only
+`{text, kind, target_kind, params∖{…}}` and deliberately omits `rule_id`,
+`source`, and `severity`.
+
 ---
 
 ## 3. Cache Key Schema
@@ -148,8 +183,8 @@ ambiguity between components.
 | `prompt_version` | `PROMPT_VERSION` constant (`v7`) | verbatim string | The template body defines the question asked. v5→v6→v7 are not interchangeable (multi-target attribution, line-range evidence); a bump must miss all prior entries. |
 | `provider` | `GATE_KEEPER_LLM_PROVIDER` (dotenv) | lowercased token | Same logical model name can resolve differently per provider; the provider selects the call path (`_call_anthropic` vs `_call_openai`). |
 | `resolved_model_id` | `_resolve_model(provider, env)` output | the **resolved** id, not the raw override | Judgments differ by model. Keying the resolved id (post default-fallback / strict-mode resolution) means a blank override and its default constant collide correctly, and a model swap misses. |
-| `rule_content_hash` | `sha256` over canonical `{text, kind, target_kind, params∖{strategy, adaptive_*, targets}}` | sorted-key JSON of the rule identity | The rule predicate and its prompt-shaping params determine the judgment. Params broken out below are excluded here to avoid double-counting. |
-| `targets` | resolved artifact(s) | see §3.1 | Editing a target must invalidate; multi-target order and per-entry identity are load-bearing. |
+| `rule_content_hash` | `sha256` over canonical `{text, kind, target_kind, params∖{strategy, adaptive_*, targets}}` | sorted-key JSON of the rule predicate | The rule predicate and its prompt-shaping params determine the judgment. Params broken out below are excluded to avoid double-counting; `rule_id` / `source` / `severity` are excluded and rehydrated on hit (§2.5). |
+| `targets` | resolved artifact(s) | see §3.1 | Editing a target must invalidate; the rendered path is part of the prompt and evidence; multi-target order and per-entry identity are load-bearing. |
 | `strategy` | `_resolve_strategy_id(rule)` + strategy-shaping params (`adaptive_escalate_on_quote_fabrication`, …) | resolved id (default `single`) plus a sorted sub-map of shaping params | `single`/`consensus`/`review`/`adaptive` and their escalation switches produce different processes and evidence. |
 | `sampling` | effective sampling descriptor after slice-A capability resolution | canonical map, e.g. `{"temperature": 0}` or `{"mode": "provider_default"}` | Deterministic vs default sampling draw from different distributions; the *effective* descriptor (post capability-check, R10) is what was actually sent. |
 | `artifact_kind` | `--artifact-kind` / rule dispatch | enum value, `None`→`"unspecified"` | #191 changes path-vs-content rendering **without** a `PROMPT_VERSION` bump (§2.2). Distinct component or the cache serves the wrong rendering. |
@@ -160,24 +195,38 @@ ambiguity between components.
 `targets` is a list, in prompt-assembly order, of one entry per resolved
 artifact:
 
-- **Single-target rule.** One entry `{"id": null, "content_sha256": <hex>}`.
-  `content_sha256` hashes the *resolved artifact bytes* — the exact text
-  `_resolve_artifact_input` fed to the model and to the substring-grounding
-  check. Hashing content, not the path string, is what makes an edited file miss
-  the cache: this is the incremental-audit invariant. When `artifact_kind` is
-  `None` the model saw only the path string, but hashing content anyway merely
-  over-invalidates (a harmless extra miss after an edit) — never under-
-  invalidates. A target that resolves to no readable body (unresolvable PR ref,
+Each entry carries **both** the rendered path and a content hash, because the v7
+prompt renders both. `content_sha256` hashes the *rendered artifact text* — the
+exact body `_render_numbered_artifact_text` placed under the `Path:` line, i.e.
+what the model actually read (file content on the `--artifact-kind` /
+incremental-audit path, where an edit to the file changes that body and
+invalidates the entry). `path` is included because it is itself part of the
+model-facing output, not just a lookup handle: `_render_numbered_artifact_text`
+prepends a `Path: <path>` line to the numbered block, and the v7
+`supporting_evidence_refs` evidence records a `path` field per reference. Two
+files with identical bytes at different paths therefore send different prompts
+*and* produce different evidence. Keying content alone would let a verdict and
+evidence computed for `src/foo.py` be served for `tests/foo.py` with the same
+bytes. Both components are needed: content guards edits, path guards renames /
+distinct-path collisions.
+
+- **Single-target rule.** One entry `{"id": null, "path": <rendered-path-or-null>,
+  "content_sha256": <hex>}`. `content_sha256` hashes the *resolved artifact
+  bytes* — the exact text `_resolve_artifact_input` fed to the model and to the
+  substring-grounding check. `path` is the same string the prompt renders in its
+  `Path:` line (the resolved target path, or `null` for an inline / path-less
+  artifact). A target that resolves to no readable body (unresolvable PR ref,
   missing file) is not cacheable: the evaluation fails-closed to `UNAVAILABLE`
   and §2.4 keeps it out of the cache.
 
 - **Multi-target rule (`params.targets`, #182).** One entry per declared spec,
-  in list order, `{"id": <spec.id>, "kind": <spec.kind>, "content_sha256":
-  <hex>}`. Entry `id` and order are included because the v6 prompt attributes
-  supporting quotes to specific `target_id`s and assembles artifacts in order;
-  reordering or renaming entries changes the model-facing prompt and the
-  evidence contract even with identical file contents. The `_parse_multi_targets`
-  cap of 5 bounds this list.
+  in list order, `{"id": <spec.id>, "kind": <spec.kind>, "path":
+  <spec.path-or-null>, "content_sha256": <hex>}`. Entry `id`, `path`, and order
+  are included because the v6 prompt renders a `Path:` line per artifact and
+  attributes supporting quotes to specific `target_id`s in assembly order;
+  reordering, renaming, or repathing entries changes the model-facing prompt and
+  the evidence contract even with identical file contents. The
+  `_parse_multi_targets` cap of 5 bounds this list.
 
 ### 3.2 Worked negative cases
 
@@ -187,12 +236,18 @@ it, and the component that prevents it:
 | First run | Second run | Guarding component |
 |-----------|-----------|--------------------|
 | audit `foo.py` (content A) | `foo.py` edited to content B | `targets[].content_sha256` |
+| audit `src/foo.py` | audit `tests/foo.py`, identical bytes | `targets[].path` |
 | `--artifact-kind code` on `foo.py` | no `--artifact-kind` on `foo.py` | `artifact_kind` |
 | `strategy: single` | `strategy: consensus` | `strategy` |
 | `--reproducibility 1` | `--reproducibility 5` | `reproducibility_n` |
 | default model | `GATE_KEEPER_ANTHROPIC_MODEL` override | `resolved_model_id` |
 | prompt `v7` | future `v8` | `prompt_version` |
 | multi-target `[a, b]` | multi-target `[b, a]` | `targets` order |
+
+Note the deliberate *non*-guard: two rules with byte-identical predicates but
+different `rule_id` / `source` / `severity` **do** share a key — that is the
+intended reuse. Correct per-rule metadata on the report is preserved by
+rehydration on hit (§2.5), not by key separation.
 
 ---
 
@@ -221,7 +276,9 @@ One JSON file per key (§5). Shape:
   is optional). A `from_dict` failure is a corrupt entry → miss (§2.3). The
   cached `Diagnostic` is stored **before** the §6 cache-hit marker is attached,
   so the stored artifact is the genuine evaluation result and the hit marker is
-  added fresh on each hit.
+  added fresh on each hit. Its `rule_id` / `source` / `severity` fields are the
+  producing rule's; on a hit they are overridden with the *current* rule's values
+  (§2.5) so a duplicated-predicate reuse does not leak the producer's identity.
 - **`created_at`** is the first-computation timestamp. `Diagnostic` carries no
   timestamp field, so the entry supplies the "original evaluation time" surfaced
   on a hit (§6).
@@ -262,6 +319,10 @@ On a key hit with a stable stored verdict:
 
 - **Zero provider calls.** The stored `Diagnostic` is reconstructed and returned;
   no strategy runs, no `_run_n` iterates.
+- **Rule identity is rehydrated.** `rule_id`, `source`, and `severity` are
+  overridden with the current rule's values (§2.5) before the diagnostic is
+  returned, so a hit against a byte-identical-predicate rule reports the current
+  rule's identity, not the producer's.
 - **A `cache_hit` evidence record is appended** to the returned diagnostic:
 
   ```json
