@@ -1313,14 +1313,14 @@ def _reasoning_effort_for(model: str) -> str | None:
 #   anthropic       / any model  → temperature=0.0  (supported across all models)
 #   openai          / standard   → temperature=0.0  (completions-class models)
 #   openai          / reasoning  → {}  (gpt-5*, o1*, o3* reject temperature entirely)
-_DETERMINISTIC_CAPABILITY_TABLE: dict[str, dict[str, object]] = {
+_DETERMINISTIC_CAPABILITY_TABLE: dict[str, dict[str, float]] = {
     "anthropic": {"temperature": 0.0},
     "openai_standard": {"temperature": 0.0},
     "openai_reasoning": {},  # reasoning-class models reject temperature
 }
 
 
-def _deterministic_sampling_params(provider: str, model: str) -> dict[str, object]:
+def _deterministic_sampling_params(provider: str, model: str) -> dict[str, float]:
     """Return extra sampling kwargs for ``--deterministic`` mode.
 
     Consults :data:`_DETERMINISTIC_CAPABILITY_TABLE` for the applicable
@@ -3358,6 +3358,43 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
         )
 
     # --- Aggregate ---
+
+    # If every judge failed at the provider level (SDK error, rejected sampling
+    # param, timeout, etc.) there is no semantic signal in the panel — route to
+    # UNAVAILABLE/provider_error matching the single-strategy contract (#69).
+    all_provider_errors = judge_results and all(
+        str(r.get("failure_mode", "")) == "provider_error" for r in judge_results
+    )
+    if all_provider_errors:
+        first_detail = str(judge_results[0].get("detail", ""))
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=Backend.LLM_RUBRIC,
+            status=Status.UNAVAILABLE,
+            severity=rule.severity,
+            message=(
+                f"All {len(judge_results)} consensus judges failed at the provider level. "
+                f"First failure: {first_detail[:200]}"
+            ),
+            evidence=[
+                Evidence(
+                    kind="provider_error",
+                    data={
+                        "failure_mode": "provider_error",
+                        "detail": first_detail,
+                        "llm_strategy": "consensus",
+                        "consensus_panel_size": panel_size,
+                        "judge_results": judge_results,
+                        "deterministic_mode": deterministic,
+                        "deterministic_params": (
+                            _deterministic_sampling_params(provider, model) if deterministic else None
+                        ),
+                    },
+                )
+            ],
+        )
+
     verdicts = [r["verdict"] for r in judge_results]
     pass_count = verdicts.count("pass")
     fail_count = verdicts.count("fail")
