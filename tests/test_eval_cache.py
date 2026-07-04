@@ -354,6 +354,7 @@ class TestLookupAndStore:
         diag = self._make_diag(Status.PASS)
         cache_mod.store(tmp_path, "ev_key", {"prompt_version": "v7"}, diag)
         entry = cache_mod.lookup(tmp_path, "ev_key")
+        assert entry is not None
         result = cache_mod.rehydrate(entry, rule)
         assert result is not None
         kinds = [e.kind for e in result.evidence]
@@ -377,6 +378,7 @@ class TestLookupAndStore:
         diag = self._make_diag(Status.PASS)
         cache_mod.store(tmp_path, "rh_key", {}, diag)
         entry = cache_mod.lookup(tmp_path, "rh_key")
+        assert entry is not None
 
         new_source = SourceLocation(path="other-rules.md", line=42)
         current_rule = dataclasses.replace(
