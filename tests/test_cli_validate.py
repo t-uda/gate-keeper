@@ -796,6 +796,7 @@ class TestRulesFormatIR:
             artifact_kind=None,
             concurrency=1,
             deterministic=False,
+            eval_cache=False,
         ):
             captured_rulesets.append(ruleset)
             return DiagnosticReport(diagnostics=[])
