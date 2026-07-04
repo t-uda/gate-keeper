@@ -321,6 +321,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     validate_parser.add_argument(
+        "--eval-cache",
+        dest="eval_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "enable the content-addressed local evaluation cache (#69 slice B). "
+            "On a cache hit the stored result is returned with zero provider calls. "
+            "Cache entries are stored under .gate-keeper/cache/eval/ relative to "
+            "the working directory. Can also be enabled project-wide via "
+            "GATE_KEEPER_EVAL_CACHE=1 in the project dotenv (CLI flag takes "
+            "precedence). Non-LLM backends are unaffected."
+        ),
+    )
+    validate_parser.add_argument(
         "--allow-command-adapter",
         action="store_true",
         default=False,
@@ -870,6 +884,19 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         artifact_kind = None
     else:
         artifact_kind = TargetKind(args.artifact_kind)
+    # Determine eval_cache setting (#69 slice B). The CLI flag takes precedence
+    # over the dotenv value; the dotenv is read through the same snapshot
+    # mechanism as GATE_KEEPER_TOKEN_BUDGET / model config — intentionally NOT
+    # os.environ to avoid host collisions (docs/auth-matrix.md).
+    eval_cache: bool = bool(getattr(args, "eval_cache", False))
+    if not eval_cache:
+        from gate_keeper.backends import llm_rubric as _llm_rubric  # noqa: PLC0415
+        from gate_keeper.backends.eval_cache import (  # noqa: PLC0415
+            is_cache_enabled_from_env,
+        )
+
+        _env_snap = _llm_rubric._load_env_file()
+        eval_cache = is_cache_enabled_from_env(_env_snap)
     try:
         # Run validation.
         report = validator.validate(
@@ -880,6 +907,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             artifact_kind=artifact_kind,
             concurrency=args.concurrency,
             deterministic=args.deterministic,
+            eval_cache=eval_cache,
         )
     finally:
         command_adapter.set_enabled(previous_enabled)

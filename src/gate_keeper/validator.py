@@ -299,6 +299,7 @@ def validate(
     *,
     concurrency: int = 1,
     deterministic: bool = False,
+    eval_cache: bool = False,
 ) -> DiagnosticReport:
     """Validate *ruleset* against *target* using *backend*.
 
@@ -369,6 +370,18 @@ def validate(
         says they are supported; unsupported combinations (reasoning-class
         OpenAI models) receive no extra params but still record the flag in
         evidence.  Non-LLM backends ignore this parameter.
+    eval_cache:
+        When ``True``, enable the content-addressed local evaluation cache
+        (#69, Slice B).  On a cache hit, the stored ``Diagnostic`` is
+        returned with zero provider calls and a ``cache_hit`` evidence record
+        appended; on a miss the full evaluation runs and the result is stored
+        (PASS/FAIL only — UNAVAILABLE/ERROR are never cached). Default
+        ``False`` preserves prior behaviour byte-for-byte. The cache is
+        stored under ``.gate-keeper/cache/eval/`` relative to the working
+        directory. Can also be enabled project-wide via
+        ``GATE_KEEPER_EVAL_CACHE=1`` in the project dotenv (dotenv value
+        applies before this parameter in the CLI layer; programmatic callers
+        must set this flag explicitly).  Non-LLM backends are unaffected.
 
     Returns
     -------
@@ -399,6 +412,7 @@ def validate(
             reproducibility,
             artifact_kind,
             deterministic=deterministic,
+            eval_cache=eval_cache,
         )
     return _validate_concurrent(
         ruleset,
@@ -408,6 +422,7 @@ def validate(
         artifact_kind,
         concurrency,
         deterministic=deterministic,
+        eval_cache=eval_cache,
     )
 
 
@@ -419,6 +434,7 @@ def _validate_sequential(
     artifact_kind: TargetKind | None,
     *,
     deterministic: bool = False,
+    eval_cache: bool = False,
 ) -> DiagnosticReport:
     """Sequential dispatch — the historical default path.
 
@@ -461,6 +477,29 @@ def _validate_sequential(
                 # #69: forward ``deterministic`` for the llm-rubric route.
                 rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
                 rule_deterministic = deterministic if resolved_name == "llm-rubric" else False
+
+                # #69 Slice B — eval-cache intercept. Check before calling
+                # _run_rule_check (which would issue provider calls). On a
+                # hit, return the cached diagnostic immediately without
+                # entering _run_n or the strategy dispatch. Non-LLM backends
+                # are unaffected (eval_cache is only consulted for llm-rubric).
+                if eval_cache and resolved_name == "llm-rubric":
+                    from gate_keeper.backends.eval_cache import (  # noqa: PLC0415
+                        try_lookup,
+                        try_store,
+                    )
+
+                    cached = try_lookup(
+                        rule,
+                        target,
+                        rule_artifact_kind,
+                        rule_deterministic,
+                        reproducibility,
+                    )
+                    if cached is not None:
+                        diagnostics.append(cached)
+                        continue
+
                 diag = _run_rule_check(
                     check_fn,
                     rule,
@@ -470,6 +509,18 @@ def _validate_sequential(
                     rule_artifact_kind,
                     deterministic=rule_deterministic,
                 )
+
+                # Store the result on a miss (PASS/FAIL only; UNAVAILABLE/ERROR
+                # are silently skipped inside try_store per §2.4).
+                if eval_cache and resolved_name == "llm-rubric":
+                    try_store(
+                        rule,
+                        target,
+                        rule_artifact_kind,
+                        rule_deterministic,
+                        reproducibility,
+                        diag,
+                    )
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
         diagnostics.append(diag)
@@ -486,6 +537,7 @@ def _validate_concurrent(
     concurrency: int,
     *,
     deterministic: bool = False,
+    eval_cache: bool = False,
 ) -> DiagnosticReport:
     """Bounded-parallel dispatch via :class:`ThreadPoolExecutor` (#249, Slice 1).
 
@@ -496,14 +548,25 @@ def _validate_concurrent(
     ``ruleset.rules`` regardless of completion order. Backend exceptions
     raised inside a future are re-raised by ``future.result()`` and caught
     here, mirroring the sequential ``except Exception`` arm.
+
+    Eval-cache (#69 Slice B) lookups happen before scheduling each future:
+    a cache hit short-circuits to a finalised ``Diagnostic`` in the slot
+    without involving the executor. Cache stores happen in the
+    post-executor pass after resolving each future's result.
     """
     # Late import keeps the sequential path's import footprint unchanged.
     from concurrent.futures import Future, ThreadPoolExecutor
 
-    # Mixed list of finalised diagnostics (deterministic prechecks) and
-    # in-flight futures, in rule order. The post-executor pass replaces
-    # each future with its resolved diagnostic at the same index.
-    slots: list[Diagnostic | tuple[Future[Diagnostic], Rule, str]] = []
+    if eval_cache:
+        from gate_keeper.backends.eval_cache import try_lookup, try_store  # noqa: PLC0415
+    else:
+        try_lookup = try_store = None  # type: ignore[assignment]
+
+    # Mixed list of finalised diagnostics (deterministic prechecks + cache
+    # hits) and in-flight futures. Each future slot carries the rule and
+    # resolved_name so cache stores and error reporting work in the post-pass.
+    # rule_artifact_kind / rule_deterministic are included for cache stores.
+    slots: list[Diagnostic | tuple[Future[Diagnostic], Rule, str, TargetKind | None, bool]] = []
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         for rule in ruleset.rules:
@@ -525,6 +588,22 @@ def _validate_concurrent(
 
             rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
             rule_deterministic = deterministic if resolved_name == "llm-rubric" else False
+
+            # #69 Slice B — cache lookup before scheduling.  A hit avoids
+            # submitting a future entirely; the cached diagnostic is stored
+            # directly in the slot as a finalised Diagnostic.
+            if eval_cache and resolved_name == "llm-rubric" and try_lookup is not None:
+                cached = try_lookup(
+                    rule,
+                    target,
+                    rule_artifact_kind,
+                    rule_deterministic,
+                    reproducibility,
+                )
+                if cached is not None:
+                    slots.append(cached)
+                    continue
+
             future = executor.submit(
                 _run_rule_check,
                 check_fn,
@@ -535,18 +614,31 @@ def _validate_concurrent(
                 rule_artifact_kind,
                 deterministic=rule_deterministic,
             )
-            slots.append((future, rule, resolved_name))
+            slots.append((future, rule, resolved_name, rule_artifact_kind, rule_deterministic))
 
     diagnostics: list[Diagnostic] = []
     for slot in slots:
         if isinstance(slot, Diagnostic):
             diagnostics.append(slot)
             continue
-        future, rule, resolved_name = slot
+        future, rule, resolved_name, rule_artifact_kind, rule_deterministic = slot
         try:
-            diagnostics.append(future.result())
+            diag = future.result()
         except Exception as exc:  # noqa: BLE001
-            diagnostics.append(_error_diagnostic(rule, exc, _backend_for(resolved_name)))
+            diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
+
+        # #69 Slice B — cache store after resolving the future.
+        if eval_cache and resolved_name == "llm-rubric" and try_store is not None:
+            try_store(
+                rule,
+                target,
+                rule_artifact_kind,
+                rule_deterministic,
+                reproducibility,
+                diag,
+            )
+
+        diagnostics.append(diag)
 
     return DiagnosticReport(diagnostics=diagnostics)
 

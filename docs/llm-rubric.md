@@ -482,11 +482,65 @@ When `--reproducibility N` aggregates `N` runs, the `latency_ms` / `tokens_in`
 reflect that single representative run, not an aggregate. The separate
 `reproducibility_score` evidence entry (#68) carries no telemetry.
 
+## Content-addressed local evaluation cache (`--eval-cache`, #69 Slice B)
+
+Pass `--eval-cache` to enable a local disk cache that skips redundant provider
+calls when the rule predicate, target content, provider, model, strategy, and
+sampling configuration have not changed.
+
+```sh
+gate-keeper validate rules.md --target artifact.md --eval-cache
+```
+
+Enable via dotenv instead of the CLI flag:
+
+```
+# ~/.config/hermes-projects/gate-keeper.env  (or the project dotenv)
+GATE_KEEPER_EVAL_CACHE=1
+```
+
+The CLI flag takes precedence over the dotenv value.
+
+### Cache key
+
+The cache key is a SHA-256 digest of a canonical JSON preimage containing:
+`prompt_version`, `provider`, `resolved_model_id`, `rule_content_hash`,
+`targets` (path + `content_sha256` per artifact), `strategy` (ID + shaping
+params), `sampling` (effective descriptor after capability check),
+`artifact_kind`, and `reproducibility_n`.
+
+`rule_id`, `source`, and `severity` are deliberately excluded from the key:
+on a cache hit they are overridden from the current rule object (§2.5
+rehydration), so two rules with identical predicates share a cache entry.
+
+### Cache location and eviction
+
+Entries live under `.gate-keeper/cache/eval/<hex-digest>.json` relative to
+the working directory. A size-cap eviction (default 500 MB, LRU by mtime)
+runs after each store; no locking is required — concurrent double-computes
+are tolerated and the last writer wins.
+
+### Write policy
+
+Only `PASS` and `FAIL` results are stored. `UNAVAILABLE`, `ERROR`, and
+`UNSUPPORTED` are never cached (§2.4 fail-open write filter).
+
+### Hit semantics
+
+On a cache hit the provider is not called. A `cache_hit` evidence entry is
+appended to the diagnostic with `provider_calls: 0` and `cost_usd: 0`; this
+entry is never persisted in the cache file itself.
+
+### Corruption recovery
+
+If an entry has an unknown `cache_schema_version`, or its JSON is malformed,
+the entry is treated as a miss and the result is recomputed. The cache never
+raises an exception on read (§2.3 fail-open).
+
 ## Deterministic-mode sampling (`--deterministic`, #69)
 
 Pass `--deterministic` to inject provider-specific sampling parameters that
-reduce output variability across repeated runs. This is a Slice A feature;
-eval-cache deduplication (Slice B) is tracked separately.
+reduce output variability across repeated runs.
 
 ```sh
 gate-keeper validate rules.md --target artifact.md --deterministic
