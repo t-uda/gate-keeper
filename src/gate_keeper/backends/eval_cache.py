@@ -167,10 +167,19 @@ def _build_target_entries(
     # Without this, edits to the file leave the cache key unchanged — stale hit.
     from gate_keeper.targets import TargetSpec  # noqa: PLC0415
 
-    if isinstance(target, TargetSpec) and not target.is_multi:
-        target = target.paths[0] if target.paths else ""
-    rendered_text = _llm._resolve_artifact_input(target, artifact_kind)
-    path = _llm._resolve_single_target_path(target)
+    # Resolve to str | Path before passing to _resolve_artifact_input /
+    # _resolve_single_target_path (both typed str | Path).  multi-target specs
+    # never reach this branch (validator skips them — llm_rubric returns
+    # UNSUPPORTED, §2.4 skips storage); we still normalise them defensively.
+    effective: str | Path
+    if isinstance(target, TargetSpec):
+        effective = target.paths[0] if target.paths else Path("")
+    elif isinstance(target, (str, Path)):
+        effective = target
+    else:
+        effective = str(target)
+    rendered_text = _llm._resolve_artifact_input(effective, artifact_kind)
+    path = _llm._resolve_single_target_path(effective)
     return [{"id": None, "path": path, "content_sha256": _sha256_hex(rendered_text)}]
 
 
