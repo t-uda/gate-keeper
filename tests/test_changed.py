@@ -130,6 +130,17 @@ class TestComputeChangedFiles:
             with pytest.raises(ChangedFilesError, match="git executable not found"):
                 compute_changed_files(tmp_path, "origin/main")
 
+    @pytest.mark.skipif(
+        # CI checkouts are shallow (fetch-depth 1); HEAD~1 is ambiguous there.
+        # Detect a shallow repo by checking whether HEAD has a parent.
+        subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD~1"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+        ).returncode
+        != 0,
+        reason="shallow clone — HEAD~1 does not exist",
+    )
     def test_returns_frozenset_of_posix_paths(self):
         # Smoke test against the real repo: result is a frozenset of strings.
         changed = compute_changed_files(REPO_ROOT, "HEAD~1")
