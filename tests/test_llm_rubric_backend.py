@@ -24,6 +24,7 @@ from gate_keeper.models import (
     Confidence,
     Rule,
     RuleKind,
+    RuleSet,
     Severity,
     SourceLocation,
     Status,
@@ -5625,3 +5626,197 @@ class TestReasoningEffortParamRouting:
         monkeypatch.setattr(llm_backend, "_REASONING_EFFORT_TABLE", sorted_table)
         assert llm_backend._reasoning_effort_for("gpt-5.4") == "none"
         assert llm_backend._reasoning_effort_for("gpt-5") == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic-mode capability table (#69, Slice A)
+# ---------------------------------------------------------------------------
+
+
+class TestDeterministicCapabilityTable:
+    """Verify the per-provider capability table and _deterministic_sampling_params."""
+
+    def test_anthropic_any_model_gets_temperature(self):
+        params = llm_backend._deterministic_sampling_params("anthropic", "claude-3-5-sonnet")
+        assert params == {"temperature": 0.0}
+
+    def test_openai_standard_gets_temperature(self):
+        params = llm_backend._deterministic_sampling_params("openai", "gpt-4o-mini")
+        assert params == {"temperature": 0.0}
+
+    def test_openai_reasoning_gets_empty_dict(self):
+        """Reasoning-class models reject temperature; empty dict expected."""
+        for model in ("gpt-5", "gpt-5.4", "o1-mini", "o3"):
+            params = llm_backend._deterministic_sampling_params("openai", model)
+            assert params == {}, f"Expected empty params for reasoning model {model!r}"
+
+    def test_table_values_are_independent_copies(self):
+        """Returned dicts must be independent copies, not the same object."""
+        p1 = llm_backend._deterministic_sampling_params("anthropic", "claude-3-opus")
+        p2 = llm_backend._deterministic_sampling_params("anthropic", "claude-3-opus")
+        assert p1 == p2
+        p1["mutated"] = True
+        assert "mutated" not in p2
+
+
+class TestDeterministicModeAnthropicCallSite:
+    """_call_anthropic receives deterministic params when deterministic=True (#69)."""
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+        "GATE_KEEPER_ANTHROPIC_MODEL": "claude-3-5-sonnet",
+    }
+
+    def test_deterministic_true_passes_temperature_to_anthropic(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        seen: dict[str, object] = {}
+
+        def _capture(_key, _system, _user, model, *, deterministic=False):
+            seen["deterministic"] = deterministic
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _capture)
+        llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=True)
+        assert seen.get("deterministic") is True
+
+    def test_deterministic_false_does_not_forward_kwarg(self, monkeypatch):
+        """When deterministic=False the legacy 4-arg form is used (no extra kwarg)."""
+        _patch_env(monkeypatch, self._ENV)
+        called_with_kwargs: list[bool] = []
+
+        def _capture(_key, _system, _user, model, **kwargs):
+            called_with_kwargs.append("deterministic" in kwargs)
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_anthropic", _capture)
+        llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=False)
+        assert called_with_kwargs == [False]
+
+    def test_deterministic_mode_recorded_in_evidence(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=True)
+        data = diag.evidence[0].data
+        assert data["deterministic_mode"] is True
+        assert data["deterministic_params"] == {"temperature": 0.0}
+
+    def test_non_deterministic_evidence_uses_none(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=False)
+        data = diag.evidence[0].data
+        assert data["deterministic_mode"] is False
+        assert data["deterministic_params"] is None
+
+
+class TestDeterministicModeOpenAICallSite:
+    """_call_openai receives deterministic params when deterministic=True (#69)."""
+
+    _ENV_STANDARD = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+        "GATE_KEEPER_OPENAI_MODEL": "gpt-4o-mini",
+    }
+    _ENV_REASONING = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+        "GATE_KEEPER_OPENAI_MODEL": "gpt-5.4",
+        "GATE_KEEPER_REQUIRE_MODEL": "1",
+    }
+
+    def test_deterministic_true_forwarded_to_openai(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV_STANDARD)
+        seen: dict[str, object] = {}
+
+        def _capture(_key, _system, _user, model, *, deterministic=False):
+            seen["deterministic"] = deterministic
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _capture)
+        llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=True)
+        assert seen.get("deterministic") is True
+
+    def test_deterministic_false_does_not_forward_kwarg_openai(self, monkeypatch):
+        _patch_env(monkeypatch, self._ENV_STANDARD)
+        called_with_kwargs: list[bool] = []
+
+        def _capture(_key, _system, _user, model, **kwargs):
+            called_with_kwargs.append("deterministic" in kwargs)
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _capture)
+        llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=False)
+        assert called_with_kwargs == [False]
+
+    def test_reasoning_model_deterministic_params_are_empty(self, monkeypatch):
+        """Capability table returns {} for reasoning models; evidence reflects it."""
+        _patch_env(monkeypatch, self._ENV_REASONING)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
+        )
+        diag = llm_backend.check(_semantic_rule(), _STUB_ARTIFACT_TEXT, deterministic=True)
+        data = diag.evidence[0].data
+        assert data["deterministic_mode"] is True
+        # Capability table returns {} for gpt-5.4 (reasoning class).
+        assert data["deterministic_params"] == {}
+
+
+class TestDeterministicModeValidatorCLI:
+    """--deterministic threads from CLI → validator → check (#69)."""
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-openai-test",
+        "GATE_KEEPER_OPENAI_MODEL": "gpt-4o-mini",
+    }
+
+    def _make_ruleset(self) -> RuleSet:
+        rule = Rule(
+            id="det-test",
+            title="Det test",
+            source=SourceLocation(path="rules.md", line=1),
+            text="Test rule",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params={},
+        )
+        return RuleSet(rules=[rule])
+
+    def test_validator_deterministic_forwarded_to_check(self, monkeypatch):
+        """validate(deterministic=True) passes deterministic=True to check()."""
+        _patch_env(monkeypatch, self._ENV)
+        seen: dict[str, object] = {}
+
+        def _capture(_key, _system, _user, model, *, deterministic=False):
+            seen["deterministic"] = deterministic
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _capture)
+        validate(self._make_ruleset(), _STUB_ARTIFACT_TEXT, deterministic=True)
+        assert seen.get("deterministic") is True
+
+    def test_validator_deterministic_false_default(self, monkeypatch):
+        """validate() without deterministic= defaults to False."""
+        _patch_env(monkeypatch, self._ENV)
+        seen: dict[str, object] = {}
+
+        def _capture(_key, _system, _user, model, **kwargs):
+            seen["had_deterministic"] = "deterministic" in kwargs
+            return _stub_response(_VALID_PASS_JSON)
+
+        monkeypatch.setattr(llm_backend, "_call_openai", _capture)
+        validate(self._make_ruleset(), _STUB_ARTIFACT_TEXT)
+        assert seen.get("had_deterministic") is False

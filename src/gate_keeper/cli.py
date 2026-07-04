@@ -284,6 +284,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     validate_parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        default=False,
+        help=(
+            "inject provider-specific sampling parameters (e.g. temperature=0.0) "
+            "to reduce non-determinism in LLM-rubric results (#69). For OpenAI "
+            "reasoning-class models (gpt-5*, o1*, o3*) no extra params are sent "
+            "because those models reject temperature; the flag is still recorded "
+            "in evidence. Non-LLM backends ignore this flag."
+        ),
+    )
+    validate_parser.add_argument(
         "--allow-command-adapter",
         action="store_true",
         default=False,
@@ -722,6 +734,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             reproducibility=args.reproducibility,
             artifact_kind=artifact_kind,
             concurrency=args.concurrency,
+            deterministic=args.deterministic,
         )
     finally:
         command_adapter.set_enabled(previous_enabled)
