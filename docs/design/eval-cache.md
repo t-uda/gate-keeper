@@ -26,7 +26,7 @@ issues fresh provider calls even when the rule text, the target content, the
 model, and the prompt are byte-identical to a prior run. That is redundant
 spend on a deterministic-in-practice question.
 
-An incremental build system answers this with a content-addressed cache: derive
+An incremental build tool answers this with a content-addressed cache: derive
 a key from everything that determines the output, and on a key hit return the
 prior output without recomputing. The judgment a semantic-rubric rule produces
 is a pure function of a bounded, enumerable set of inputs (§3). When that set is
@@ -150,7 +150,7 @@ judgment, and reusing one across the other is a legitimate, desirable hit.
 
 But the stored `Diagnostic` (§4) carries `rule_id`, `source`, and `severity`
 verbatim. If those fields were simply replayed, a hit for rule *B* keyed on a
-predicate first computed for rule *A* would return *A*'s id, source location, and
+predicate first computed for rule *A* would return *A*'s ID, source location, and
 severity — corrupting *B*'s report entry. Two safe resolutions exist; this design
 takes the second because it preserves cross-rule reuse:
 
@@ -182,10 +182,10 @@ ambiguity between components.
 |-----------|--------|---------------|----------------------|
 | `prompt_version` | `PROMPT_VERSION` constant (`v7`) | verbatim string | The template body defines the question asked. v5→v6→v7 are not interchangeable (multi-target attribution, line-range evidence); a bump must miss all prior entries. |
 | `provider` | `GATE_KEEPER_LLM_PROVIDER` (dotenv) | lowercased token | Same logical model name can resolve differently per provider; the provider selects the call path (`_call_anthropic` vs `_call_openai`). |
-| `resolved_model_id` | `_resolve_model(provider, env)` output | the **resolved** id, not the raw override | Judgments differ by model. Keying the resolved id (post default-fallback / strict-mode resolution) means a blank override and its default constant collide correctly, and a model swap misses. |
+| `resolved_model_id` | `_resolve_model(provider, env)` output | the **resolved** ID, not the raw override | Judgments differ by model. Keying the resolved ID (post default-fallback / strict-mode resolution) means a blank override and its default constant collide correctly, and a model swap misses. |
 | `rule_content_hash` | `sha256` over canonical `{text, kind, target_kind, params∖{strategy, adaptive_*, targets}}` | sorted-key JSON of the rule predicate | The rule predicate and its prompt-shaping params determine the judgment. Params broken out below are excluded to avoid double-counting; `rule_id` / `source` / `severity` are excluded and rehydrated on hit (§2.5). |
 | `targets` | resolved artifact(s) | see §3.1 | Editing a target must invalidate; the rendered path is part of the prompt and evidence; multi-target order and per-entry identity are load-bearing. |
-| `strategy` | `_resolve_strategy_id(rule)` + strategy-shaping params (`adaptive_escalate_on_quote_fabrication`, …) | resolved id (default `single`) plus a sorted sub-map of shaping params | `single`/`consensus`/`review`/`adaptive` and their escalation switches produce different processes and evidence. |
+| `strategy` | `_resolve_strategy_id(rule)` + strategy-shaping params (`adaptive_escalate_on_quote_fabrication`, …) | resolved ID (default `single`) plus a sorted sub-map of shaping params | `single`/`consensus`/`review`/`adaptive` and their escalation switches produce different processes and evidence. |
 | `sampling` | effective sampling descriptor after slice-A capability resolution | canonical map, e.g. `{"temperature": 0}` or `{"mode": "provider_default"}` | Deterministic vs default sampling draw from different distributions; the *effective* descriptor (post capability-check, R10) is what was actually sent. |
 | `artifact_kind` | `--artifact-kind` / rule dispatch | enum value, `None`→`"unspecified"` | #191 changes path-vs-content rendering **without** a `PROMPT_VERSION` bump (§2.2). Distinct component or the cache serves the wrong rendering. |
 | `reproducibility_n` | validator `--reproducibility` | integer ≥ 1 | The cached artifact is the aggregate over `N` (§2.1 corollary); it is specific to `N`. |
@@ -306,7 +306,7 @@ now that dispatch is bounded-concurrent (#249, `ThreadPoolExecutor`) and CI may
 fan out across shards — both compute and both rename. The loser wasted provider
 calls, but both wrote the same logical verdict under the same key, and the atomic
 rename guarantees whichever file wins is internally complete. A lock would trade
-those occasional wasted calls for cross-process lock-file lifecycle complexity
+those occasional wasted calls for cross-process lockfile lifecycle complexity
 (stale locks, crash recovery) that a fail-open optimization does not warrant.
 Wasted calls are bounded and self-limiting; a corrupt half-written entry is not,
 and the atomic rename rules it out.
