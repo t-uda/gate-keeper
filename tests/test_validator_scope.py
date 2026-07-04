@@ -147,9 +147,7 @@ class TestDisjointSubsets:
             _rule("r2", params={"target_scope": ["docs/**/*.md"]}),
             _rule("r3"),
         ]
-        report = validate(
-            RuleSet(rules=rules), _candidate_spec(files), repo_root=tmp_path, concurrency=2
-        )
+        report = validate(RuleSet(rules=rules), _candidate_spec(files), repo_root=tmp_path, concurrency=2)
         assert [d.rule_id for d in report.diagnostics] == ["r1", "r2", "r3"]
 
 
@@ -170,9 +168,7 @@ class TestScopeEmpty:
             is_multi=True,
         )
         rule = _rule("docs-rule", params={"target_scope": ["docs/**/*.md"]})
-        report = validate(
-            RuleSet(rules=[rule]), candidate, repo_root=tmp_path, concurrency=concurrency
-        )
+        report = validate(RuleSet(rules=[rule]), candidate, repo_root=tmp_path, concurrency=concurrency)
         diag = report.diagnostics[0]
         assert diag.status is Status.PASS
         ev = _evidence_of(diag, "scope_empty")
@@ -298,9 +294,7 @@ class TestInteractions:
             kind=RuleKind.SEMANTIC_RUBRIC,
             params={"target_scope": ["src/**/*.py"]},  # 2 files → multi
         )
-        report = validate(
-            RuleSet(rules=[rule]), _candidate_spec(files), repo_root=tmp_path
-        )
+        report = validate(RuleSet(rules=[rule]), _candidate_spec(files), repo_root=tmp_path)
         diag = report.diagnostics[0]
         # §9.10: a multi-file effective set routed to llm-rubric is still
         # multi_target_unsupported until S5 (#281).
@@ -322,6 +316,32 @@ class TestInteractions:
         )
         validate(RuleSet(rules=[rule]), "owner/repo#1", repo_root=tmp_path)
         assert rec.calls == [("gh", "owner/repo#1")]
+
+
+class TestScopeEvidenceOnError:
+    @pytest.mark.parametrize("concurrency", [1, 3])
+    def test_scope_evidence_survives_backend_exception(self, tmp_path, monkeypatch, concurrency):
+        # A scoped rule whose backend raises must still carry scope_effective_set
+        # evidence on the resulting ERROR diagnostic, in both the sequential and
+        # concurrent paths (codex P2 review on #289).
+        files = _tree(tmp_path)
+
+        def _boom(rule, target):
+            raise RuntimeError("backend crash")
+
+        monkeypatch.setitem(registry._REGISTRY, "filesystem", _boom)
+        rule = _rule("scoped", params={"target_scope": ["src/**/*.py"]})
+        report = validate(
+            RuleSet(rules=[rule]),
+            _candidate_spec(files),
+            repo_root=tmp_path,
+            concurrency=concurrency,
+        )
+        diag = report.diagnostics[0]
+        assert diag.status is Status.ERROR
+        ev = _evidence_of(diag, "scope_effective_set")
+        assert ev is not None
+        assert ev.data["effective_paths"] == ["src/x.py", "src/y.py"]
 
 
 class TestIrRoundTrip:

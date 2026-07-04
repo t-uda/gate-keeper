@@ -106,17 +106,13 @@ def test_ac2_scope_intersects_changed_set(tmp_path, monkeypatch, capsys):
     # A pre-existing, committed docs file that is NOT part of the changed set.
     _write(repo / "docs" / "old.md", "gatekeeper old\n")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True
-    )
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
 
     # Second commit introduces the changed files the audit should narrow to.
     _write(repo / "docs" / "a.md", "gatekeeper docs a\n")
     _write(repo / "src" / "x.py", "# gatekeeper src x\n")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", "change"], check=True, capture_output=True
-    )
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "change"], check=True, capture_output=True)
 
     rules_file = tmp_path / "rules.json"
     rules_file.write_text(json.dumps(_scoped_rules_ir()), encoding="utf-8")

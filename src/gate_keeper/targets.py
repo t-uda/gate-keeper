@@ -625,9 +625,7 @@ def resolve_rule_scope(
             file_limit=file_limit,
         )
 
-    effective_paths = sorted(
-        (candidate_rel[rel] for rel in effective_relpaths), key=os.fspath
-    )
+    effective_paths = sorted((candidate_rel[rel] for rel in effective_relpaths), key=os.fspath)
     spec = TargetSpec(
         paths=effective_paths,
         raw_targets=list(effective_relpaths),

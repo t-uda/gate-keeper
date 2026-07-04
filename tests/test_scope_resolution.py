@@ -63,9 +63,7 @@ class TestDispatch:
 
     def test_multiple_globs_union(self, tmp_path):
         files = _tree(tmp_path)
-        res = resolve_rule_scope(
-            ["docs/**/*.md", "src/**/*.py"], list(files.values()), tmp_path
-        )
+        res = resolve_rule_scope(["docs/**/*.md", "src/**/*.py"], list(files.values()), tmp_path)
         assert res.status == "dispatch"
         assert res.effective_relpaths == [
             "docs/a.md",
@@ -175,17 +173,13 @@ class TestFileLimit:
 
     def test_explicit_file_limit_arg(self, tmp_path):
         files = _tree(tmp_path)
-        res = resolve_rule_scope(
-            ["src/**/*.py"], list(files.values()), tmp_path, file_limit=1
-        )
+        res = resolve_rule_scope(["src/**/*.py"], list(files.values()), tmp_path, file_limit=1)
         assert res.status == "file_limit_exceeded"
         assert res.file_limit == 1
 
     def test_at_cap_dispatches(self, tmp_path):
         files = _tree(tmp_path)
-        res = resolve_rule_scope(
-            ["src/**/*.py"], list(files.values()), tmp_path, file_limit=2
-        )
+        res = resolve_rule_scope(["src/**/*.py"], list(files.values()), tmp_path, file_limit=2)
         assert res.status == "dispatch"
 
 
