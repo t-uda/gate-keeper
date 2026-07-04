@@ -1211,16 +1211,24 @@ def _call_anthropic(
     """
     from anthropic import Anthropic
 
-    sampling_extra = _deterministic_sampling_params("anthropic", model) if deterministic else {}
     client = Anthropic(api_key=api_key)
     start = time.perf_counter()
-    msg = client.messages.create(
-        model=model,
-        max_tokens=600,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        **sampling_extra,
-    )
+    # Branch explicitly so pyright can resolve the overload without **kwargs.
+    if deterministic:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=600,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            temperature=0.0,
+        )
+    else:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=600,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
     latency_ms = int(round((time.perf_counter() - start) * 1000))
     parts: list[str] = []
     for block in msg.content:
@@ -1382,7 +1390,6 @@ def _call_openai(
     max_tokens = _REASONING_MAX_COMPLETION_TOKENS if reasoning else _DEFAULT_MAX_COMPLETION_TOKENS
 
     effort: str | None = _reasoning_effort_for(model) if reasoning else None
-    deterministic_extra = _deterministic_sampling_params("openai", model) if deterministic else {}
 
     client = OpenAI(api_key=api_key)
     start = time.perf_counter()
@@ -1390,20 +1397,28 @@ def _call_openai(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    # Branch explicitly so pyright can resolve the overload without **kwargs.
+    # Reasoning-class models reject temperature even in deterministic mode,
+    # so the capability table returns {} for them — no extra params either way.
     if effort is not None:
         resp = client.responses.create(
             model=model,
             max_output_tokens=max_tokens,
             input=input_messages,  # type: ignore[arg-type]
             reasoning={"effort": effort},  # type: ignore[arg-type]
-            **deterministic_extra,
+        )
+    elif deterministic:
+        resp = client.responses.create(
+            model=model,
+            max_output_tokens=max_tokens,
+            input=input_messages,  # type: ignore[arg-type]
+            temperature=0.0,
         )
     else:
         resp = client.responses.create(
             model=model,
             max_output_tokens=max_tokens,
             input=input_messages,  # type: ignore[arg-type]
-            **deterministic_extra,
         )
     latency_ms = int(round((time.perf_counter() - start) * 1000))
     text = resp.output_text or ""
