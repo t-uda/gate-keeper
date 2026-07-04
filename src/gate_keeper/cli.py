@@ -215,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument(
         "--target",
-        required=True,
+        required=False,
         action="append",
         dest="target",
         metavar="TARGET",
@@ -223,7 +223,32 @@ def build_parser() -> argparse.ArgumentParser:
             "artifact or PR to validate. May be specified multiple times to evaluate "
             "filesystem rules across several files; values may be paths, directories, "
             "or quoted globs. Repeated values are deduplicated and sorted "
-            "lexicographically. Non-filesystem backends accept a single value only."
+            "lexicographically. Non-filesystem backends accept a single value only. "
+            "Required unless --target-changed is given."
+        ),
+    )
+    validate_parser.add_argument(
+        "--target-changed",
+        dest="target_changed",
+        action="store_true",
+        default=False,
+        help=(
+            "use the set of files changed since --base-ref as the candidate target pool. "
+            "The changed set is filtered through the same text-readable and 200-file-cap "
+            "machinery as an explicit --target. When combined with --target, the result "
+            "is the intersection of the two sets. An empty changed set after filtering "
+            "is explicit evidence (kind: changed_set_empty) — never a silent exit 0. "
+            "Requires a git repository; a bad --base-ref exits with a usage error."
+        ),
+    )
+    validate_parser.add_argument(
+        "--base-ref",
+        dest="base_ref",
+        default=None,
+        metavar="REF",
+        help=(
+            "base git ref for --target-changed (default: $GATE_KEEPER_BASE_REF, then "
+            "origin/main). Ignored when --target-changed is not set."
         ),
     )
     validate_parser.add_argument(
@@ -598,103 +623,223 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         )
         return EXIT_USAGE
 
-    # Resolve --target values into a single value passed to validator.
+    # --target-changed / --base-ref changed-set target selection (issue #278).
     #
-    # Compatibility rule (issue #146): when exactly one --target is supplied
-    # and it is a plain literal (not a directory, not a glob), forward the raw
-    # string. This preserves every pre-#146 behaviour, including GitHub PR
-    # references like ``owner/repo#1`` and PR URLs that contain ``?``/``#``
-    # (which the GitHub backend's parser tolerates). Multi-target invocations
-    # and directory/glob single-targets are resolved into a TargetSpec; the
-    # chosen backend then either aggregates (filesystem) or fails closed
-    # (github / llm-rubric / external).
-    raw_targets: list[str] = list(args.target)
+    # When --target-changed is set the changed files from ``git diff
+    # --name-only BASE...HEAD`` form the initial candidate pool.  The pool is
+    # filtered through the same text-readable and 200-file-cap machinery as any
+    # explicit --target expansion.  When combined with --target, the result is
+    # the intersection of the two resolved sets (changed files that also satisfy
+    # the explicit target constraint).
+    #
+    # Without --target-changed we fall through to the legacy --target path,
+    # which is unchanged (issue #146 compatibility rule preserved in full).
+
+    raw_targets: list[str] = list(args.target or [])
+    target_changed: bool = getattr(args, "target_changed", False)
+
+    if not raw_targets and not target_changed:
+        print(
+            "error: validate requires --target or --target-changed",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
     target: object
-    if len(raw_targets) == 1:
-        from gate_keeper.backends._target import parse_target
-        from gate_keeper.targets import looks_like_glob
 
-        sole = raw_targets[0]
-        sole_path = Path(sole)
+    if target_changed:
+        import os as _os
 
-        # Order matters: a literal directory or an existing literal file
-        # always wins over glob detection so a real filename like
-        # ``a[b].txt`` does not get mis-expanded as a pattern.
-        #
-        # The ``is_dir`` / ``is_file`` calls can raise ``OSError`` when the
-        # token cannot be a real path on the host filesystem — most commonly
-        # ``ENAMETOOLONG`` (errno 36) when a ``/``-segment exceeds NAME_MAX
-        # (255 bytes on Linux), and ``EINVAL`` on some kernels for embedded
-        # NULs.  Such inputs cannot possibly resolve to a path, so we treat
-        # them as literal text and fall through to the non-path branch
-        # rather than letting the traceback escape (issue #166).
+        from gate_keeper.changed import (
+            ChangedFilesError,
+            compute_changed_files,
+            find_repo_root,
+            resolve_base_ref,
+        )
+        from gate_keeper.targets import TargetSpec, resolve_changed_targets
+
+        # Determine base ref: CLI flag → env var → default.
+        base_ref: str = args.base_ref if args.base_ref is not None else resolve_base_ref()
+
+        # Locate the repository root (walk up from cwd).
         try:
-            sole_is_dir = sole_path.is_dir()
-            sole_is_file = sole_path.is_file()
-        except OSError:
-            sole_is_dir = False
-            sole_is_file = False
+            repo_root = find_repo_root(Path.cwd())
+        except ChangedFilesError as exc:
+            print(f"error: --target-changed: {exc}", file=sys.stderr)
+            return EXIT_USAGE
 
-        if sole_is_dir:
+        # Compute the diff.
+        try:
+            changed_posix = compute_changed_files(repo_root, base_ref)
+        except ChangedFilesError as exc:
+            print(f"error: --target-changed: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+
+        # Filter through text-readable + cap machinery.
+        try:
+            changed_spec = resolve_changed_targets(changed_posix, repo_root)
+        except TargetExpansionError as exc:
+            print(f"error: --target-changed: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+
+        if raw_targets:
+            # Intersection: changed files that also satisfy the explicit --target.
+            # The explicit spec is always resolved through the filesystem path
+            # (--target-changed + --target is filesystem-only; combining a
+            # changed set with a GitHub PR URL is not meaningful).
+            try:
+                explicit_spec = resolve_targets(raw_targets)
+            except TargetExpansionError as exc:
+                print(f"error: --target: {exc}", file=sys.stderr)
+                return EXIT_USAGE
+            # Canonicalise both sides to absolute paths for stable comparison
+            # (R4: git emits repo-root-relative paths; explicit --target may be
+            # cwd-relative or use a different relative prefix).
+            explicit_abs: set[Path] = {p.resolve() for p in explicit_spec.paths}
+            intersected = sorted(
+                [p for p in changed_spec.paths if p.resolve() in explicit_abs],
+                key=_os.fspath,
+            )
+            changed_spec = TargetSpec(
+                paths=intersected,
+                raw_targets=sorted(changed_posix) + raw_targets,
+                is_multi=len(intersected) != 1,
+            )
+
+        # AC3: empty changed set → explicit evidence, not silent exit 0.
+        if not changed_spec.paths:
+            from gate_keeper.diagnostics import EXIT_FAIL
+            from gate_keeper.models import (
+                Backend,
+                Diagnostic,
+                Evidence,
+                Severity,
+                SourceLocation,
+                Status,
+            )
+
+            synthetic = Diagnostic(
+                rule_id="changed_set_empty",
+                source=SourceLocation(path="--target-changed", line=1),
+                backend=Backend.FILESYSTEM,
+                status=Status.FAIL,
+                severity=Severity.WARNING,
+                message=(f"no changed text files in '{base_ref}...HEAD' after filtering"),
+                evidence=[
+                    Evidence(
+                        kind="changed_set_empty",
+                        data={"base_ref": base_ref, "resolved_count": 0},
+                    )
+                ],
+            )
+            if args.format == "json":
+                print(render_json([synthetic]))
+            else:
+                print(render_text([synthetic]))
+            return EXIT_FAIL
+
+        target = changed_spec
+
+    else:
+        # Resolve --target values into a single value passed to validator.
+        #
+        # Compatibility rule (issue #146): when exactly one --target is supplied
+        # and it is a plain literal (not a directory, not a glob), forward the raw
+        # string. This preserves every pre-#146 behaviour, including GitHub PR
+        # references like ``owner/repo#1`` and PR URLs that contain ``?``/``#``
+        # (which the GitHub backend's parser tolerates). Multi-target invocations
+        # and directory/glob single-targets are resolved into a TargetSpec; the
+        # chosen backend then either aggregates (filesystem) or fails closed
+        # (github / llm-rubric / external).
+        if len(raw_targets) == 1:
+            from gate_keeper.backends._target import parse_target
+            from gate_keeper.targets import looks_like_glob
+
+            sole = raw_targets[0]
+            sole_path = Path(sole)
+
+            # Order matters: a literal directory or an existing literal file
+            # always wins over glob detection so a real filename like
+            # ``a[b].txt`` does not get mis-expanded as a pattern.
+            #
+            # The ``is_dir`` / ``is_file`` calls can raise ``OSError`` when the
+            # token cannot be a real path on the host filesystem — most commonly
+            # ``ENAMETOOLONG`` (errno 36) when a ``/``-segment exceeds NAME_MAX
+            # (255 bytes on Linux), and ``EINVAL`` on some kernels for embedded
+            # NULs.  Such inputs cannot possibly resolve to a path, so we treat
+            # them as literal text and fall through to the non-path branch
+            # rather than letting the traceback escape (issue #166).
+            try:
+                sole_is_dir = sole_path.is_dir()
+                sole_is_file = sole_path.is_file()
+            except OSError:
+                sole_is_dir = False
+                sole_is_file = False
+
+            if sole_is_dir:
+                try:
+                    target = resolve_targets(raw_targets)
+                except TargetExpansionError as exc:
+                    print(f"error: --target: {exc}", file=sys.stderr)
+                    return EXIT_USAGE
+            elif sole_is_file:
+                target = sole
+            elif looks_like_glob(sole):
+                # Token has glob metacharacters but the literal path doesn't
+                # exist. A GitHub PR URL with a query string (``?diff=split``)
+                # falls into this bucket — recognise that case explicitly so
+                # the github backend still receives the raw URL it needs.
+                pr, _ = parse_target(sole)
+                if pr is not None:
+                    target = sole
+                else:
+                    try:
+                        resolved = resolve_targets(raw_targets)
+                    except TargetExpansionError as exc:
+                        print(f"error: --target: {exc}", file=sys.stderr)
+                        return EXIT_USAGE
+                    # Issue #165: a literal ``--target`` containing glob
+                    # metacharacters (``*``/``?``/``[``) — common in markdown
+                    # PR-body text such as ``**bold** with [link](x)`` or a
+                    # GitHub-style checkbox ``- [x] item`` — is mis-routed
+                    # through ``resolve_targets`` even when the rules in this
+                    # ruleset have no filesystem backend.  When the expansion
+                    # produced zero filesystem matches AND no rule routes to
+                    # the filesystem backend AND the user did not force a
+                    # filesystem backend via ``--backend filesystem``, the
+                    # only sensible interpretation is "literal text"; fall
+                    # through to the raw string so the llm-rubric / github /
+                    # external backend receives the author-supplied content
+                    # instead of an empty TargetSpec.
+                    #
+                    # The check is intentionally narrow: a filesystem rule
+                    # with an empty glob still produces ``UNAVAILABLE`` (the
+                    # legacy fail-closed behaviour exercised by
+                    # ``test_empty_glob_fails_closed``), a non-filesystem
+                    # rule with a glob that actually matched files still
+                    # surfaces as ``multi_target_unsupported`` (the user
+                    # explicitly asked for multiple files; #74's job to lift
+                    # that restriction), and an explicit
+                    # ``--backend filesystem`` override still expects
+                    # filesystem-style target resolution regardless of the
+                    # ruleset's backend hints.
+                    forced_filesystem = backend == "filesystem"
+                    if (
+                        not resolved.paths
+                        and not _ruleset_has_filesystem_rule(ruleset)
+                        and not forced_filesystem
+                    ):
+                        target = sole
+                    else:
+                        target = resolved
+            else:
+                target = sole
+        else:
             try:
                 target = resolve_targets(raw_targets)
             except TargetExpansionError as exc:
                 print(f"error: --target: {exc}", file=sys.stderr)
                 return EXIT_USAGE
-        elif sole_is_file:
-            target = sole
-        elif looks_like_glob(sole):
-            # Token has glob metacharacters but the literal path doesn't
-            # exist. A GitHub PR URL with a query string (``?diff=split``)
-            # falls into this bucket — recognise that case explicitly so
-            # the github backend still receives the raw URL it needs.
-            pr, _ = parse_target(sole)
-            if pr is not None:
-                target = sole
-            else:
-                try:
-                    resolved = resolve_targets(raw_targets)
-                except TargetExpansionError as exc:
-                    print(f"error: --target: {exc}", file=sys.stderr)
-                    return EXIT_USAGE
-                # Issue #165: a literal ``--target`` containing glob
-                # metacharacters (``*``/``?``/``[``) — common in markdown
-                # PR-body text such as ``**bold** with [link](x)`` or a
-                # GitHub-style checkbox ``- [x] item`` — is mis-routed
-                # through ``resolve_targets`` even when the rules in this
-                # ruleset have no filesystem backend.  When the expansion
-                # produced zero filesystem matches AND no rule routes to
-                # the filesystem backend AND the user did not force a
-                # filesystem backend via ``--backend filesystem``, the
-                # only sensible interpretation is "literal text"; fall
-                # through to the raw string so the llm-rubric / github /
-                # external backend receives the author-supplied content
-                # instead of an empty TargetSpec.
-                #
-                # The check is intentionally narrow: a filesystem rule
-                # with an empty glob still produces ``UNAVAILABLE`` (the
-                # legacy fail-closed behaviour exercised by
-                # ``test_empty_glob_fails_closed``), a non-filesystem
-                # rule with a glob that actually matched files still
-                # surfaces as ``multi_target_unsupported`` (the user
-                # explicitly asked for multiple files; #74's job to lift
-                # that restriction), and an explicit
-                # ``--backend filesystem`` override still expects
-                # filesystem-style target resolution regardless of the
-                # ruleset's backend hints.
-                forced_filesystem = backend == "filesystem"
-                if not resolved.paths and not _ruleset_has_filesystem_rule(ruleset) and not forced_filesystem:
-                    target = sole
-                else:
-                    target = resolved
-        else:
-            target = sole
-    else:
-        try:
-            target = resolve_targets(raw_targets)
-        except TargetExpansionError as exc:
-            print(f"error: --target: {exc}", file=sys.stderr)
-            return EXIT_USAGE
 
     # Toggle the project-local command adapter for this process only. The flag
     # is intentionally not propagated through the validator API — the adapter

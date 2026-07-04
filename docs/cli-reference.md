@@ -197,7 +197,9 @@ Provide either a single positional `rules` document **or** one or more
 |---|---|---|---|
 | `rules` | positional | — | Path to a Markdown rule document, or to a precompiled Rule IR JSON file when `--rules-format ir` is given. Omit when using `--include`. |
 | `--include GLOB` | option (repeatable) | — | Compose a policy bundle from every Markdown document matching `GLOB`. May be passed multiple times. Mutually exclusive with the positional `rules`. Not compatible with `--rules-format ir`. |
-| `--target TARGET` | option (repeatable) | **required** | Artifact or PR to validate. May be specified multiple times for filesystem multi-target evaluation (see [Multi-target evaluation](#multi-target-evaluation)). Each value is a local path, directory, quoted glob, GitHub PR URL, or `owner/repo#N` shorthand. |
+| `--target TARGET` | option (repeatable) | — | Artifact or PR to validate. May be specified multiple times for filesystem multi-target evaluation (see [Multi-target evaluation](#multi-target-evaluation)). Each value is a local path, directory, quoted glob, GitHub PR URL, or `owner/repo#N` shorthand. Required unless `--target-changed` is given. |
+| `--target-changed` | flag | off | Use the set of files changed since `--base-ref` as the initial candidate target pool (#278). The pool is filtered through the same text-readable and 200-file-cap machinery as an explicit `--target` expansion. When combined with `--target`, the result is the **intersection** of the two resolved sets (changed files that also satisfy the explicit target constraint). An empty changed set after filtering emits `evidence.kind=changed_set_empty` and exits 1 — never a silent exit 0. Requires a Git repository; a bad `--base-ref` exits 2. See [Changed-set target selection (--target-changed)](#changed-set-target-selection---target-changed) below. |
+| `--base-ref REF` | option | `$GATE_KEEPER_BASE_REF`, then `origin/main` | Base Git ref for `--target-changed`. Ignored when `--target-changed` is not set. |
 | `--rules-format {markdown,ir}` | option | `markdown` | How to interpret `rules`. `markdown` (default) parses and classifies a Markdown rule document — the historical behaviour. `ir` loads a precompiled `RuleSet` JSON file (the same shape `compile` emits) using the strict IR parser and **bypasses the classifier**, so hand-authored `kind`, `backend_hint`, and `params` fields reach the validator unchanged. |
 | `--backend {auto,filesystem,github,llm-rubric,external}` | option | `auto` | Validation backend. `auto` delegates each rule to the backend the classifier (or the IR file) selected. |
 | `--format {text,json}` | option | `text` | Output format. |
@@ -494,6 +496,48 @@ behaviour (the `Target reference` slot carries `str(target)` and the
 prompt-level fallback in #169 / #175 is responsible for declining
 mismatches). Inline-string targets (`--target "<commit message body>"`)
 and non-existent paths are forwarded unchanged regardless of the flag.
+
+### Changed-set target selection (`--target-changed`)
+
+`--target-changed` tells `validate` to derive the candidate target pool from
+the files that changed between `--base-ref` (default: `$GATE_KEEPER_BASE_REF`,
+then `origin/main`) and `HEAD`, computed via `git diff --name-only
+BASE...HEAD`. The changed set is then filtered through the same text-readable
+and 200-file-cap machinery as an ordinary `--target` expansion: binary files,
+deleted files, and files that exceed the cap are excluded or raise a usage
+error exactly as they would with an explicit `--target .`.
+
+**Combining with `--target`:** when both flags are given the result is the
+*intersection* — only files that appear in the changed set **and** also match
+the explicit target constraint. This is useful for auditing changed Markdown
+docs against a documentation rule set:
+
+```sh
+uv run gate-keeper validate docs/rules.md \
+    --target-changed --base-ref origin/main \
+    --target 'docs/**/*.md'
+```
+
+**Empty changed set:** if no changed text file survives the filter, `validate`
+emits a single diagnostic with `evidence.kind=changed_set_empty` (carrying
+`base_ref` and `resolved_count=0`) and exits 1. This is an explicit failure
+signal — never a silent success.
+
+**Path normalisation (R4):** `git diff --name-only` always returns
+repository-root-relative POSIX paths regardless of the current working directory.
+Gate-keeper resolves them to absolute paths before intersecting with
+`--target` globs, so invoking `validate` from a subdirectory produces the
+same result as running it from the repository root.
+
+**LLM-rubric + multi-file changed set (R5):** when a changed set contains a
+file targeted by an `llm-rubric` rule, the backend returns
+`multi_target_unsupported` evidence (the existing behaviour for any
+multi-target LLM-rubric invocation). This is a known limit; per-rule
+narrowing of the changed set is deferred to S3/S5.
+
+**Non-goals:** `--target-changed` selects which files to evaluate; it does
+not change *how* each rule evaluates them. Per-rule scoping (S3) and
+LLM-rubric content assembly for large changed sets (S5) are separate issues.
 
 ### Bounded rule-level concurrency (#249)
 
