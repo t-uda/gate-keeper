@@ -20,6 +20,7 @@ from gate_keeper.models import (
     Backend,
     Confidence,
     Diagnostic,
+    Evidence,
     Rule,
     RuleKind,
     RuleSet,
@@ -342,6 +343,68 @@ class TestScopeEvidenceOnError:
         ev = _evidence_of(diag, "scope_effective_set")
         assert ev is not None
         assert ev.data["effective_paths"] == ["src/x.py", "src/y.py"]
+
+
+class TestScopeEvalCacheInteraction:
+    """Scope + eval-cache (#69 slice B) integration established during the #288 rebase.
+
+    The cache must key on the rule's dispatched target (the per-rule effective
+    set), and a cache hit must still carry the rule's scope_effective_set
+    evidence.
+    """
+
+    @pytest.mark.parametrize("concurrency", [1, 2])
+    def test_cache_keyed_on_effective_target_and_preserves_scope_evidence(
+        self, tmp_path, monkeypatch, concurrency
+    ):
+        import gate_keeper.backends.eval_cache as eval_cache
+
+        files = _tree(tmp_path)
+        # Route the rule to llm-rubric so the eval-cache path is consulted, and
+        # register a stub so a cache miss would not need a real provider.
+        monkeypatch.setitem(registry._REGISTRY, "llm-rubric", _Recorder())
+
+        seen_targets: list[object] = []
+
+        def _fake_lookup(rule, target, artifact_kind, deterministic, n):
+            seen_targets.append(target)
+            return Diagnostic(
+                rule_id=rule.id,
+                source=rule.source,
+                backend=Backend.LLM_RUBRIC,
+                status=Status.PASS,
+                severity=rule.severity,
+                message="cached",
+                evidence=[Evidence(kind="cache_hit", data={"cache_hit": True})],
+            )
+
+        monkeypatch.setattr(eval_cache, "try_lookup", _fake_lookup)
+        monkeypatch.setattr(eval_cache, "try_store", lambda *a, **k: None)
+
+        rule = _rule(
+            "cached-scoped",
+            backend_hint=Backend.LLM_RUBRIC,
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            params={"target_scope": ["docs/**/*.md"]},  # single-file effective set
+        )
+        report = validate(
+            RuleSet(rules=[rule]),
+            _candidate_spec(files),
+            repo_root=tmp_path,
+            concurrency=concurrency,
+            eval_cache=True,
+        )
+        diag = report.diagnostics[0]
+        # Cache hit rehydrated, and scope evidence rides on it.
+        assert _evidence_of(diag, "cache_hit") is not None
+        scope_ev = _evidence_of(diag, "scope_effective_set")
+        assert scope_ev is not None
+        assert scope_ev.data["effective_paths"] == ["docs/a.md"]
+        # The cache was keyed on the per-rule effective set, not the run-level
+        # candidate pool.
+        assert len(seen_targets) == 1
+        assert isinstance(seen_targets[0], TargetSpec)
+        assert [p.name for p in seen_targets[0].paths] == ["a.md"]
 
 
 class TestIrRoundTrip:
