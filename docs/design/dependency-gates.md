@@ -266,9 +266,24 @@ If Git is unavailable or the base ref does not resolve, the validator emits `Sta
 
 ## 5. Failure-Mode Taxonomy
 
-See §2.7 for the evidence-record `kind` vocabulary. Every diagnostic the validator emits carries exactly one evidence record from that vocabulary. The validator never emits multiple evidence records per diagnostic in slice 1 — one edge, one verdict, one evidence kind.
+All evidence-record `kind` strings share one flat vocabulary namespace across all dependency-gate validators. No fork, no per-validator sub-namespace. §2.7 defines the base vocabulary; this section extends it with the kinds introduced by later slices.
 
-The validator always exits 0 per the `command` adapter contract (`docs/backend-external.md` § "command"). Pass/fail is carried by the `Diagnostic.status` field, not by the process exit code.
+Every validator always exits 0 per the `command` adapter contract (`docs/backend-external.md` § "command"). Pass/fail is carried by the `Diagnostic.status` field, not by the process exit code.
+
+### 5.1 Base vocabulary (§2.7, all validators)
+
+`manifest_invalid`, `manifest_target_missing`, `dependent_artifact_unaffected`, `dependent_artifact_co_changed`, `dependent_artifact_acked`, `dependent_artifact_changed_without_target_update`, `dependent_artifact_stale_by_hash`, `target_stamp_missing`, `target_stamp_malformed`, `dependent_artifact_source_missing`, `dependent_artifact_target_missing`, `ack_invalid`, `edge_not_applicable`, `changed_file_source_unresolved`, `stamped_mode_not_implemented`.
+
+### 5.2 Manifest-coverage vocabulary (issue #280, `check_manifest_coverage.py`)
+
+Emitted by the manifest-coverage validator. These kinds live in the same namespace as §5.1 — not a fork.
+
+- `uncovered_file` — the target is in the changed-file set but has neither a manifest edge (as `from` or `to` node) nor an exemption entry in `.gate-keeper/ref-exemptions.yml`. Status: `fail`. `exemption_required` (issue #269 Layer 1 naming) is an equivalent label for the same state; this validator uses `uncovered_file` as the canonical kind.
+- `covering_edge` — the target participates in at least one manifest edge. Status: `pass`. Data carries an `edges` array summarising each covering edge.
+- `exemption_applied` — the target has an entry in the exemption file. Status: `pass`. Data carries the exemption `category` and `reason`.
+- `params_error` — `target` payload is empty. Status: `unavailable`.
+
+The `dependent_artifact_unaffected`, `manifest_invalid`, and `changed_file_source_unresolved` kinds from §5.1 are reused by this validator without redefinition.
 
 ---
 
@@ -338,6 +353,50 @@ The validator runs at `severity: warning` in slice 1 (per the
 `docs/dogfooding.md` § "Promotion criteria" path). The broken-reference
 category produces `Status.FAIL` regardless; the other two deterministic
 categories stay informational until a future slice promotes them.
+
+---
+
+## 6.2. Exemption file schema (issue #280)
+
+The manifest-coverage validator (`check_manifest_coverage.py`) reads an
+optional exemption file at `.gate-keeper/ref-exemptions.yml`. Absent ⇒ no
+exemptions, not an error. Present but unreadable or malformed ⇒
+`manifest_invalid`, fail-closed.
+
+### YAML shape
+
+```yaml
+# .gate-keeper/ref-exemptions.yml
+exemptions:
+  - path: scripts/some_helper.py    # repo-relative POSIX path; required
+    category: manual                 # required; see category values below
+    reason: "bootstrap — tooling"   # optional free-form rationale
+```
+
+`path` must be a non-empty string matching the repo-relative POSIX path
+exactly as it would appear in the `git diff --name-only` output.
+
+### Category values
+
+| Category | Meaning |
+|---|---|
+| `manual` | Owner or agent has explicitly acknowledged this path; no further check required. |
+| `llm_required` | Reserved for Layer 2 (issue #281). Deterministic checks found an ambiguous relationship; LLM narrowing is deferred. Not exercised in this slice. |
+
+### Fail-closed semantics
+
+- File absent → zero exemptions, no error.
+- File present but unreadable (OS error, encoding error) → `manifest_invalid`, `unavailable`.
+- File present but not valid YAML → `manifest_invalid`, `unavailable`.
+- Top-level not a mapping, or `exemptions` not a list → `manifest_invalid`, `unavailable`.
+- Any entry missing `path`, `path` is empty, or `category` is unknown → `manifest_invalid`, `unavailable`.
+
+### Bootstrap entries
+
+The repository ships bootstrap exemptions in `.gate-keeper/ref-exemptions.yml`
+covering validator scripts, test files, and configuration artifacts that are
+intentionally not manifest nodes. Bootstrap entries use `category: manual` and
+are counted in the `exemption_applied` evidence when the validator runs on them.
 
 ---
 
