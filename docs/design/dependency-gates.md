@@ -250,15 +250,11 @@ The validator never auto-edits a stamp; on a stale or malformed stamp the diagno
 
 `scripts/dependency_gates/`. One script per "view" (e.g. `check_cli_reference.py`) sharing a common loader (`manifest.py`) and helper (`_changed_files.py`). New views in future slices are new sibling scripts; the loader stays single-sourced.
 
-### 4.3 Changed-file source: Mode A vs CLI target selection
+### 4.3 Changed-file source for Mode A
 
-There are now two distinct ownership models for the changed-file diff. Both use the same underlying `gate_keeper.changed.compute_changed_files` helper (promoted to core in #278).
+The validator computes `git diff --name-only ${GATE_KEEPER_BASE_REF:-origin/main}...HEAD` internally via `subprocess.run(..., shell=False)`. No new CLI flag in slice 1.
 
-**Mode A — validator-owned diff source (unchanged):** the dependency-gates command adapter scripts (`check_repo_refs.py`, `check_cli_reference.py`) compute `git diff --name-only ${GATE_KEEPER_BASE_REF:-origin/main}...HEAD` internally. The validator owns its diff source; no CLI flag is involved. This is the behaviour described in slice 1 and is unchanged by #278.
-
-If Git is unavailable or the base ref does not resolve, the validator emits `Status.UNAVAILABLE` with evidence `kind: changed_file_source_unresolved`. Fail-closed; no "all files changed" fallback.
-
-**CLI target selection (`--target-changed`) — caller-owned diff source (#278):** `validate --target-changed [--base-ref REF]` passes the changed set through the existing `resolve_targets` text-readable and 200-file-cap filter machinery as the initial candidate pool. The caller (the `validate` command) owns the diff source, not the individual rule backend. Combined with an explicit `--target`, the result is the intersection of the two sets. An empty filtered set is explicit evidence (`kind: changed_set_empty`), never a silent success.
+If Git is unavailable or the base ref does not resolve, the validator emits `Status.UNAVAILABLE` with evidence `kind: changed_file_source_unresolved` rather than treating "all files changed" as a fallback. Fail-closed.
 
 `GATE_KEEPER_BASE_REF` may be set in CI or by the developer; default `origin/main` works for both PR-context CI and `git rebase`-style local workflows.
 

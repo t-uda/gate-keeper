@@ -270,6 +270,26 @@ def test_exemption_entry_missing_path_is_unavailable(tmp_path: Path, monkeypatch
     assert "manifest_invalid" in _evidence_kinds(out)
 
 
+def test_exemption_entry_missing_category_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Exemption entry without a category field → unavailable manifest_invalid.
+
+    Category is required; omitting it must not silently default to 'manual'.
+    """
+    exemptions = dedent(
+        """
+        exemptions:
+          - path: scripts/helper.py
+            reason: "category accidentally omitted"
+        """
+    ).lstrip()
+    _seed_repo(tmp_path, exemptions_text=exemptions)
+    _patch_changed(monkeypatch, {"scripts/helper.py"})
+    out = _run(tmp_path, "scripts/helper.py")
+    assert out.status == "unavailable"
+    assert "manifest_invalid" in _evidence_kinds(out)
+    assert "category" in out.message
+
+
 def test_unknown_exemption_category_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Exemption entry with unknown category → unavailable manifest_invalid."""
     exemptions = dedent(

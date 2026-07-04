@@ -285,7 +285,7 @@ def _run(
                     "data": {
                         "target": target_rel,
                         "exemptions_path": str(exemptions_path),
-                        "category": entry.get("category", "manual"),
+                        "category": entry["category"],
                         "reason": entry.get("reason", ""),
                     },
                 }
@@ -439,7 +439,27 @@ def _load_exemptions(
                     "See docs/design/dependency-gates.md §6.2."
                 ),
             )
-        category = item.get("category", "manual")
+        # ``category`` is required — a missing field must not silently become
+        # ``manual`` and exempt an uncovered file without an explicit decision.
+        if "category" not in item:
+            return Outcome(
+                status="unavailable",
+                message=f"exemption file {path}: {ctx}.category is required",
+                evidence=[
+                    {
+                        "kind": "manifest_invalid",
+                        "data": {
+                            "manifest_path": str(path),
+                            "error": f"{ctx}.category missing",
+                        },
+                    }
+                ],
+                remediation=(
+                    f"Fix {ctx} in {path}: add 'category: manual' (or 'category: llm_required'). "
+                    "See docs/design/dependency-gates.md §6.2."
+                ),
+            )
+        category = item["category"]
         if category not in _VALID_EXEMPTION_CATEGORIES:
             return Outcome(
                 status="unavailable",
