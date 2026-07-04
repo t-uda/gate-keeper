@@ -532,12 +532,58 @@ same result as running it from the repository root.
 **LLM-rubric + multi-file changed set (R5):** when a changed set contains a
 file targeted by an `llm-rubric` rule, the backend returns
 `multi_target_unsupported` evidence (the existing behaviour for any
-multi-target LLM-rubric invocation). This is a known limit; per-rule
-narrowing of the changed set is deferred to S3/S5.
+multi-target LLM-rubric invocation). This is a known limit; LLM-rubric content
+assembly for large changed sets is deferred to S5. Per-rule narrowing of the
+changed set landed as S3 — see [Per-rule target scope](#per-rule-target-scope-paramstarget_scope) below.
 
 **Non-goals:** `--target-changed` selects which files to evaluate; it does
-not change *how* each rule evaluates them. Per-rule scoping (S3) and
-LLM-rubric content assembly for large changed sets (S5) are separate issues.
+not change *how* each rule evaluates them. LLM-rubric content assembly for
+large per-rule effective sets (S5) is a separate issue.
+
+### Per-rule target scope (`params.target_scope`)
+
+A rule may declare `params.target_scope` — a list of repo-relative glob strings
+— in its IR to restrict which candidate files it runs against (#279, S3). This
+is a **rules-IR key, not a CLI flag**: the `validate` command surface is
+unchanged. The engine computes, per rule,
+
+```
+effective_set = scope_expansion(target_scope) ∩ run-level candidate set
+```
+
+where the run-level candidate set is the resolved `--target` / `--target-changed`
+pool, and dispatches each rule against its own effective set. This makes a
+ruleset self-contained for incremental auditing: `validate rules.md
+--target-changed` becomes a full incremental audit without the caller enumerating
+which rules care about which files.
+
+```sh
+# Two rules scoped to docs and src respectively; each evaluates only its subset
+# of the current directory.
+uv run gate-keeper validate rules.md --rules-format ir --target .
+
+# Scope narrows the changed set: a docs-scoped rule audits only changed docs.
+uv run gate-keeper validate rules.md --rules-format ir \
+    --target-changed --base-ref origin/main
+```
+
+Outcomes (full contract: [docs/rule-ir.md](rule-ir.md) `params.target_scope`
+and [docs/design/multi-target.md](design/multi-target.md) §9):
+
+- **Non-empty effective set** — the rule runs against the intersection and its
+  verdict carries a `scope_effective_set` evidence record.
+- **Empty effective set** (valid scope, nothing in scope this run) — `PASS` with
+  `scope_empty` evidence; never a run abort, never a silent pass.
+- **Malformed scope or zero repo-wide matches** — `UNAVAILABLE` with
+  `scope_invalid` evidence (fail-closed).
+- **Per-rule effective set over the 200-file cap** — `UNAVAILABLE` with
+  `scope_file_limit_exceeded` evidence for that rule only; other rules are
+  unaffected.
+- **Rules without `target_scope`** are dispatched byte-for-byte as before.
+
+An `llm-rubric` rule whose effective set is multi-file stays
+`multi_target_unsupported` until S5 (#281); a single-file effective set evaluates
+normally.
 
 ### Bounded rule-level concurrency (#249)
 

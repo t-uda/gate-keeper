@@ -41,7 +41,7 @@ from gate_keeper.models import (
     Status,
     TargetKind,
 )
-from gate_keeper.targets import TargetSpec
+from gate_keeper.targets import ScopeResolution, TargetSpec, resolve_rule_scope
 
 
 def _backend_for(name: str) -> Backend:
@@ -290,6 +290,229 @@ def _run_rule_check(
     return _invoke_check(check_fn, rule, target, rule_artifact_kind, deterministic=deterministic)
 
 
+# ---------------------------------------------------------------------------
+# Per-rule target scope (issue #279 — S3, docs/design/multi-target.md §9)
+# ---------------------------------------------------------------------------
+
+
+def _derive_candidate_paths(target: str | Path | TargetSpec) -> list[Path] | None:
+    """Derive the run-level candidate file pool from *target* (§9.3).
+
+    Returns the candidate paths every scoped rule intersects its scope with, or
+    ``None`` when *target* is not a filesystem pool (e.g. a GitHub PR reference)
+    — in which case scoped rules cannot compute an effective set and are
+    dispatched verbatim (legacy behaviour, never a silent pass).
+
+    - :class:`TargetSpec` → its resolved ``paths``.
+    - A ``str`` / :class:`Path` pointing at an existing regular file → that one
+      file (a single-target run scoped rules can still narrow against).
+    - Anything else (PR reference, non-existent path, directory-as-string) →
+      ``None``.
+    """
+    if isinstance(target, TargetSpec):
+        return list(target.paths)
+    candidate = target if isinstance(target, Path) else Path(target)
+    try:
+        if candidate.is_file():
+            return [candidate]
+    except OSError:
+        return None
+    return None
+
+
+class _ScopeContext:
+    """Per-run lazily-resolved context for per-rule scope computation.
+
+    The repository root and candidate pool are resolved on first use — only when
+    a rule actually declares ``params.target_scope`` — so an unscoped run pays no
+    extra syscalls and stays byte-identical to today (§9.9). The expansion memo
+    is shared across every rule in the run (§9.6).
+    """
+
+    def __init__(self, target: str | Path | TargetSpec, repo_root: Path | None) -> None:
+        self._target = target
+        self._repo_root = repo_root
+        self._candidate_paths: list[Path] | None = None
+        self._candidate_resolved = False
+        self.memo: dict[tuple[str, str], frozenset[str]] = {}
+
+    def repo_root(self) -> Path:
+        if self._repo_root is None:
+            # Lazy import keeps ``changed``'s git machinery out of the hot path
+            # for unscoped runs. When cwd is not inside a git repo we fall back
+            # to cwd as the scope root: scopes are repo-relative globs, so cwd
+            # is the sensible base when there is no ``.git`` to anchor on.
+            from gate_keeper.changed import ChangedFilesError, find_repo_root
+
+            try:
+                self._repo_root = find_repo_root(Path.cwd())
+            except ChangedFilesError:
+                self._repo_root = Path.cwd()
+        return self._repo_root
+
+    def candidate_paths(self) -> list[Path] | None:
+        if not self._candidate_resolved:
+            self._candidate_paths = _derive_candidate_paths(self._target)
+            self._candidate_resolved = True
+        return self._candidate_paths
+
+
+def _scope_short_circuit_diagnostic(rule: Rule, resolution: ScopeResolution) -> Diagnostic:
+    """Build the synthetic diagnostic for an empty / invalid / over-cap scope (§9.4/§9.5/§9.8).
+
+    Attributed to the rule's ``backend_hint`` even though no backend was called;
+    the evidence ``kind`` distinguishes the three causes and carries the resolved
+    scope / candidate / effective sizes so a reader can audit exactly why the rule
+    was not evaluated against files this run.
+    """
+    scope_raw = rule.params.get("target_scope")
+    base_data = {
+        "target_scope": scope_raw,
+        "scope_size": resolution.scope_size,
+        "candidate_size": resolution.candidate_size,
+        "effective_size": resolution.effective_size,
+    }
+    if resolution.status == "empty":
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=rule.backend_hint,
+            status=Status.PASS,
+            severity=rule.severity,
+            message=(
+                "no files in scope for this run: "
+                f"target_scope expands to {resolution.scope_size} file(s) but none "
+                "intersect the run's candidate set; nothing to check"
+            ),
+            evidence=[Evidence(kind="scope_empty", data=dict(base_data))],
+        )
+    if resolution.status == "file_limit_exceeded":
+        return Diagnostic(
+            rule_id=rule.id,
+            source=rule.source,
+            backend=rule.backend_hint,
+            status=Status.UNAVAILABLE,
+            severity=rule.severity,
+            message=(
+                f"per-rule effective target set of {resolution.effective_size} file(s) "
+                f"exceeds the limit of {resolution.file_limit}; narrow the rule's "
+                "target_scope"
+            ),
+            evidence=[
+                Evidence(
+                    kind="scope_file_limit_exceeded",
+                    data={**base_data, "file_limit": resolution.file_limit},
+                )
+            ],
+            remediation=(
+                "The rule's target_scope, intersected with this run's candidate "
+                f"set, resolves to {resolution.effective_size} files, over the "
+                f"{resolution.file_limit}-file per-rule cap. Narrow target_scope so "
+                "the effective set stays within the cap."
+            ),
+        )
+    # "invalid"
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=rule.backend_hint,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=(f"invalid target_scope: {resolution.detail}"),
+        evidence=[
+            Evidence(
+                kind="scope_invalid",
+                data={"target_scope": scope_raw, "detail": resolution.detail},
+            )
+        ],
+        remediation=(
+            "Set params.target_scope to a non-empty list of repo-relative glob "
+            "strings that matches at least one text file in the repository."
+        ),
+    )
+
+
+def _scope_effective_evidence(resolution: ScopeResolution) -> Evidence:
+    """Auditable ``scope_effective_set`` evidence for a dispatched scoped rule (§9.8).
+
+    Rides on the rule's normal verdict so every scoped verdict records which
+    files it actually ran against.
+    """
+    return Evidence(
+        kind="scope_effective_set",
+        data={
+            "scope_size": resolution.scope_size,
+            "candidate_size": resolution.candidate_size,
+            "effective_size": resolution.effective_size,
+            "effective_paths": list(resolution.effective_relpaths),
+        },
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _RuleDispatch:
+    """Per-rule dispatch plan produced by :func:`_plan_rule_dispatch`.
+
+    Exactly one of ``short_circuit`` (skip the backend, use this diagnostic) or a
+    live dispatch (run the backend against ``target``, then append
+    ``scope_evidence`` if present) applies.
+    """
+
+    target: str | Path | TargetSpec
+    short_circuit: Diagnostic | None
+    scope_evidence: Evidence | None
+
+
+def _plan_rule_dispatch(
+    rule: Rule,
+    run_target: str | Path | TargetSpec,
+    scope_ctx: _ScopeContext,
+) -> _RuleDispatch:
+    """Decide how *rule* dispatches under per-rule target scope (§9.2).
+
+    A rule with no ``params.target_scope`` is dispatched against *run_target*
+    byte-for-byte as today. A scoped rule's effective set (scope ∩ candidate) is
+    computed; a non-empty set dispatches a per-rule :class:`TargetSpec` and
+    records ``scope_effective_set`` evidence, while empty / invalid / over-cap
+    outcomes short-circuit to a synthetic diagnostic without a backend call.
+    """
+    scope_raw = rule.params.get("target_scope")
+    if scope_raw is None:
+        return _RuleDispatch(target=run_target, short_circuit=None, scope_evidence=None)
+
+    candidate = scope_ctx.candidate_paths()
+    if candidate is None:
+        # Run-level target is not a filesystem pool (e.g. a PR reference); a
+        # per-rule scope cannot be intersected. Dispatch verbatim — the rule is
+        # still evaluated against the actual target, never silently passed.
+        return _RuleDispatch(target=run_target, short_circuit=None, scope_evidence=None)
+
+    resolution = resolve_rule_scope(
+        scope_raw,
+        candidate,
+        scope_ctx.repo_root(),
+        memo=scope_ctx.memo,
+    )
+    if resolution.status == "dispatch" and resolution.spec is not None:
+        return _RuleDispatch(
+            target=resolution.spec,
+            short_circuit=None,
+            scope_evidence=_scope_effective_evidence(resolution),
+        )
+    return _RuleDispatch(
+        target=run_target,
+        short_circuit=_scope_short_circuit_diagnostic(rule, resolution),
+        scope_evidence=None,
+    )
+
+
+def _append_scope_evidence(diag: Diagnostic, scope_evidence: Evidence | None) -> Diagnostic:
+    """Append ``scope_effective_set`` evidence to *diag* when the rule was scoped."""
+    if scope_evidence is None:
+        return diag
+    return dataclasses.replace(diag, evidence=[*diag.evidence, scope_evidence])
+
+
 def validate(
     ruleset: RuleSet,
     target: str | Path | TargetSpec,
@@ -300,6 +523,7 @@ def validate(
     concurrency: int = 1,
     deterministic: bool = False,
     eval_cache: bool = False,
+    repo_root: Path | None = None,
 ) -> DiagnosticReport:
     """Validate *ruleset* against *target* using *backend*.
 
@@ -382,6 +606,12 @@ def validate(
         ``GATE_KEEPER_EVAL_CACHE=1`` in the project dotenv (dotenv value
         applies before this parameter in the CLI layer; programmatic callers
         must set this flag explicitly).  Non-LLM backends are unaffected.
+    repo_root:
+        Repository root that per-rule ``params.target_scope`` globs expand
+        against (#279, ``docs/design/multi-target.md`` §9). Only consulted for
+        rules that declare a scope; when ``None`` it is resolved lazily from the
+        process cwd (git root, or cwd itself when not in a repo). Rules without a
+        scope are unaffected and dispatch byte-for-byte as before.
 
     Returns
     -------
@@ -404,6 +634,8 @@ def validate(
     if concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
 
+    scope_ctx = _ScopeContext(target, repo_root)
+
     if concurrency == 1:
         return _validate_sequential(
             ruleset,
@@ -411,6 +643,7 @@ def validate(
             backend,
             reproducibility,
             artifact_kind,
+            scope_ctx,
             deterministic=deterministic,
             eval_cache=eval_cache,
         )
@@ -421,6 +654,7 @@ def validate(
         reproducibility,
         artifact_kind,
         concurrency,
+        scope_ctx,
         deterministic=deterministic,
         eval_cache=eval_cache,
     )
@@ -432,6 +666,7 @@ def _validate_sequential(
     backend: str,
     reproducibility: int,
     artifact_kind: TargetKind | None,
+    scope_ctx: _ScopeContext,
     *,
     deterministic: bool = False,
     eval_cache: bool = False,
@@ -451,6 +686,8 @@ def _validate_sequential(
         # prompt-level fallback). The check is performed here, before
         # dispatch, so no provider call is made on mismatch — the test
         # suite asserts this by counting calls into the stubbed provider.
+        # (#279 §9.7: this precheck stays run-level and untouched; per-rule
+        # scope resolution below layers on top of the rules it lets through.)
         if (
             artifact_kind is not None
             and resolved_name == "llm-rubric"
@@ -458,6 +695,15 @@ def _validate_sequential(
             and rule.target_kind is not artifact_kind
         ):
             diagnostics.append(target_kind_mismatch_diagnostic(rule, artifact_kind))
+            continue
+
+        # #279 — per-rule target scope. Unscoped rules dispatch against the
+        # run-level target verbatim; scoped rules dispatch against their own
+        # effective set or short-circuit to scope_empty / scope_invalid /
+        # scope_file_limit_exceeded without a backend call.
+        plan = _plan_rule_dispatch(rule, target, scope_ctx)
+        if plan.short_circuit is not None:
+            diagnostics.append(plan.short_circuit)
             continue
 
         check_fn = _registry.get(resolved_name)
@@ -489,21 +735,24 @@ def _validate_sequential(
                         try_store,
                     )
 
+                    # Keyed on the dispatched target (plan.target — the per-rule
+                    # effective set for a scoped rule); scope evidence is
+                    # preserved on the hit (#279).
                     cached = try_lookup(
                         rule,
-                        target,
+                        plan.target,
                         rule_artifact_kind,
                         rule_deterministic,
                         reproducibility,
                     )
                     if cached is not None:
-                        diagnostics.append(cached)
+                        diagnostics.append(_append_scope_evidence(cached, plan.scope_evidence))
                         continue
 
                 diag = _run_rule_check(
                     check_fn,
                     rule,
-                    target,
+                    plan.target,
                     resolved_name,
                     reproducibility,
                     rule_artifact_kind,
@@ -511,11 +760,12 @@ def _validate_sequential(
                 )
 
                 # Store the result on a miss (PASS/FAIL only; UNAVAILABLE/ERROR
-                # are silently skipped inside try_store per §2.4).
+                # are silently skipped inside try_store per §2.4). Keyed on the
+                # dispatched target for scope correctness.
                 if eval_cache and resolved_name == "llm-rubric":
                     try_store(
                         rule,
-                        target,
+                        plan.target,
                         rule_artifact_kind,
                         rule_deterministic,
                         reproducibility,
@@ -523,7 +773,7 @@ def _validate_sequential(
                     )
             except Exception as exc:  # noqa: BLE001
                 diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
-        diagnostics.append(diag)
+        diagnostics.append(_append_scope_evidence(diag, plan.scope_evidence))
 
     return DiagnosticReport(diagnostics=diagnostics)
 
@@ -535,24 +785,29 @@ def _validate_concurrent(
     reproducibility: int,
     artifact_kind: TargetKind | None,
     concurrency: int,
+    scope_ctx: _ScopeContext,
     *,
     deterministic: bool = False,
     eval_cache: bool = False,
 ) -> DiagnosticReport:
     """Bounded-parallel dispatch via :class:`ThreadPoolExecutor` (#249, Slice 1).
 
-    Deterministic prechecks (target-kind mismatch, registry miss) run
-    synchronously in the main loop and their diagnostics are recorded
-    directly. Surviving rules are submitted to the executor in rule order.
-    Results are collected in submission order so report ordering matches
-    ``ruleset.rules`` regardless of completion order. Backend exceptions
-    raised inside a future are re-raised by ``future.result()`` and caught
-    here, mirroring the sequential ``except Exception`` arm.
+    Deterministic prechecks (target-kind mismatch, registry miss) and per-rule
+    scope resolution (#279) run synchronously in the main loop and their
+    diagnostics are recorded directly. Surviving rules are submitted to the
+    executor in rule order. Results are collected in submission order so report
+    ordering matches ``ruleset.rules`` regardless of completion order. Backend
+    exceptions raised inside a future are re-raised by ``future.result()`` and
+    caught here, mirroring the sequential ``except Exception`` arm. A scoped
+    rule's ``scope_effective_set`` evidence is appended to its resolved
+    diagnostic during collection (including the error and cache-hit paths).
 
-    Eval-cache (#69 Slice B) lookups happen before scheduling each future:
-    a cache hit short-circuits to a finalised ``Diagnostic`` in the slot
-    without involving the executor. Cache stores happen in the
-    post-executor pass after resolving each future's result.
+    Eval-cache (#69 Slice B) lookups happen before scheduling each future: a
+    cache hit short-circuits to a finalised ``Diagnostic`` in the slot without
+    involving the executor. Cache stores happen in the post-executor pass after
+    resolving each future's result. Both cache operations key on the rule's
+    dispatched target (``plan.target`` — the per-rule effective set for a scoped
+    rule), not the run-level target.
     """
     # Late import keeps the sequential path's import footprint unchanged.
     from concurrent.futures import Future, ThreadPoolExecutor
@@ -562,16 +817,30 @@ def _validate_concurrent(
     else:
         try_lookup = try_store = None  # type: ignore[assignment]
 
-    # Mixed list of finalised diagnostics (deterministic prechecks + cache
-    # hits) and in-flight futures. Each future slot carries the rule and
-    # resolved_name so cache stores and error reporting work in the post-pass.
-    # rule_artifact_kind / rule_deterministic are included for cache stores.
-    slots: list[Diagnostic | tuple[Future[Diagnostic], Rule, str, TargetKind | None, bool]] = []
+    # Mixed list of finalised diagnostics (deterministic prechecks / scope
+    # short-circuits / cache hits) and in-flight futures, in rule order. The
+    # post-executor pass replaces each future with its resolved diagnostic at
+    # the same index. Each future slot carries the rule and resolved_name (for
+    # error reporting), rule_artifact_kind / rule_deterministic / dispatch_target
+    # (for cache stores), and scope_evidence (appended to the resolved verdict).
+    slots: list[
+        Diagnostic
+        | tuple[
+            Future[Diagnostic],
+            Rule,
+            str,
+            TargetKind | None,
+            bool,
+            str | Path | TargetSpec,
+            Evidence | None,
+        ]
+    ] = []
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         for rule in ruleset.rules:
             resolved_name = _resolve_backend_name(rule, backend)
 
+            # #279 §9.7: target-kind precheck stays run-level and untouched.
             if (
                 artifact_kind is not None
                 and resolved_name == "llm-rubric"
@@ -581,9 +850,20 @@ def _validate_concurrent(
                 slots.append(target_kind_mismatch_diagnostic(rule, artifact_kind))
                 continue
 
+            # #279 — per-rule target scope, resolved inline (cheap set ops over a
+            # memoized expansion) so short-circuits schedule no provider call.
+            plan = _plan_rule_dispatch(rule, target, scope_ctx)
+            if plan.short_circuit is not None:
+                slots.append(plan.short_circuit)
+                continue
+
             check_fn = _registry.get(resolved_name)
             if check_fn is None:
-                slots.append(_registry_miss_diagnostic(rule, resolved_name))
+                slots.append(
+                    _append_scope_evidence(
+                        _registry_miss_diagnostic(rule, resolved_name), plan.scope_evidence
+                    )
+                )
                 continue
 
             rule_artifact_kind = artifact_kind if resolved_name == "llm-rubric" else None
@@ -591,54 +871,78 @@ def _validate_concurrent(
 
             # #69 Slice B — cache lookup before scheduling.  A hit avoids
             # submitting a future entirely; the cached diagnostic is stored
-            # directly in the slot as a finalised Diagnostic.
+            # directly in the slot as a finalised Diagnostic. Keyed on the
+            # dispatched target (plan.target — the per-rule effective set for a
+            # scoped rule); scope evidence is preserved on the hit (#279).
             if eval_cache and resolved_name == "llm-rubric" and try_lookup is not None:
                 cached = try_lookup(
                     rule,
-                    target,
+                    plan.target,
                     rule_artifact_kind,
                     rule_deterministic,
                     reproducibility,
                 )
                 if cached is not None:
-                    slots.append(cached)
+                    slots.append(_append_scope_evidence(cached, plan.scope_evidence))
                     continue
 
             future = executor.submit(
                 _run_rule_check,
                 check_fn,
                 rule,
-                target,
+                plan.target,
                 resolved_name,
                 reproducibility,
                 rule_artifact_kind,
                 deterministic=rule_deterministic,
             )
-            slots.append((future, rule, resolved_name, rule_artifact_kind, rule_deterministic))
+            slots.append(
+                (
+                    future,
+                    rule,
+                    resolved_name,
+                    rule_artifact_kind,
+                    rule_deterministic,
+                    plan.target,
+                    plan.scope_evidence,
+                )
+            )
 
     diagnostics: list[Diagnostic] = []
     for slot in slots:
         if isinstance(slot, Diagnostic):
             diagnostics.append(slot)
             continue
-        future, rule, resolved_name, rule_artifact_kind, rule_deterministic = slot
+        (
+            future,
+            rule,
+            resolved_name,
+            rule_artifact_kind,
+            rule_deterministic,
+            dispatch_target,
+            scope_evidence,
+        ) = slot
         try:
             diag = future.result()
         except Exception as exc:  # noqa: BLE001
             diag = _error_diagnostic(rule, exc, _backend_for(resolved_name))
 
-        # #69 Slice B — cache store after resolving the future.
+        # #69 Slice B — cache store after resolving the future. Keyed on the
+        # dispatched target so a scoped rule caches against its effective set.
         if eval_cache and resolved_name == "llm-rubric" and try_store is not None:
             try_store(
                 rule,
-                target,
+                dispatch_target,
                 rule_artifact_kind,
                 rule_deterministic,
                 reproducibility,
                 diag,
             )
 
-        diagnostics.append(diag)
+        # Append scope evidence even on the error path so a scoped rule's
+        # effective set stays auditable, matching the sequential branch (codex
+        # P2 review on #289).
+        diagnostics.append(_append_scope_evidence(diag, scope_evidence))
 
     return DiagnosticReport(diagnostics=diagnostics)
 
