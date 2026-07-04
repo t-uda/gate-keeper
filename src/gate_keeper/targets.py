@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import glob
 import os
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -379,11 +380,277 @@ def resolve_targets(
     return TargetSpec(paths=accumulator, raw_targets=list(raw_targets), is_multi=is_multi)
 
 
+# ---------------------------------------------------------------------------
+# Per-rule target scope (issue #279 — S3, docs/design/multi-target.md §9)
+# ---------------------------------------------------------------------------
+#
+# A rule may declare ``params.target_scope`` (a list of repo-relative glob
+# strings). The engine computes a per-rule effective set
+#
+#     effective_set = scope_expansion(target_scope) ∩ run_level_candidate_set
+#
+# on normalized repo-relative POSIX paths (§9.2) and dispatches the rule against
+# its own :class:`TargetSpec`. This is engine-side only: backends never learn a
+# scope was applied. See :func:`resolve_rule_scope` for the full contract.
+
+
+def _to_repo_relative(path: Path, repo_root: Path) -> str | None:
+    """Normalize *path* to a repo-relative POSIX string, or ``None`` if outside.
+
+    A candidate path resolving outside *repo_root* can never intersect a
+    repo-relative scope glob, so the caller drops it from the candidate set.
+    """
+    try:
+        return path.resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        return None
+
+
+def _expand_scope_pattern(pattern: str, repo_root: Path) -> frozenset[str]:
+    """Expand one ``target_scope`` glob against *repo_root*.
+
+    Returns the set of repo-relative POSIX paths of the existing, text-readable
+    regular files the pattern selects. Directory matches are walked recursively
+    (mirroring :func:`resolve_targets`). The expansion is **uncapped by design**
+    (§9.6): the ``DEFAULT_FILE_LIMIT`` cap applies to the per-rule *effective
+    set*, not to the repo-wide scope expansion, so a broad scope like
+    ``src/**/*.py`` in a large tree still narrows correctly once intersected
+    with a small candidate set.
+
+    A pattern matching nothing — or only binary / non-existent paths —
+    contributes the empty set; the caller folds that into the "expands to zero
+    files repo-wide → ``scope_invalid``" determination (§9.4).
+    """
+    results: set[str] = set()
+
+    def _add_file(candidate: Path) -> None:
+        if candidate.is_file() and _is_text_readable(candidate):
+            rel = _to_repo_relative(candidate, repo_root)
+            if rel is not None:
+                results.add(rel)
+
+    def _add_dir(directory: Path) -> None:
+        for entry in directory.rglob("*"):
+            _add_file(entry)
+
+    if looks_like_glob(pattern):
+        search = pattern if Path(pattern).is_absolute() else str(repo_root / pattern)
+        for match in glob.glob(search, recursive=True):
+            matched = Path(match)
+            if matched.is_dir():
+                _add_dir(matched)
+            else:
+                _add_file(matched)
+    else:
+        literal = Path(pattern) if Path(pattern).is_absolute() else repo_root / pattern
+        if literal.is_dir():
+            _add_dir(literal)
+        else:
+            _add_file(literal)
+
+    return frozenset(results)
+
+
+def _memoized_scope_expansion(
+    pattern: str,
+    repo_root: Path,
+    memo: MutableMapping[tuple[str, str], frozenset[str]] | None,
+) -> frozenset[str]:
+    """Expand *pattern*, reusing a per-run memo keyed by ``(pattern, repo_root)`` (§9.6)."""
+    if memo is None:
+        return _expand_scope_pattern(pattern, repo_root)
+    key = (pattern, os.fspath(repo_root))
+    cached = memo.get(key)
+    if cached is None:
+        cached = _expand_scope_pattern(pattern, repo_root)
+        memo[key] = cached
+    return cached
+
+
+@dataclass(frozen=True)
+class ScopeResolution:
+    """Outcome of resolving a rule's ``target_scope`` against the candidate set.
+
+    Attributes
+    ----------
+    status:
+        One of ``"dispatch"``, ``"empty"``, ``"invalid"``, or
+        ``"file_limit_exceeded"`` — the engine maps each to a verdict (§9.4/§9.5,
+        §9.8): ``dispatch`` runs the rule against :attr:`spec`; ``empty`` is a
+        ``scope_empty`` PASS; ``invalid`` a ``scope_invalid`` UNAVAILABLE;
+        ``file_limit_exceeded`` a ``scope_file_limit_exceeded`` UNAVAILABLE.
+    spec:
+        The per-rule :class:`TargetSpec` to dispatch against — set only when
+        :attr:`status` is ``"dispatch"``.
+    scope_size / candidate_size / effective_size:
+        Sizes of the repo-wide scope expansion, the run-level candidate set, and
+        their intersection, for auditable evidence.
+    effective_relpaths:
+        Sorted repo-relative POSIX paths of the effective set (evidence).
+    file_limit:
+        The per-rule cap in force for this resolution.
+    detail:
+        Human-readable reason — set only when :attr:`status` is ``"invalid"``.
+    """
+
+    status: str
+    spec: TargetSpec | None
+    scope_size: int
+    candidate_size: int
+    effective_size: int
+    effective_relpaths: list[str]
+    file_limit: int
+    detail: str | None = None
+
+
+def resolve_rule_scope(
+    target_scope: object,
+    candidate_paths: Sequence[Path],
+    repo_root: Path,
+    *,
+    file_limit: int | None = None,
+    memo: MutableMapping[tuple[str, str], frozenset[str]] | None = None,
+) -> ScopeResolution:
+    """Compute a rule's per-rule effective target set (``docs/design/multi-target.md`` §9).
+
+    Parameters
+    ----------
+    target_scope:
+        The raw ``rule.params["target_scope"]`` value. Must be a non-empty list
+        of glob strings; any other shape is a rule misconfiguration and yields a
+        ``"invalid"`` resolution (fail-closed at the parse seam — §9.1).
+    candidate_paths:
+        The run-level candidate file set (``TargetSpec.paths`` — §9.3), the same
+        pool every rule sees today.
+    repo_root:
+        Repository root the scope globs expand against; also the base for the
+        repo-relative normalization that lets scope and candidate meet in one
+        path vocabulary (§9.2).
+    file_limit:
+        Per-rule cap on the effective set. Defaults to :data:`DEFAULT_FILE_LIMIT`
+        (looked up at call time so tests can monkeypatch the constant). Exceeding
+        it yields ``"file_limit_exceeded"`` — a per-rule UNAVAILABLE, never a run
+        abort (§9.5).
+    memo:
+        Optional per-run expansion cache keyed by ``(pattern, repo_root)`` (§9.6).
+
+    Returns
+    -------
+    ScopeResolution
+        A discriminated result the engine maps to a per-rule dispatch or a
+        synthetic diagnostic.
+    """
+    if file_limit is None:
+        file_limit = DEFAULT_FILE_LIMIT
+
+    candidate_size = len(candidate_paths)
+
+    # §9.1 grammar: a non-empty list of glob strings, or it is a misconfiguration.
+    if (
+        not isinstance(target_scope, list)
+        or not target_scope
+        or not all(isinstance(entry, str) for entry in target_scope)
+    ):
+        return ScopeResolution(
+            status="invalid",
+            spec=None,
+            scope_size=0,
+            candidate_size=candidate_size,
+            effective_size=0,
+            effective_relpaths=[],
+            file_limit=file_limit,
+            detail=(
+                "params.target_scope must be a non-empty list of glob strings; "
+                f"got {type(target_scope).__name__}"
+            ),
+        )
+
+    root = repo_root.resolve()
+
+    scope_set: set[str] = set()
+    for pattern in target_scope:
+        scope_set |= _memoized_scope_expansion(pattern, root, memo)
+    scope_size = len(scope_set)
+
+    # §9.4: a scope that matches nothing anywhere in the tree is a
+    # misconfiguration → scope_invalid (fail-closed), distinct from a valid
+    # scope that simply does not intersect this run's candidates.
+    if scope_size == 0:
+        return ScopeResolution(
+            status="invalid",
+            spec=None,
+            scope_size=0,
+            candidate_size=candidate_size,
+            effective_size=0,
+            effective_relpaths=[],
+            file_limit=file_limit,
+            detail="params.target_scope expands to zero files under the repository root",
+        )
+
+    # Normalize candidates to repo-relative POSIX, keeping the original Path so
+    # the per-rule TargetSpec dispatches with the exact path vocabulary the
+    # run-level spec used (byte-compatible with legacy single-target dispatch).
+    candidate_rel: dict[str, Path] = {}
+    for path in candidate_paths:
+        rel = _to_repo_relative(path, root)
+        if rel is not None:
+            candidate_rel.setdefault(rel, path)
+
+    effective_relpaths = sorted(scope_set & candidate_rel.keys())
+    effective_size = len(effective_relpaths)
+
+    # §9.4: valid scope, empty intersection → scope_empty PASS (steady state of
+    # incremental auditing), never a run abort and never a silent pass.
+    if effective_size == 0:
+        return ScopeResolution(
+            status="empty",
+            spec=None,
+            scope_size=scope_size,
+            candidate_size=candidate_size,
+            effective_size=0,
+            effective_relpaths=[],
+            file_limit=file_limit,
+        )
+
+    # §9.5: a per-rule effective set over the cap is a per-rule UNAVAILABLE, not
+    # a run abort — one over-broad rule must not sink the audit of every other.
+    if effective_size > file_limit:
+        return ScopeResolution(
+            status="file_limit_exceeded",
+            spec=None,
+            scope_size=scope_size,
+            candidate_size=candidate_size,
+            effective_size=effective_size,
+            effective_relpaths=effective_relpaths,
+            file_limit=file_limit,
+        )
+
+    effective_paths = sorted(
+        (candidate_rel[rel] for rel in effective_relpaths), key=os.fspath
+    )
+    spec = TargetSpec(
+        paths=effective_paths,
+        raw_targets=list(effective_relpaths),
+        is_multi=len(effective_paths) != 1,
+    )
+    return ScopeResolution(
+        status="dispatch",
+        spec=spec,
+        scope_size=scope_size,
+        candidate_size=candidate_size,
+        effective_size=effective_size,
+        effective_relpaths=effective_relpaths,
+        file_limit=file_limit,
+    )
+
+
 __all__ = [
     "DEFAULT_FILE_LIMIT",
+    "ScopeResolution",
     "TargetExpansionError",
     "TargetSpec",
     "looks_like_glob",
     "resolve_changed_targets",
+    "resolve_rule_scope",
     "resolve_targets",
 ]

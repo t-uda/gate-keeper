@@ -458,13 +458,15 @@ from §4 work end-to-end.
 
 ## 9. Ratified: Per-Rule Target Scope (S3, #279)
 
-> Status: ratified contract — **design-only**. No code lands in this document.
-> `params.target_scope` is **not yet** accepted by `validate` / `validator.py`; a
-> repo-wide search finds only this design text. The forthcoming S3 implementation
-> PR (under umbrella #277, incremental audit trunk) will implement this section
-> against the contract fixed here. This ratification supersedes the exploratory
-> register of §2.1/§2.2 for the per-rule-scope axis only; the content-assembly
-> axis of those sections remains as written.
+> Status: ratified contract — **implemented in S3** (#279, under umbrella #277).
+> `params.target_scope` is accepted by `validate` / `validator.py`:
+> `gate_keeper.targets.resolve_rule_scope` computes the per-rule effective set and
+> the validator dispatch loop applies it (see `docs/rule-ir.md`
+> `params.target_scope` and `docs/cli-reference.md` "Per-rule target scope"). This
+> section remains the binding contract; the implementation follows it. This
+> ratification supersedes the exploratory register of §2.1/§2.2 for the
+> per-rule-scope axis only; the content-assembly axis of those sections remains as
+> written.
 
 Once implemented, S3 will make rulesets self-contained for incremental auditing:
 a rule declares the file domain it governs, and the engine runs each rule only

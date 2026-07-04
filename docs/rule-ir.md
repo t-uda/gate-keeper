@@ -153,6 +153,38 @@ artifact.
 | `external_check` (`tool=command`) | `timeout_seconds` | `30` | Subprocess timeout in seconds. Must satisfy `0 < timeout_seconds <= 300`. Timeouts produce `error` / `cli_timeout` diagnostics. |
 | `semantic_rubric` | `targets` | _(absent)_ | Optional list of artifact specs for multi-artifact semantic rules (#182, slice 1). Each entry is a mapping `{id, kind, path}`. `id` is a stable rule-author-supplied string used for per-quote attribution in evidence. `kind` is **required** and must be a valid `TargetKind` value. `path` is an optional file path (absolute or relative); when absent or unreadable the prompt records a human-readable placeholder **and** the substring-grounding check excludes that artifact, making it effectively un-quotable — the fabrication validator will reject any quote drawn from a placeholder. Path traversal (`..` components) is rejected at parse time. Maximum 5 entries; IDs must be unique. Absent / empty list preserves the legacy single-target rendering byte-for-byte. The `llm-rubric` backend consumes this key to render the `## Target artifacts (multi)` block and to surface a parallel `supporting_evidence_quote_target_ids` list on the success evidence dict so each quote can be attributed back to a specific artifact. See [`docs/llm-rubric.md`](llm-rubric.md). |
 
+## `params.target_scope` — per-rule target scope (engine-level, all kinds)
+
+`params.target_scope` is an **engine-level** (not per-kind) key: a list of
+repo-relative glob strings declaring which candidate files the rule runs against
+(#279, S3 of umbrella #277). It is a distinct key from `params.targets` above —
+`targets` assembles several artifacts into one `llm-rubric` prompt (a backend
+concern), while `target_scope` narrows *which* files any rule is dispatched
+against (an engine concern). A rule may carry both.
+
+When present, the CLI / validator computes a per-rule effective set
+
+```
+effective_set = scope_expansion(target_scope) ∩ run-level candidate set
+```
+
+on normalized repo-relative POSIX paths, where the run-level candidate set is the
+resolved `--target` / `--target-changed` pool, and dispatches the rule against
+its own `TargetSpec`. Backends are unchanged and never learn a scope was applied.
+
+| Property | Behaviour |
+| -------- | --------- |
+| Absent | Rule dispatches against the run-level target byte-for-byte as before (no effective-set computation, no new evidence). |
+| Non-empty effective set | Rule runs against the intersection; a `scope_effective_set` evidence record (scope / candidate / effective sizes + effective paths) rides on the rule's normal verdict. A single-file effective set dispatches as a single target; a multi-file set aggregates on the `filesystem` backend and stays `multi_target_unsupported` on `llm-rubric` until S5 (#281). |
+| Empty effective set (valid scope, no intersection) | `PASS` with `scope_empty` evidence — the steady state of incremental auditing; never a run abort, never a silent pass. |
+| Malformed / empty-list / non-list scope, or a scope that expands to zero files repo-wide | `UNAVAILABLE` with `scope_invalid` evidence (fail-closed). |
+| Per-rule effective set exceeds `DEFAULT_FILE_LIMIT` (200) | `UNAVAILABLE` with `scope_file_limit_exceeded` evidence for that rule only — one over-broad rule never sinks the rest of the run. |
+
+Glob semantics match the existing target machinery: `**` spans path segments,
+`*` matches within a segment, `?` one non-`/` char. Scopes are author-supplied;
+they are never auto-populated. The full contract is
+[`docs/design/multi-target.md`](design/multi-target.md) §9.
+
 ## `markdown_evidence_block` — structured policy evidence
 
 Validates a fenced code block embedded in a Markdown target. Useful for
