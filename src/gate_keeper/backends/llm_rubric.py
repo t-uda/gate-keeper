@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import re
 import time
@@ -4453,6 +4454,382 @@ _STRATEGIES: dict[str, Strategy] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Narrowed affected-context assembly (#281, S5)
+#
+# When a multi-file :class:`TargetSpec` reaches this backend, the engine has
+# already narrowed it to the affected context — (S1 changed set) ∩ (S3 rule
+# scope) — so the whole reference closure is never assembled here (see
+# ``docs/design/multi-target.md`` §2.2–2.3 and §9.10/§9.12). This module turns
+# that file set into a single prompt with per-file headers, under a token
+# budget, with deterministic lexicographic truncation and auditable evidence.
+#
+# The literal ``params.targets`` mechanism (#182, ≤5 entries) is a *different*
+# axis and is untouched: a rule that declares ``params.targets`` keeps the
+# unchanged ``multi_target_unsupported`` contract when handed a multi-file
+# ``TargetSpec`` (see :func:`check`).
+# ---------------------------------------------------------------------------
+
+#: Default per-rule token budget for assembled affected context (§2.3).
+#: 32 000 tokens ≈ 128 KB of UTF-8 text; conservative enough to fit every
+#: supported model while keeping latency and cost predictable.
+_DEFAULT_TOKEN_BUDGET = 32_000
+
+#: Characters-per-token divisor used by the budget estimator (§2.3). The raw
+#: ``len(text) / 4`` approximation underestimates dense code / Unicode, so a
+#: 0.8× safety factor (``4 × 0.8 = 3.2``) biases the estimate high and makes
+#: truncation trigger before the real provider limit is reached.
+_TOKEN_BUDGET_CHARS_PER_TOKEN = 3.2
+
+#: Dotenv key overriding the compiled-in default budget (llm-rubric only, read
+#: via :func:`_load_env_file`, never ``os.environ`` — §2.3 / auth-matrix).
+_TOKEN_BUDGET_ENV_KEY = "GATE_KEEPER_TOKEN_BUDGET"
+
+#: Synthetic ``targets`` id for the assembled affected-context cache entry
+#: (§3.1). Distinguishes the dynamic-assembly key component from the literal
+#: ``params.targets`` per-spec entries.
+_AFFECTED_CONTEXT_CACHE_ID = "__affected_context__"
+
+
+def _estimate_tokens(char_count: int) -> int:
+    """Estimate the token count of *char_count* characters (§2.3).
+
+    ``ceil(char_count / 3.2)`` — the 0.8× safety factor over the ``/4``
+    approximation biases high so truncation fires before the real limit.
+    """
+    return math.ceil(char_count / _TOKEN_BUDGET_CHARS_PER_TOKEN)
+
+
+def _resolve_token_budget(rule: Rule, env: dict[str, str]) -> int:
+    """Resolve the effective token budget for *rule* (§2.3 precedence).
+
+    Highest to lowest: ``params.token_budget`` (per-rule) → dotenv
+    ``GATE_KEEPER_TOKEN_BUDGET`` → compiled-in :data:`_DEFAULT_TOKEN_BUDGET`.
+    A malformed or non-positive value at any tier is ignored (falls through to
+    the next tier) rather than raising — a budget is a cost knob, never a
+    correctness gate, so a typo must not abort the run.
+    """
+    raw_param = rule.params.get("token_budget")
+    if isinstance(raw_param, bool):
+        raw_param = None  # bool is an int subclass; reject True/False explicitly.
+    if isinstance(raw_param, int) and raw_param > 0:
+        return raw_param
+
+    raw_env = env.get(_TOKEN_BUDGET_ENV_KEY, "").strip()
+    if raw_env.isdigit() and int(raw_env) > 0:
+        return int(raw_env)
+
+    return _DEFAULT_TOKEN_BUDGET
+
+
+def _affected_context_label(path: Path) -> str:
+    """Return a stable, preferably-relative label for *path* (per-file header).
+
+    Prefers a cwd-relative POSIX label so the assembled prompt is reproducible
+    within a working directory; falls back to the resolved absolute POSIX path
+    when *path* is outside cwd. Determinism only needs to hold within one
+    process (both the assembler and the cache-key builder run in the same
+    process against the same cwd), which this guarantees.
+    """
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except (ValueError, OSError):
+        try:
+            return path.resolve().as_posix()
+        except OSError:
+            return path.as_posix()
+
+
+def _render_affected_block(label: str, text: str) -> str:
+    """Render one per-file block: a ``--- <label> ---`` header + file body (§2.2)."""
+    return f"--- {label} ---\n{text}"
+
+
+#: Separator between assembled per-file blocks. A blank line keeps adjacent
+#: file bodies from running together (and from creating accidental
+#: cross-file substring matches during quote grounding).
+_AFFECTED_BLOCK_SEPARATOR = "\n\n"
+
+
+@dataclass(frozen=True)
+class _AffectedFile:
+    """One readable file in the affected context, with its rendered label."""
+
+    label: str
+    text: str
+
+
+@dataclass(frozen=True)
+class _AssemblyResult:
+    """Outcome of assembling a multi-file affected context (#281).
+
+    Attributes
+    ----------
+    included:
+        Files that survived truncation, in lexicographic label order — the
+        set actually rendered into the prompt.
+    omitted_files:
+        Readable files dropped by budget truncation, in lexicographic order,
+        with their content retained. They are absent from the prompt but
+        appear (by label) in the ``truncation_warning`` / ``affected_context``
+        evidence of the produced diagnostic, so the eval-cache key must hash
+        their identity *and* content — otherwise a changed omitted file would
+        hit a stale entry and serve stale evidence (codex P2, #290).
+    omitted:
+        Labels dropped by budget truncation, in lexicographic order (derived
+        from :attr:`omitted_files`; kept as a separate field for the evidence
+        record shape).
+    unreadable:
+        Labels of candidate files that could not be read (excluded from the
+        assembled corpus so the grounding validator treats them as
+        un-quotable — fail-closed).
+    assembled_text:
+        The concatenated per-file-header body sent to the model (empty when
+        no file survived).
+    tokens_estimated:
+        Estimated token count of :attr:`assembled_text` (the narrowed set).
+    tokens_full:
+        Estimated token count of every readable candidate rendered together
+        (the pre-truncation whole set) — the whole-vs-narrowed signal (§2.3).
+    candidate_count:
+        Number of candidate paths the engine handed this backend.
+    token_budget:
+        The effective budget in force for this assembly.
+    """
+
+    included: list[_AffectedFile]
+    omitted_files: list[_AffectedFile]
+    omitted: list[str]
+    unreadable: list[str]
+    assembled_text: str
+    tokens_estimated: int
+    tokens_full: int
+    candidate_count: int
+    token_budget: int
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.omitted)
+
+
+def _read_affected_files(spec: TargetSpec) -> tuple[list[_AffectedFile], list[str]]:
+    """Read *spec*'s paths into ``(readable_files, unreadable_labels)``.
+
+    Files are returned in lexicographic label order (deterministic truncation
+    priority — §2.2). A path that cannot be read as UTF-8 text is excluded and
+    its label recorded so evidence names it (fail-closed: unreadable artifacts
+    are never assembled and never quotable).
+    """
+    readable: list[_AffectedFile] = []
+    unreadable: list[str] = []
+    for path in spec.paths:
+        label = _affected_context_label(path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            unreadable.append(label)
+            continue
+        readable.append(_AffectedFile(label=label, text=text))
+    readable.sort(key=lambda af: af.label)
+    unreadable.sort()
+    return readable, unreadable
+
+
+def _assemble_affected_context(
+    spec: TargetSpec,
+    rule: Rule,
+    env: dict[str, str] | None = None,
+) -> _AssemblyResult:
+    """Assemble *spec* into a single budgeted, per-file-headered prompt body (#281).
+
+    Deterministic and side-effect-free (beyond reading the target files), so
+    :func:`check` and the eval-cache key builder can call it independently and
+    agree on the surviving set (cache correctness — ``docs/design/eval-cache.md``
+    §9). Truncation keeps a lexicographic *prefix*: files are added in label
+    order until the next would exceed the budget, at which point it and every
+    later file are omitted (no heuristic reordering — §2.2 non-goal).
+    """
+    if env is None:
+        env = _load_env_file()
+    budget = _resolve_token_budget(rule, env)
+
+    readable, unreadable = _read_affected_files(spec)
+
+    included: list[_AffectedFile] = []
+    omitted_files: list[_AffectedFile] = []
+    running_chars = 0
+    truncating = False
+    for af in readable:
+        if truncating:
+            omitted_files.append(af)
+            continue
+        block = _render_affected_block(af.label, af.text)
+        added = len(block) + (len(_AFFECTED_BLOCK_SEPARATOR) if included else 0)
+        if _estimate_tokens(running_chars + added) > budget:
+            # This file does not fit: omit it and every lexicographically later
+            # file (deterministic prefix truncation). Applies even to the first
+            # file — an over-budget lead file yields zero survivors (§ criterion 3).
+            omitted_files.append(af)
+            truncating = True
+            continue
+        included.append(af)
+        running_chars += added
+
+    assembled_text = _AFFECTED_BLOCK_SEPARATOR.join(
+        _render_affected_block(af.label, af.text) for af in included
+    )
+    full_text = _AFFECTED_BLOCK_SEPARATOR.join(_render_affected_block(af.label, af.text) for af in readable)
+    return _AssemblyResult(
+        included=included,
+        omitted_files=omitted_files,
+        omitted=[af.label for af in omitted_files],
+        unreadable=unreadable,
+        assembled_text=assembled_text,
+        tokens_estimated=_estimate_tokens(len(assembled_text)),
+        tokens_full=_estimate_tokens(len(full_text)),
+        candidate_count=len(spec.paths),
+        token_budget=budget,
+    )
+
+
+def _affected_context_evidence(assembly: _AssemblyResult) -> Evidence:
+    """Auditable ``affected_context`` evidence: assembled set + token estimate (§ criterion 1)."""
+    return Evidence(
+        kind="affected_context",
+        data={
+            "included_files": [af.label for af in assembly.included],
+            "omitted_files": list(assembly.omitted),
+            "unreadable_files": list(assembly.unreadable),
+            "included_count": len(assembly.included),
+            "candidate_count": assembly.candidate_count,
+            "tokens_estimated": assembly.tokens_estimated,
+            "tokens_full": assembly.tokens_full,
+            "token_budget": assembly.token_budget,
+            "truncated": assembly.truncated,
+        },
+    )
+
+
+def _truncation_warning_evidence(assembly: _AssemblyResult) -> Evidence:
+    """``truncation_warning`` evidence naming the omitted files (§2.3).
+
+    Emitted only when budget truncation dropped at least one file; it is the
+    sole signal that the assembled context is a proper subset of the affected
+    set. No file is ever silently discarded.
+    """
+    return Evidence(
+        kind="truncation_warning",
+        data={
+            "omitted_files": list(assembly.omitted),
+            "omitted_count": len(assembly.omitted),
+            "included_count": len(assembly.included),
+            "tokens_estimated": assembly.tokens_estimated,
+            "tokens_full": assembly.tokens_full,
+            "token_budget": assembly.token_budget,
+        },
+    )
+
+
+def _affected_context_empty_diagnostic(rule: Rule, assembly: _AssemblyResult) -> Diagnostic:
+    """Fail-closed ``UNAVAILABLE`` when nothing survives assembly (§ criterion 3).
+
+    Two causes converge here: an empty candidate set, and a budget so small
+    that even the lexicographically-first file does not fit. Either way the
+    model would receive no grounded content, so we decline rather than send an
+    empty or arbitrarily-truncated prompt.
+    """
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=Status.UNAVAILABLE,
+        severity=rule.severity,
+        message=(
+            "no affected-context files could be assembled within the token "
+            f"budget ({assembly.token_budget} tokens); "
+            f"{assembly.candidate_count} candidate file(s), "
+            f"{len(assembly.omitted)} over budget, "
+            f"{len(assembly.unreadable)} unreadable"
+        ),
+        evidence=[
+            Evidence(
+                kind="affected_context_empty",
+                data={
+                    "candidate_count": assembly.candidate_count,
+                    "omitted_files": list(assembly.omitted),
+                    "unreadable_files": list(assembly.unreadable),
+                    "tokens_full": assembly.tokens_full,
+                    "token_budget": assembly.token_budget,
+                },
+            )
+        ],
+        remediation=(
+            "Raise the token budget (params.token_budget or "
+            f"{_TOKEN_BUDGET_ENV_KEY}) so at least one affected file fits, or "
+            "narrow the rule's target_scope / changed set so the lead file is "
+            "within budget."
+        ),
+    )
+
+
+def _run_affected_context(
+    rule: Rule,
+    spec: TargetSpec,
+    *,
+    artifact_kind: TargetKind | None,
+    deterministic: bool,
+) -> Diagnostic:
+    """Assemble *spec* and evaluate the rule against the narrowed context (#281).
+
+    The assembled body is handed to the normal strategy machinery as an inline
+    target, so every downstream mechanism — strategy dispatch, reproducibility,
+    quote grounding, cost/telemetry, and the eval cache — operates unchanged on
+    a single evaluation. Assembly evidence (and a ``truncation_warning`` when
+    truncation occurred) is appended to the strategy's diagnostic.
+
+    Mixed per-file ``target_kind`` (#281 criterion 5 / §9.7): the assembled set
+    may span artifact kinds. This path does **not** inspect or gate per-file
+    kinds — the run-level #178 precheck already governs the rule's declared
+    ``target_kind`` before dispatch, and heuristic per-file kind filtering is a
+    non-goal. Every in-scope file is assembled; the rule's ``target_kind`` (if
+    any) shapes the prompt exactly as on the single-target path. See
+    ``docs/design/multi-target.md`` §9.12.
+    """
+    assembly = _assemble_affected_context(spec, rule)
+    if not assembly.included:
+        return _affected_context_empty_diagnostic(rule, assembly)
+
+    request = JudgmentRequest(
+        rule=rule,
+        target=assembly.assembled_text,
+        artifact_kind=artifact_kind,
+        deterministic=deterministic,
+    )
+    strategy_id = _resolve_strategy_id(rule)
+    strategy = _STRATEGIES.get(strategy_id)
+    if strategy is not None:
+        diag = strategy(request)
+    elif strategy_id in KNOWN_STRATEGIES:
+        diag = _run_not_implemented_strategy(request, strategy_id)
+    else:
+        diag = _strategy_unavailable(
+            rule,
+            _build_rubric_input(rule, assembly.assembled_text),
+            strategy_id,
+            "unknown_strategy",
+            (
+                f"Strategy {strategy_id!r} is not a recognised id. "
+                f"Known ids: {sorted(KNOWN_STRATEGIES)}; implemented in this build: "
+                f"{sorted(_STRATEGIES)}."
+            ),
+        )
+
+    extra: list[Evidence] = [_affected_context_evidence(assembly)]
+    if assembly.truncated:
+        extra.append(_truncation_warning_evidence(assembly))
+    return dataclasses.replace(diag, evidence=[*diag.evidence, *extra])
+
+
 def check(
     rule: Rule,
     target: str | Path | TargetSpec,
@@ -4557,6 +4934,19 @@ def check(
     """
     if isinstance(target, TargetSpec):
         if target.is_multi:
+            # #281 (S5): a multi-file TargetSpec is the narrowed affected
+            # context ((S1 changed) ∩ (S3 scope)); assemble it dynamically
+            # under a token budget instead of declining. The literal
+            # ``params.targets`` mechanism (#182) is a different axis and keeps
+            # the unchanged ``multi_target_unsupported`` contract — a rule that
+            # declares ``params.targets`` is never dynamically assembled here.
+            if not _parse_multi_targets(rule):
+                return _run_affected_context(
+                    rule,
+                    target,
+                    artifact_kind=artifact_kind,
+                    deterministic=deterministic,
+                )
             return Diagnostic(
                 rule_id=rule.id,
                 source=rule.source,
@@ -4564,8 +4954,9 @@ def check(
                 status=Status.UNSUPPORTED,
                 severity=rule.severity,
                 message=(
-                    "llm-rubric backend does not support multi-target evaluation; "
-                    "content assembly is deferred to a follow-up."
+                    "llm-rubric backend does not support multi-target evaluation "
+                    "for rules that declare params.targets; supply a single "
+                    "run-level target or drop params.targets."
                 ),
                 evidence=[
                     Evidence(

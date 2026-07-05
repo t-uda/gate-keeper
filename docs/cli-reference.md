@@ -401,11 +401,14 @@ directory or glob expands to more than the cap, the CLI exits with
 `EXIT_USAGE` (`2`) and prints `error: --target: target expansion produced N
 files; exceeds limit of 200.` Narrow the target or split the run.
 
-**Non-filesystem backends.** GitHub, LLM-rubric, and external backends do
-*not* support multi-target invocation in this slice. They fail closed with
-`unsupported` and a `multi_target_unsupported` evidence record listing the
-raw targets and the resolved file count, rather than silently using only one
-of the resolved paths.
+**Non-filesystem backends.** GitHub and external backends do *not* support
+multi-target invocation: they fail closed with `unsupported` and a
+`multi_target_unsupported` evidence record listing the raw targets and the
+resolved file count, rather than silently using only one of the resolved paths.
+LLM-rubric assembles a multi-file set into one narrowed prompt under a token
+budget (#281, S5 — see [Narrowed affected-context assembly](#narrowed-affected-context-assembly-281)
+below); the sole exception is a rule that declares the literal `params.targets`
+list, which keeps the `multi_target_unsupported` decline.
 
 See [docs/design/multi-target.md](design/multi-target.md) for the design
 background; this section documents the first implemented slice.
@@ -529,16 +532,16 @@ Gate-keeper resolves them to absolute paths before intersecting with
 `--target` globs, so invoking `validate` from a subdirectory produces the
 same result as running it from the repository root.
 
-**LLM-rubric + multi-file changed set (R5):** when a changed set contains a
-file targeted by an `llm-rubric` rule, the backend returns
-`multi_target_unsupported` evidence (the existing behaviour for any
-multi-target LLM-rubric invocation). This is a known limit; LLM-rubric content
-assembly for large changed sets is deferred to S5. Per-rule narrowing of the
-changed set landed as S3 — see [Per-rule target scope](#per-rule-target-scope-paramstarget_scope) below.
+**LLM-rubric + multi-file changed set (R5):** a changed set (narrowed per rule
+by S3 scope) that resolves to several files for an `llm-rubric` rule is assembled
+into one narrowed affected-context prompt under a token budget (#281, S5 — see
+[Narrowed affected-context assembly](#narrowed-affected-context-assembly-281)
+below). Per-rule narrowing of the changed set landed as S3 — see
+[Per-rule target scope](#per-rule-target-scope-paramstarget_scope) below.
 
-**Non-goals:** `--target-changed` selects which files to evaluate; it does
-not change *how* each rule evaluates them. LLM-rubric content assembly for
-large per-rule effective sets (S5) is a separate issue.
+**Non-goals:** `--target-changed` selects which files to evaluate; it does not
+change *how* each rule evaluates them, and it never assembles the whole reference
+closure — only the narrowed affected context reaches the model.
 
 ### Per-rule target scope (`params.target_scope`)
 
@@ -581,9 +584,36 @@ and [docs/design/multi-target.md](design/multi-target.md) §9):
   unaffected.
 - **Rules without `target_scope`** are dispatched byte-for-byte as before.
 
-An `llm-rubric` rule whose effective set is multi-file stays
-`multi_target_unsupported` until S5 (#281); a single-file effective set evaluates
-normally.
+An `llm-rubric` rule whose effective set is multi-file is assembled into one
+narrowed affected-context prompt (#281, S5 — see below); a single-file effective
+set evaluates normally.
+
+### Narrowed affected-context assembly (#281)
+
+When a multi-file effective set (S3 scope ∩ the `--target` / `--target-changed`
+candidate pool) is routed to an `llm-rubric` rule, the backend assembles the
+files into a single prompt with `--- <path> ---` per-file headers and evaluates
+them in **one** provider call per strategy iteration. The affected context is
+always the narrowed set — never the whole reference closure.
+
+- **Token budget.** Assembly is bounded by a per-rule token budget: default
+  `32000`, overridable via `params.token_budget` in the rule IR or the dotenv key
+  `GATE_KEEPER_TOKEN_BUDGET`. Token count is estimated from character length
+  (`ceil(len / 3.2)`), biased high so truncation fires before the real limit.
+- **Deterministic truncation.** An over-budget set is truncated to a
+  lexicographic prefix of its files; every omitted file is named in a
+  `truncation_warning` evidence record. No heuristic ranking is applied.
+- **Assembled-set evidence.** An `affected_context` record lists the included
+  files, any omitted / unreadable files, and the token estimate (narrowed and
+  whole-set) so every dynamic verdict is auditable.
+- **Fail-closed empties.** If no file fits the budget (or the set is empty), the
+  rule is `UNAVAILABLE` with `affected_context_empty` evidence rather than sending
+  an empty prompt.
+- **Exceptions.** Rules that declare the literal `params.targets` list keep the
+  `multi_target_unsupported` decline (that ≤5-entry mechanism is a separate axis);
+  `github` / `external` backends are unaffected.
+
+Full contract: [docs/design/multi-target.md](design/multi-target.md) §9.12.
 
 ### Bounded rule-level concurrency (#249)
 

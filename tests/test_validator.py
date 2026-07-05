@@ -263,7 +263,10 @@ class TestTargetSpecArgument:
         assert diag.status is Status.UNSUPPORTED
         assert any(e.kind == "multi_target_unsupported" for e in diag.evidence)
 
-    def test_targetspec_forwarded_to_llm_rubric_backend_unsupported(self, tmp_path):
+    def test_targetspec_llm_rubric_params_targets_still_unsupported(self, tmp_path):
+        """#281: the literal params.targets mechanism keeps the multi_target_unsupported
+        decline even after S5 dynamic assembly lands — the two axes never mix."""
+        from gate_keeper.models import Confidence, Rule, SourceLocation
         from gate_keeper.targets import TargetSpec
 
         spec = TargetSpec(
@@ -271,11 +274,44 @@ class TestTargetSpecArgument:
             raw_targets=[str(tmp_path / "a.txt"), str(tmp_path / "b.txt")],
             is_multi=True,
         )
-        rule = _rule(kind=RuleKind.SEMANTIC_RUBRIC, backend_hint=Backend.LLM_RUBRIC)
+        rule = Rule(
+            id="r-params-targets",
+            title="Test rule",
+            source=SourceLocation(path="test.md", line=1),
+            text="test rule text",
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.ERROR,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.HIGH,
+            params={"targets": [{"id": "t1", "kind": "code_change", "path": "a.py"}]},
+        )
         report = validate(_make_ruleset(rule), spec, backend="llm-rubric")
         diag = report.diagnostics[0]
         assert diag.status is Status.UNSUPPORTED
         assert any(e.kind == "multi_target_unsupported" for e in diag.evidence)
+
+    def test_targetspec_llm_rubric_no_params_targets_assembles(self, tmp_path):
+        """#281: a multi-file TargetSpec with no params.targets is no longer
+        multi_target_unsupported — it enters the dynamic affected-context path."""
+        from gate_keeper.targets import TargetSpec
+
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("alpha body\n", encoding="utf-8")
+        b.write_text("beta body\n", encoding="utf-8")
+        spec = TargetSpec(
+            paths=sorted([a, b], key=str),
+            raw_targets=[str(a), str(b)],
+            is_multi=True,
+        )
+        rule = _rule(kind=RuleKind.SEMANTIC_RUBRIC, backend_hint=Backend.LLM_RUBRIC)
+        report = validate(_make_ruleset(rule), spec, backend="llm-rubric")
+        diag = report.diagnostics[0]
+        # No provider configured under the hermetic conftest → UNAVAILABLE, but
+        # crucially NOT the multi_target_unsupported decline, and the assembled
+        # set is recorded for auditability.
+        assert not any(e.kind == "multi_target_unsupported" for e in diag.evidence)
+        assert any(e.kind == "affected_context" for e in diag.evidence)
 
 
 # ---------------------------------------------------------------------------

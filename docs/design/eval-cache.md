@@ -419,9 +419,22 @@ no path fails a rule because of a cache problem.
   honest cold reproducibility measurement; it memoizes one (§2.1).
 - **The S5 assembled-content hash (#281).** When S5 assembles a narrowed
   multi-file context, that assembled content becomes the `targets` content input
-  to this same key schema. Slice B does not implement S5; the key schema is
-  designed to accept it without change (§3.1 already hashes resolved artifact
-  content in order).
+  to this same key schema. **Implemented in #281:** a multi-file `TargetSpec` with
+  no literal `params.targets` produces one synthetic `targets` entry
+  (`id: "__affected_context__"`) whose `content_sha256` hashes the surviving
+  assembled body and whose `path` lists the surviving per-file labels in assembly
+  order. The cache-key builder re-runs the same deterministic assembler
+  `llm_rubric.check()` uses, so budget-driven truncation is reflected in the key
+  (a set truncated differently misses even when its underlying scope is
+  unchanged). The entry additionally carries the truncation-**omitted** files
+  (`{path, content_sha256}` each), the **unreadable** labels, and the effective
+  `token_budget`: those never enter the assembled body but do surface in the
+  cached diagnostic's `affected_context` / `truncation_warning` evidence, so
+  keying them keeps a changed omitted file (or a budget change that leaves the
+  survivors unchanged) from serving stale evidence on a hit. This slotted into the
+  existing schema without a `cache_schema_version` bump — the `targets` list
+  already carried per-entry `{id, path, content_sha256}` and the preimage hashes
+  the whole entry.
 
 ---
 
