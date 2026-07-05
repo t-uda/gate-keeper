@@ -484,18 +484,19 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
         else:
             # UNAVAILABLE / UNSUPPORTED / ERROR — fail-closed, report immediately.
             #
-            # #169 special-case: when the rule carries ``target_kind`` and
-            # the model returns an ``unsupported`` verdict (mapped to
-            # ``Status.UNSUPPORTED`` with ``target_kind_mismatch`` evidence),
-            # that is an expected outcome for entries authored with
-            # ``expected_judgment == "unsupported"``. Treat such an entry
-            # as PASS and record the model-side primary_reason; we still
-            # short-circuit aggregation because reproducibility scoring
-            # for a third verdict is not modeled.
-            tk_mismatch_evidence: dict | None = None
+            # #169 / #291 special-case: when the model declines with an
+            # ``unsupported`` verdict — either target-kind-mismatch (#169,
+            # ``target_kind_mismatch`` evidence) or a cross-artifact-predicate
+            # decline (#291, ``cross_artifact_predicate`` evidence), both mapped
+            # to ``Status.UNSUPPORTED`` — that is an expected outcome for entries
+            # authored with ``expected_judgment == "unsupported"``. Treat such an
+            # entry as PASS and record the model-side primary_reason; we still
+            # short-circuit aggregation because reproducibility scoring for a
+            # third verdict is not modeled.
+            decline_evidence: dict | None = None
             for ev in diag.evidence:
-                if ev.kind == "target_kind_mismatch":
-                    tk_mismatch_evidence = ev.data
+                if ev.kind in ("target_kind_mismatch", "cross_artifact_predicate"):
+                    decline_evidence = ev.data
                 if ev.kind == "provider_error":
                     failure_mode = str(ev.data.get("failure_mode", "provider_error"))
                     break
@@ -503,7 +504,7 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
                     failure_mode = "provider_unconfigured"
                     break
 
-            if tk_mismatch_evidence is not None and entry.expected_judgment == "unsupported":
+            if decline_evidence is not None and entry.expected_judgment == "unsupported":
                 return PerRuleResult(
                     id=entry.id,
                     category=entry.category,
@@ -512,7 +513,7 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
                     actual="unsupported",
                     status="PASS",
                     reproducibility=1.0,
-                    primary_reason=tk_mismatch_evidence.get("primary_reason") or diag.message,
+                    primary_reason=decline_evidence.get("primary_reason") or diag.message,
                     failure_mode=None,
                     tokens_in=tokens_in_total,
                     tokens_out=tokens_out_total,

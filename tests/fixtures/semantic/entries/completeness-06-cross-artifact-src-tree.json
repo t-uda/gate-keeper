@@ -1,0 +1,13 @@
+{
+  "rule_text": "The scaffold-status table classifies every module under src/pkg/ (excluding __init__.py).",
+  "rule_target_kind": "documentation",
+  "target": {
+    "kind": "path",
+    "value": "scaffold_status_table.md"
+  },
+  "expected_judgment": "unsupported",
+  "expected_rationale_keywords": ["src", "module", "not"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Issue #291 — the predicate ranges over the src/pkg/ tree, which is NOT part of the rendered documentation target. The rubric cannot ground a completeness verdict from the doc alone; it must decline with unsupported_reason=cross_artifact_predicate rather than fabricating a pass/fail. Remedy for the rule author is params.target_scope / multi-target (docs/design/multi-target.md §9)."
+}
