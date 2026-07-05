@@ -1310,8 +1310,12 @@ class TestMultiTarget:
         # routed through TargetSpec.
         assert "multi_target_unsupported" not in ev_kinds
 
-    def test_repeated_target_with_llm_rubric_backend_unsupported(self, tmp_path, capsys):
-        # llm-rubric backend rejects multi-target in this slice.
+    def test_repeated_target_with_llm_rubric_backend_assembles(self, tmp_path, capsys):
+        # #281 (S5): the llm-rubric backend now assembles a multi-file target into
+        # one narrowed affected-context prompt instead of declining. With no
+        # provider configured (hermetic default) the verdict is UNAVAILABLE, but
+        # the multi_target_unsupported decline is gone and the assembled set is
+        # recorded in affected_context evidence.
         rules = self._write_rules(tmp_path)
         a = tmp_path / "a.txt"
         a.write_text("uv\n")
@@ -1331,12 +1335,13 @@ class TestMultiTarget:
                 "json",
             ]
         )
-        assert rc == EXIT_FAIL
+        assert rc == EXIT_FAIL  # UNAVAILABLE is non-pass
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         diag = data["diagnostics"][0]
-        assert diag["status"] == "unsupported"
-        assert any(e["kind"] == "multi_target_unsupported" for e in diag["evidence"])
+        ev_kinds = {e["kind"] for e in diag["evidence"]}
+        assert "multi_target_unsupported" not in ev_kinds
+        assert "affected_context" in ev_kinds
 
 
 # ---------------------------------------------------------------------------

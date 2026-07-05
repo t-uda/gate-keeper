@@ -116,9 +116,10 @@ on a rule that needs multi-file context will produce a single-file result with
 > (explicit `--target` and/or the shipped S1 `--target-changed` set) — is
 > ratified in §9, including empty-set semantics (§9.4), the per-rule file cap
 > (§9.5), and the shared-expansion memo (§9.6). The LLM-rubric *dynamic content
-> assembly* half of this section (below) stays S5 (#281) territory: an oversized
-> per-rule effective set routed to `llm-rubric` remains `multi_target_unsupported`
-> after S3.
+> assembly* half of this section (below) is **implemented in S5 (#281)**: a
+> multi-file per-rule effective set routed to `llm-rubric` is assembled into one
+> narrowed prompt under a token budget (§9.12), no longer
+> `multi_target_unsupported`.
 
 **Recommendation: user-controlled glob(s) expressed in `params.targets`, with
 a strict limit on files sent to LLM contexts; heuristic subset is a fallback
@@ -626,10 +627,10 @@ call. **S3 leaves this precheck exactly where it is — run-level, untouched.**
 Per-rule effective sets can mix file kinds (a rule scoped across `.py` and `.md`),
 but S3 does not inspect per-file kinds and does not move the precheck per-file.
 Mixed-kind effective-set semantics — what `target_kind` means when one rule spans
-several artifact kinds — are explicitly **deferred to S5 (#281)**, which owns the
-llm-rubric dynamic-assembly path where per-file kind actually matters. Recording
-this here satisfies #279 R1: S3 changes neither the precheck's position nor its
-run-level semantics.
+several artifact kinds — were **deferred to S5 (#281)** and are now decided in
+§9.12: the dynamic-assembly path does not gate per-file kinds; the run-level
+precheck stays exactly here. Recording this satisfies #279 R1: S3 changes neither
+the precheck's position nor its run-level semantics.
 
 ### 9.8 Evidence vocabulary (S3 additions)
 
@@ -654,11 +655,12 @@ run-level semantics.
 
 ### 9.10 Deferred to S5 (#281) and beyond
 
-- **LLM-rubric dynamic content assembly for oversized effective sets.** A
-  multi-file effective set routed to `llm-rubric` stays `multi_target_unsupported`
-  after S3 (same as #278 R5). S5 assembles the narrowed affected context; only
-  then does a scoped multi-file llm-rubric rule evaluate.
-- **Mixed-kind effective-set semantics** (§9.7) — S5.
+- **LLM-rubric dynamic content assembly for multi-file effective sets** —
+  **implemented in S5 (#281); see §9.12.** A multi-file effective set routed to
+  `llm-rubric` is assembled into one narrowed prompt under a token budget instead
+  of `multi_target_unsupported`.
+- **Mixed-kind effective-set semantics** (§9.7) — **decided in S5 (#281); see
+  §9.12.**
 - **Relevance ranking / heuristic ordering** of the effective set — out of scope
   (matches §2.2 and #279 non-goals).
 - **Raising the 200-file cap** — out of scope (#279 non-goals).
@@ -674,3 +676,91 @@ run-level semantics.
 | AC3 — empty effective set → explicit `scope_empty`, not a run abort | §9.4 |
 | AC4 — per-rule `DEFAULT_FILE_LIMIT` breach → per-rule diagnostic | §9.5 |
 | AC5 — existing literal-path rules and `validate()` unchanged | §9.9 |
+
+## 9.12 Ratified: Narrowed Affected-Context Assembly (S5, #281)
+
+> Status: ratified contract — **implemented in S5** (#281, under umbrella #277).
+> A multi-file per-rule effective set (or any multi-file `TargetSpec`) routed to
+> `llm-rubric` is assembled into a single narrowed prompt under a token budget,
+> replacing the `multi_target_unsupported` decline for that path. Implementation:
+> `_assemble_affected_context` / `_run_affected_context` in
+> `src/gate_keeper/backends/llm_rubric.py`. This realizes the §2.2–2.3
+> content-assembly recommendations for the dynamic (engine-computed) file set and
+> settles the mixed-kind question §9.7 deferred. It changes no other path.
+
+The affected context is always the *narrowed* set the engine already computed —
+`(S1 changed set) ∩ (S3 rule scope)`, optionally narrowed further by manifest
+edges (S4) — **never the whole reference closure.** By the time a multi-file
+`TargetSpec` reaches the backend, narrowing has already happened engine-side
+(§9.2); S5 only assembles what it is handed.
+
+### 9.12.1 Assembly and per-file headers
+
+The backend reads each file in the effective set, orders them lexicographically
+by a stable per-file label, and concatenates their bodies under
+`--- <label> ---` headers separated by an empty line. The assembled body is handed
+to the normal single-evaluation strategy machinery as an inline target, so
+strategy dispatch, reproducibility (`--reproducibility`), quote grounding, cost
+telemetry, and the eval cache all operate unchanged — S5 adds no parallel
+provider-call path. One provider call per strategy iteration is issued (× the
+strategy's own call budget). An `affected_context` evidence record lists the
+assembled set (`included_files`), any `omitted_files` / `unreadable_files`, and
+the `tokens_estimated` / `tokens_full` / `token_budget` figures so every dynamic
+verdict is auditable.
+
+### 9.12.2 Token budget and deterministic truncation
+
+The budget follows §2.3 precedence: `params.token_budget` → dotenv
+`GATE_KEEPER_TOKEN_BUDGET` → compiled-in `32000`. Token count is estimated as
+`ceil(len(text) / 3.2)` (the §2.3 char approximation with the 0.8× safety
+factor). Truncation keeps a **lexicographic prefix**: files are added in label
+order until the next would exceed the budget, at which point it and every
+lexicographically-later file are omitted. The omission is recorded in a
+`truncation_warning` evidence record naming every dropped file — the sole signal
+that the assembled context is a proper subset. No heuristic reordering or
+relevance ranking is applied (a §2.2 / #279 non-goal), so the surviving set is a
+pure function of `(files, contents, budget)`.
+
+When **no file survives** — an empty candidate set, or a budget so small the
+lexicographically-first file alone is over budget — the rule fails closed to
+`UNAVAILABLE` with `affected_context_empty` evidence (the model would otherwise
+receive no grounded content). Unreadable files are excluded from the assembled
+corpus (never quotable) and named in evidence.
+
+### 9.12.3 Mixed per-file `target_kind` (resolves §9.7's deferral)
+
+**Decision: the dynamic-assembly path does not inspect or gate per-file artifact
+kinds. Every in-scope file is assembled regardless of its individual kind; the
+rule's declared `target_kind` shapes the prompt exactly as on the single-target
+path, and the run-level #178 precheck (`--artifact-kind` vs `rule.target_kind`)
+stays the only kind gate, unchanged and run-level (§9.7).**
+
+The conservative alternatives were rejected: per-file kind *detection* to drop
+mismatched files is exactly the heuristic filtering §2.2 forbids, and *silently*
+dropping files would violate the "no file is discarded without a
+`truncation_warning`" invariant. Assembling the author-declared scope in full and
+recording precisely what was sent is the fail-closed choice — it fabricates no
+per-file kind judgment and hides no file. A rule that must constrain kinds does so
+through its `target_scope` globs (e.g. `docs/**/*.md`), not through per-file kind
+inference at assembly time. Because the run-level precheck still short-circuits a
+whole-rule kind mismatch before dispatch, a rule only reaches this path when its
+`target_kind` is unspecified or already matches the run-level `--artifact-kind`.
+
+### 9.12.4 Eval-cache interplay (S2-B, #69)
+
+The assembled-content hash is the target content hash in the eval-cache key
+(`docs/design/eval-cache.md` §9, acceptance criterion 4). The cache-key builder
+re-runs the same deterministic assembler and hashes the surviving assembled body,
+so a dynamic set hits only when its surviving files, their contents, order, and
+the resulting truncation are identical, and misses on any change to budget-driven
+truncation — even when the underlying scope is unchanged.
+
+### 9.12.5 What S5 does *not* change
+
+- The literal `params.targets` mechanism (#182, ≤5 `{id, kind, path}` entries) is
+  untouched. A rule that declares `params.targets` keeps the unchanged
+  `multi_target_unsupported` contract when handed a multi-file `TargetSpec`; the
+  two axes never mix on one code path.
+- Non-`llm-rubric` backends (`github`, `external`) keep returning
+  `multi_target_unsupported` for multi-file `TargetSpec` inputs.
+- No strategy, IR schema, or `validate()` signature change.

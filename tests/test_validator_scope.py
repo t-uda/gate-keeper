@@ -287,7 +287,7 @@ class TestInteractions:
         assert _evidence_of(diag, "target_kind_mismatch") is not None
         assert _evidence_of(diag, "scope_effective_set") is None
 
-    def test_llm_rubric_multi_file_effective_set_stays_unsupported(self, tmp_path):
+    def test_llm_rubric_multi_file_effective_set_assembles(self, tmp_path):
         files = _tree(tmp_path)
         rule = _rule(
             "semantic",
@@ -297,10 +297,13 @@ class TestInteractions:
         )
         report = validate(RuleSet(rules=[rule]), _candidate_spec(files), repo_root=tmp_path)
         diag = report.diagnostics[0]
-        # §9.10: a multi-file effective set routed to llm-rubric is still
-        # multi_target_unsupported until S5 (#281).
-        assert diag.status is Status.UNSUPPORTED
-        assert _evidence_of(diag, "multi_target_unsupported") is not None
+        # §9.12 (S5, #281): a multi-file effective set routed to llm-rubric is
+        # assembled into one narrowed prompt, no longer multi_target_unsupported.
+        # No provider is configured under the hermetic conftest, so the verdict
+        # is UNAVAILABLE — but the decline evidence is gone and the assembled set
+        # is recorded.
+        assert _evidence_of(diag, "multi_target_unsupported") is None
+        assert _evidence_of(diag, "affected_context") is not None
         # The scope_effective_set evidence still rides along for auditability.
         assert _evidence_of(diag, "scope_effective_set") is not None
 

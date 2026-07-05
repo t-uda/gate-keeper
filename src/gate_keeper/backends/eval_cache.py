@@ -159,14 +159,35 @@ def _build_target_entries(
             for spec in specs
         ]
 
+    # S5 (#281) dynamic affected-context path: a multi-file TargetSpec with no
+    # literal params.targets is assembled into a single prompt. Acceptance
+    # criterion 4 requires the *assembled-content* hash to be the target
+    # content hash, so a dynamic set with the same surviving files and budget
+    # hits, and any change to content / paths / order / truncation misses. We
+    # re-run the same deterministic assembler llm_rubric.check() uses so both
+    # sides agree on the surviving set (eval-cache.md §9).
+    from gate_keeper.targets import TargetSpec  # noqa: PLC0415
+
+    if isinstance(target, TargetSpec) and target.is_multi:
+        assembly = _llm._assemble_affected_context(target, rule)
+        return [
+            {
+                "id": _llm._AFFECTED_CONTEXT_CACHE_ID,
+                # The header labels of the surviving files, in assembly order —
+                # redundant with the labels embedded in the hashed assembled
+                # text, but kept explicit for collision triage / auditability.
+                "path": [af.label for af in assembly.included],
+                "content_sha256": _sha256_hex(assembly.assembled_text),
+            }
+        ]
+
     # Single-target path.
     # Mirror the unwrapping that llm_rubric.check() applies: a single-file
     # TargetSpec (is_multi=False) is normalised to its underlying path so that
     # _resolve_artifact_input reads the real file bytes (not str(TargetSpec))
     # and _resolve_single_target_path returns the actual path (not None).
     # Without this, edits to the file leave the cache key unchanged — stale hit.
-    from gate_keeper.targets import TargetSpec  # noqa: PLC0415
-
+    #
     # Resolve to str | Path before passing to _resolve_artifact_input /
     # _resolve_single_target_path (both typed str | Path).  multi-target specs
     # never reach this branch (validator skips them — llm_rubric returns
