@@ -447,11 +447,15 @@ def _evaluate_entry(entry: BenchEntry, targets_root: Path, n: int) -> PerRuleRes
     prompt_version: str | None = None
 
     # Evidence kinds that carry the standard telemetry fields (#76, #133,
-    # #169, #172). Provider-error / provider_unconfigured are deliberately
-    # excluded — those paths do not carry telemetry by contract.
+    # #169, #172, #291). Provider-error / provider_unconfigured are deliberately
+    # excluded — those paths do not carry telemetry by contract. The
+    # cross-artifact-predicate decline (#291) carries the same telemetry fields
+    # as target_kind_mismatch, so it must be counted too or expected-`unsupported`
+    # #291 fixtures would report tokens/latency/model as zero/None.
     _TELEMETRY_BEARING_KINDS = (
         "llm_judgment",
         "target_kind_mismatch",
+        "cross_artifact_predicate",
         "llm_quote_fabrication",
     )
 
