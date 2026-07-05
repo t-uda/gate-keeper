@@ -751,9 +751,20 @@ whole-rule kind mismatch before dispatch, a rule only reaches this path when its
 The assembled-content hash is the target content hash in the eval-cache key
 (`docs/design/eval-cache.md` §9, acceptance criterion 4). The cache-key builder
 re-runs the same deterministic assembler and hashes the surviving assembled body,
-so a dynamic set hits only when its surviving files, their contents, order, and
-the resulting truncation are identical, and misses on any change to budget-driven
-truncation — even when the underlying scope is unchanged.
+so a dynamic set hits only when its surviving files, their contents, and order are
+identical, and misses on any change to budget-driven truncation — even when the
+underlying scope is unchanged.
+
+The included assembled body is not the whole story: the cached diagnostic also
+carries `affected_context` / `truncation_warning` evidence that names the
+truncation-**omitted** and **unreadable** files. Those files never enter the
+assembled body, so hashing only the included content would let an added or edited
+file that stays omitted under the same budget hit an old entry and serve stale
+evidence that never mentions it. The key therefore also incorporates the omitted
+files' labels **and content hashes**, the unreadable labels, and the effective
+token budget — so any change to the omitted / unreadable set, to an omitted file's
+content, or to the budget (including a dotenv `GATE_KEEPER_TOKEN_BUDGET` change
+that leaves the survivors unchanged) misses and recomputes the correct evidence.
 
 #### 9.12.5 What S5 does *not* change
 

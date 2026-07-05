@@ -178,6 +178,21 @@ def _build_target_entries(
                 # text, but kept explicit for collision triage / auditability.
                 "path": [af.label for af in assembly.included],
                 "content_sha256": _sha256_hex(assembly.assembled_text),
+                # Truncation-omitted and unreadable files never enter the
+                # assembled body, but their labels DO surface in the cached
+                # diagnostic's affected_context / truncation_warning evidence.
+                # If they were left out of the key, adding or editing a file that
+                # stays omitted under the same budget would hit an old entry and
+                # serve stale evidence that omits it (codex P2, #290). Hash the
+                # omitted identity + content, the unreadable labels, and the
+                # token budget so any change to the omitted / unreadable set or
+                # the budget misses and recomputes the correct evidence.
+                "omitted": [
+                    {"path": af.label, "content_sha256": _sha256_hex(af.text)}
+                    for af in assembly.omitted_files
+                ],
+                "unreadable": list(assembly.unreadable),
+                "token_budget": assembly.token_budget,
             }
         ]
 

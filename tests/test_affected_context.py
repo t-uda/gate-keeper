@@ -336,6 +336,58 @@ class TestCriterion4CacheKey:
         narrowed = cache_mod._build_target_entries(narrow_rule, spec, None)[0]["content_sha256"]
         assert full != narrowed
 
+    def test_omitted_file_change_changes_key(self, tmp_path, monkeypatch):
+        """codex P2 (#290): a file that stays omitted under the same budget must
+        still change the key when its content changes (or a new omitted file is
+        added) — otherwise a hit serves stale truncation_warning evidence."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(llm_backend, "_load_env_file", lambda *a, **k: dict(_ANTHROPIC_ENV))
+        body = "z" * 60 + "\n"
+        paths = _write_files(tmp_path, {"a.py": body, "b.py": body})
+        one_block = llm_backend._render_affected_block("a.py", body)
+        rule = _rule(params={"token_budget": llm_backend._estimate_tokens(len(one_block))})
+        spec = _multi_spec(paths)
+
+        before = cache_mod._build_target_entries(rule, spec, None)[0]
+        assert before["path"] == ["a.py"]  # only a.py survives; b.py omitted
+        assert [o["path"] for o in before["omitted"]] == ["b.py"]
+
+        # Edit the *omitted* file: the assembled (included) body is unchanged...
+        (tmp_path / "b.py").write_text(body + "EDIT\n", encoding="utf-8")
+        after = cache_mod._build_target_entries(rule, spec, None)[0]
+        assert after["content_sha256"] == before["content_sha256"]  # a.py unchanged
+        assert after != before  # ...but the omitted component changed → key misses
+
+        # Adding a new omitted file also changes the key.
+        paths2 = _write_files(tmp_path, {"a.py": body, "b.py": body + "EDIT\n", "c.py": body})
+        added = cache_mod._build_target_entries(rule, _multi_spec(paths2), None)[0]
+        assert added != after
+
+    def test_budget_change_without_truncation_change_changes_key(self, tmp_path, monkeypatch):
+        """A dotenv budget change that does not alter the survivors still changes
+        the token_budget surfaced in evidence, so it must not silently hit."""
+        monkeypatch.chdir(tmp_path)
+        paths = _write_files(tmp_path, {"a.py": "alpha\n", "b.py": "beta\n"})
+        rule = _rule()  # no params.token_budget → budget comes from dotenv/default
+        spec = _multi_spec(paths)
+        monkeypatch.setattr(
+            llm_backend,
+            "_load_env_file",
+            lambda *a, **k: {**_ANTHROPIC_ENV, "GATE_KEEPER_TOKEN_BUDGET": "50000"},
+        )
+        e1 = cache_mod._build_target_entries(rule, spec, None)[0]
+        monkeypatch.setattr(
+            llm_backend,
+            "_load_env_file",
+            lambda *a, **k: {**_ANTHROPIC_ENV, "GATE_KEEPER_TOKEN_BUDGET": "60000"},
+        )
+        e2 = cache_mod._build_target_entries(rule, spec, None)[0]
+        # Both fit all files (no truncation), so assembled content is identical...
+        assert e1["content_sha256"] == e2["content_sha256"]
+        # ...but the budget differs, and it rides in the evidence, so keys differ.
+        assert e1["token_budget"] != e2["token_budget"]
+        assert e1 != e2
+
     def test_cache_hit_avoids_second_provider_call(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         prov = _patch_provider(monkeypatch)

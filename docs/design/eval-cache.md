@@ -426,8 +426,15 @@ no path fails a rule because of a cache problem.
   order. The cache-key builder re-runs the same deterministic assembler
   `llm_rubric.check()` uses, so budget-driven truncation is reflected in the key
   (a set truncated differently misses even when its underlying scope is
-  unchanged). This slotted into the existing schema without a `cache_schema_version`
-  bump — the `targets` list already carried per-entry `{id, path, content_sha256}`.
+  unchanged). The entry additionally carries the truncation-**omitted** files
+  (`{path, content_sha256}` each), the **unreadable** labels, and the effective
+  `token_budget`: those never enter the assembled body but do surface in the
+  cached diagnostic's `affected_context` / `truncation_warning` evidence, so
+  keying them keeps a changed omitted file (or a budget change that leaves the
+  survivors unchanged) from serving stale evidence on a hit. This slotted into the
+  existing schema without a `cache_schema_version` bump — the `targets` list
+  already carried per-entry `{id, path, content_sha256}` and the preimage hashes
+  the whole entry.
 
 ---
 

@@ -4568,8 +4568,17 @@ class _AssemblyResult:
     included:
         Files that survived truncation, in lexicographic label order — the
         set actually rendered into the prompt.
+    omitted_files:
+        Readable files dropped by budget truncation, in lexicographic order,
+        with their content retained. They are absent from the prompt but
+        appear (by label) in the ``truncation_warning`` / ``affected_context``
+        evidence of the produced diagnostic, so the eval-cache key must hash
+        their identity *and* content — otherwise a changed omitted file would
+        hit a stale entry and serve stale evidence (codex P2, #290).
     omitted:
-        Labels dropped by budget truncation, in lexicographic order.
+        Labels dropped by budget truncation, in lexicographic order (derived
+        from :attr:`omitted_files`; kept as a separate field for the evidence
+        record shape).
     unreadable:
         Labels of candidate files that could not be read (excluded from the
         assembled corpus so the grounding validator treats them as
@@ -4589,6 +4598,7 @@ class _AssemblyResult:
     """
 
     included: list[_AffectedFile]
+    omitted_files: list[_AffectedFile]
     omitted: list[str]
     unreadable: list[str]
     assembled_text: str
@@ -4646,12 +4656,12 @@ def _assemble_affected_context(
     readable, unreadable = _read_affected_files(spec)
 
     included: list[_AffectedFile] = []
-    omitted: list[str] = []
+    omitted_files: list[_AffectedFile] = []
     running_chars = 0
     truncating = False
     for af in readable:
         if truncating:
-            omitted.append(af.label)
+            omitted_files.append(af)
             continue
         block = _render_affected_block(af.label, af.text)
         added = len(block) + (len(_AFFECTED_BLOCK_SEPARATOR) if included else 0)
@@ -4659,7 +4669,7 @@ def _assemble_affected_context(
             # This file does not fit: omit it and every lexicographically later
             # file (deterministic prefix truncation). Applies even to the first
             # file — an over-budget lead file yields zero survivors (§ criterion 3).
-            omitted.append(af.label)
+            omitted_files.append(af)
             truncating = True
             continue
         included.append(af)
@@ -4671,7 +4681,8 @@ def _assemble_affected_context(
     full_text = _AFFECTED_BLOCK_SEPARATOR.join(_render_affected_block(af.label, af.text) for af in readable)
     return _AssemblyResult(
         included=included,
-        omitted=omitted,
+        omitted_files=omitted_files,
+        omitted=[af.label for af in omitted_files],
         unreadable=unreadable,
         assembled_text=assembled_text,
         tokens_estimated=_estimate_tokens(len(assembled_text)),
