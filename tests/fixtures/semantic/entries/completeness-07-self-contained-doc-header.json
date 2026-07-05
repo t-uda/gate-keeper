@@ -1,0 +1,13 @@
+{
+  "rule_text": "The scaffold-status table has a header row naming a module column and a status column.",
+  "rule_target_kind": "documentation",
+  "target": {
+    "kind": "path",
+    "value": "scaffold_status_table.md"
+  },
+  "expected_judgment": "pass",
+  "expected_rationale_keywords": ["module", "status", "header"],
+  "category": "completeness",
+  "intended_backend": "llm-rubric",
+  "notes": "Issue #291 over-trigger guard — companion to completeness-06 against the SAME documentation target. This predicate is fully decidable from the doc itself (the table's own header row), so the rubric must judge it normally (pass) and must NOT decline. Guards against the cross-artifact decline over-firing on self-contained rules."
+}

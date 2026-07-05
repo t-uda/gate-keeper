@@ -312,11 +312,12 @@ context passed to the model:
 ### Structured judgment schema (`LlmJudgment`)
 
 The model is instructed (via `RUBRIC_PROMPT_TEMPLATE`, prompt version
-`PROMPT_VERSION = "v7"`) to return **line-range evidence references**:
+`PROMPT_VERSION = "v8"`) to return **line-range evidence references**:
 
 ```json
 {
   "judgment": "pass" | "fail" | "unsupported",
+  "unsupported_reason": "target_kind_mismatch" | "cross_artifact_predicate" | null,
   "primary_reason": "<one sentence>",
   "supporting_evidence_refs": [
     {"target_id": null, "path": "README.md", "line_start": 12, "line_end": 18}
@@ -343,6 +344,31 @@ Malformed refs (out-of-range, reversed, non-integer, unknown `target_id`,
 unquotable placeholder target, etc.) are treated as grader contract failures:
 `status=unavailable`, `evidence.kind=invalid_evidence_reference`,
 `failure_mode=grader_error`.
+
+### Decline verdicts (`unsupported`)
+
+An `unsupported` verdict means the model is **declining** to render a pass/fail
+rather than fabricating one; `unsupported_reason` discriminates two cases, both
+mapping to `Status.UNSUPPORTED` (a non-pass, fail-closed status):
+
+- `target_kind_mismatch` (#169) — the rule carries an explicit `target_kind`
+  annotation and the artefact provided is a different kind. Honoured only when
+  the rule is annotated; a stray decline on an unannotated rule degrades to
+  `status=unavailable` / `failure_mode=unsupported_without_target_kind`.
+  Evidence kind: `target_kind_mismatch`.
+- `cross_artifact_predicate` (#291) — deciding the rule requires examining
+  artefacts absent from the rendered target (e.g. a completeness rule that
+  ranges over a `src/` tree judged against only a doc). Honoured for **any**
+  rule, annotated or not. Evidence kind: `cross_artifact_predicate`; the
+  remediation directs the author to `params.target_scope` / multi-target (see
+  `docs/semantic-rules.md` and `docs/design/multi-target.md` §9). The decline
+  fires only when the absent artefacts are essential to the predicate — a rule
+  that merely names another file but is decidable from the target is judged
+  normally.
+
+Under multi-call strategies a cross-artifact decline counts as an ordinary
+`unsupported` vote (consensus) and is conclusive without escalation (review,
+adaptive) — a re-run against the same insufficient target cannot recover it.
 
 ### Legacy quote fallback (#172)
 

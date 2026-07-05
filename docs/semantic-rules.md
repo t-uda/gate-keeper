@@ -69,17 +69,38 @@ concrete observable: `The PR description does not use first-person pronouns`, or
 route to a deterministic backend if a file-based predicate is available.
 
 **Judgments requiring information the LLM cannot see.**
-The rubric context (see `docs/llm-rubric.md`) contains a single `target` value —
-one artefact. Rules that require cross-file comparison, historical state, or
-external system data cannot be evaluated from that context:
+The rubric context (see `docs/llm-rubric.md`) contains only the rendered
+`target` artefacts. Rules whose predicate ranges over artefacts that are *not*
+part of the rendered target — a source tree, another document, historical
+state, or external system data — cannot be grounded from that context:
 
 - Cross-file: `Function names are consistent across all source files.` —
   the model sees one target, not all files.
+- Completeness over a tree: `The scaffold-status table classifies every module
+  under src/.` — the model sees the table, not the `src/` tree it must enumerate.
 - Historical: `The PR description is more detailed than last month's average.`
 - External: `The changelog entry matches the ticket title in the issue tracker.`
 
-These rules are either unroutable to `llm-rubric`, or must be rewritten to
-evaluate a single in-scope artefact.
+**Cross-artifact predicates: decline, don't fabricate (#291).** As of prompt
+`v8`, when a rule's predicate requires examining artefacts absent from the
+rendered target, the rubric returns an `unsupported` verdict
+(`unsupported_reason: cross_artifact_predicate`) that maps to
+`Status.UNSUPPORTED` — an explicit, evidence-bearing non-verdict — rather than
+emitting a confident but ungrounded `pass`/`fail`. The evidence names the
+artefacts it would have needed. This is fail-closed: an `unsupported` verdict is
+a non-pass and does not silently satisfy the gate.
+
+To make such a rule evaluable, bring the referenced artefacts into its scope
+rather than rewriting the predicate away. Declare `params.target_scope` (or an
+explicit `params.targets` list) so the referenced files are rendered alongside
+the target; the affected-context assembly then supplies the `src/` inventory (or
+sibling document) the predicate ranges over. See `docs/design/multi-target.md`
+§9. If bringing the artefacts into scope is not practical, rewrite the rule to
+evaluate a single in-scope artefact, or route it to a deterministic backend.
+
+Note the boundary: a rule that merely *mentions* another file by name but is
+still decidable from the target itself is judged normally — the decline path
+fires only when the absent artefacts are essential to the predicate.
 
 ---
 

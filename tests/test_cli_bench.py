@@ -307,6 +307,67 @@ class TestRunBenchSmoke:
         assert result.summary.tokens_out == 9
         assert result.summary.latency_ms == 33
 
+    def test_run_bench_cross_artifact_decline_aggregates_telemetry(self, monkeypatch, tmp_path):
+        """Codex review on PR #292 (#291) — telemetry on the new
+        ``cross_artifact_predicate`` decline evidence must roll up into the
+        per-rule row and summary, exactly like ``target_kind_mismatch``. Without
+        adding the kind to ``_TELEMETRY_BEARING_KINDS`` these expected-`unsupported`
+        fixtures would report tokens/latency as 0 and model/prompt_version as None.
+        """
+        _patch_env(monkeypatch, _OPENAI_ENV)
+
+        def _stub_cross_artifact(*_args, **_kwargs):
+            body = json.dumps(
+                {
+                    "judgment": "unsupported",
+                    "unsupported_reason": "cross_artifact_predicate",
+                    "primary_reason": (
+                        "Deciding whether every module under src/ is classified needs the "
+                        "src/ tree, which is not part of the target shown."
+                    ),
+                    "supporting_evidence_quotes": [],
+                    "suggested_action": None,
+                }
+            )
+            return body, {"latency_ms": 44, "tokens_in": 80, "tokens_out": 7}
+
+        monkeypatch.setattr(_llm, "_call_openai", _stub_cross_artifact)
+
+        entries = tmp_path / "entries"
+        entries.mkdir()
+        (entries / "cross-artifact.json").write_text(
+            json.dumps(
+                {
+                    "rule_text": "The scaffold-status table classifies every module under src/.",
+                    "rule_target_kind": "documentation",
+                    "target": {
+                        "kind": "inline",
+                        "value": "| module | status |\n| --- | --- |\n| a.py | functional |",
+                    },
+                    "expected_judgment": "unsupported",
+                    "expected_rationale_keywords": ["src", "module"],
+                    "category": "completeness",
+                    "intended_backend": "llm-rubric",
+                }
+            )
+        )
+
+        result = _bench.run_bench(entries, reproducibility=1)
+        row = result.per_rule[0]
+        assert row.status == "PASS"
+        assert row.actual == "unsupported"
+        assert row.expected == "unsupported"
+        # Telemetry from the ``cross_artifact_predicate`` evidence must roll up.
+        assert row.tokens_in == 80
+        assert row.tokens_out == 7
+        assert row.latency_ms == 44
+        assert row.model == _llm.OPENAI_DEFAULT_MODEL
+        assert row.prompt_version == _llm.PROMPT_VERSION
+        # Summary tracks the same totals.
+        assert result.summary.tokens_in == 80
+        assert result.summary.tokens_out == 7
+        assert result.summary.latency_ms == 44
+
 
 # ---------------------------------------------------------------------------
 # CLI surface

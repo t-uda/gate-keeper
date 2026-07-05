@@ -1300,6 +1300,8 @@ class TestLlmJudgmentPydantic:
             "supporting_evidence_refs",
             "suggested_action",
             "supporting_evidence_quote_target_ids",
+            # #291 added the optional decline-reason discriminator.
+            "unsupported_reason",
         }
         assert d["judgment"] == "fail"
         assert d["suggested_action"] == "Add a ## Usage section."
@@ -2068,7 +2070,9 @@ class TestPromptVersion:
         # in lockstep — v5 and v6 evidence are not interchangeable.
         # #268 bumps v6 → v7 to switch the primary evidence contract to
         # supporting_evidence_refs line-range references.
-        assert llm_backend.PROMPT_VERSION == "v7"
+        # #291 bumps v7 → v8 to add the cross-artifact-predicate decline reason
+        # (a second authorised ``unsupported`` verdict, valid for any rule).
+        assert llm_backend.PROMPT_VERSION == "v8"
 
     def test_evidence_includes_prompt_version(self, monkeypatch, tmp_path):
         _patch_env(
@@ -2081,8 +2085,8 @@ class TestPromptVersion:
             lambda *_a, **_k: _stub_response(_VALID_PASS_JSON),
         )
         diag = llm_backend.check(_semantic_rule(), _target_with_artifact(tmp_path))
-        # #268 — PROMPT_VERSION is now v7.
-        assert diag.evidence[0].data["prompt_version"] == "v7"
+        # #291 — PROMPT_VERSION is now v8.
+        assert diag.evidence[0].data["prompt_version"] == "v8"
 
 
 # ---------------------------------------------------------------------------
@@ -2359,26 +2363,27 @@ class TestTargetKindGroundingV4:
         assert "An unsupported verdict —" not in rendered
 
     def test_unsupported_constraint_clarifies_when_unsupported_is_valid(self):
-        """The constraints block must reserve ``unsupported`` to the artifact-kind case (#175 follow-up).
+        """The constraints block must gate each decline reason correctly (#175, #291).
 
-        Even with the example block gated, the schema's ``"judgment"``
-        line still names ``"unsupported"`` (callers / parsers must accept
-        all three values), so the constraints text must spell out that
-        ``"unsupported"`` is valid only when an `## Artifact kind` block
-        is rendered above. Otherwise the model on an unannotated rule
-        could still invent an ``unsupported`` verdict from the schema
-        alone.
+        The schema's ``"judgment"`` line names ``"unsupported"`` (callers /
+        parsers must accept all three values), so the constraints text must
+        spell out the two decline reasons and their gating: the
+        target-kind-mismatch reason is valid only when an `## Artifact kind`
+        block is rendered above (#175), while the cross-artifact-predicate
+        reason (#291) is valid for any rule.
         """
         from gate_keeper.models import TargetKind
 
         rendered = self._render(TargetKind.UNSPECIFIED)
         # The schema must still list "unsupported" — the parser accepts it.
         assert '"unsupported"' in rendered
-        # But the constraint must say it is reserved for the
-        # target-kind-mismatch case and gate it on the artifact-kind
+        # The target-kind-mismatch reason must stay gated on the artifact-kind
         # block being rendered.
-        assert "reserved for the target-kind-mismatch case" in rendered
         assert "ONLY valid when an `## Artifact kind` block is present" in rendered
+        # The cross-artifact-predicate reason must be named and marked valid
+        # for any rule (not gated on the annotation).
+        assert "cross_artifact_predicate" in rendered
+        assert "Valid for any rule." in rendered
 
     def test_instruction_step_5_names_target_kind_grounding_contract(self):
         """Instructions step 5 must require quoting the rule's target_kind verbatim (#175)."""
@@ -2505,8 +2510,8 @@ class TestUnsupportedDispatch:
         assert diag.evidence[0].kind == "target_kind_mismatch"
         assert diag.evidence[0].data["judgment"] == "unsupported"
         assert diag.evidence[0].data["rule_target_kind"] == "pr_description"
-        # #268 — PROMPT_VERSION is now v7.
-        assert diag.evidence[0].data["prompt_version"] == "v7"
+        # #291 — PROMPT_VERSION is now v8.
+        assert diag.evidence[0].data["prompt_version"] == "v8"
 
     def test_unsupported_remediation_explains_mismatch(self, monkeypatch):
         from gate_keeper.models import TargetKind
@@ -2541,6 +2546,182 @@ class TestUnsupportedDispatch:
         assert diag.status is Status.UNAVAILABLE
         assert diag.evidence[0].kind == "provider_error"
         assert diag.evidence[0].data["failure_mode"] == "unsupported_without_target_kind"
+
+
+class TestCrossArtifactPredicateDecline:
+    """#291 — a cross-artifact-predicate decline maps to ``Status.UNSUPPORTED``.
+
+    When the rule's predicate ranges over artifacts absent from the rendered
+    target (e.g. "classify every module under src/" judged against only the
+    doc), the model returns ``unsupported`` with
+    ``unsupported_reason=cross_artifact_predicate`` instead of fabricating a
+    within-target verdict. The backend honours this for **any** rule — annotated
+    or not — and surfaces ``evidence.kind=cross_artifact_predicate`` with a
+    remediation pointing at ``params.target_scope`` / multi-target.
+    """
+
+    _ENV = {
+        "GATE_KEEPER_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+    }
+
+    # The #291 scenario: a completeness rule ranging over src/ judged against a
+    # documentation table. The doc alone cannot ground the predicate.
+    _CROSS_ARTIFACT_JSON = json.dumps(
+        {
+            "judgment": "unsupported",
+            "unsupported_reason": "cross_artifact_predicate",
+            "primary_reason": (
+                "Deciding whether the table classifies every module under "
+                "src/yomotsusaka/ requires the src/ tree, which is not included "
+                "in the target; only the documentation is shown."
+            ),
+            "supporting_evidence_quotes": [],
+            "suggested_action": None,
+        }
+    )
+
+    @staticmethod
+    def _completeness_rule(target_kind=None):
+        """A completeness rule whose predicate ranges over a src tree."""
+        from gate_keeper.models import TargetKind
+
+        return Rule(
+            id="completeness-cross-artifact",
+            title="Scaffold-status table completeness",
+            source=SourceLocation(path="repo-rules.md", line=135),
+            text=(
+                "The scaffold-status table should classify every module under "
+                "src/yomotsusaka/ (excluding __init__.py)."
+            ),
+            kind=RuleKind.SEMANTIC_RUBRIC,
+            severity=Severity.WARNING,
+            backend_hint=Backend.LLM_RUBRIC,
+            confidence=Confidence.LOW,
+            params={},
+            target_kind=target_kind if target_kind is not None else TargetKind.UNSPECIFIED,
+        )
+
+    def test_cross_artifact_maps_to_status_unsupported_unannotated(self, monkeypatch):
+        """Honoured even when the rule carries no target_kind annotation (#291)."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._CROSS_ARTIFACT_JSON),
+        )
+        diag = llm_backend.check(self._completeness_rule(), "| module | status |\n| a.py | functional |")
+        assert diag.status is Status.UNSUPPORTED
+        assert diag.backend is Backend.LLM_RUBRIC
+        assert diag.evidence[0].kind == "cross_artifact_predicate"
+        assert diag.evidence[0].data["unsupported_reason"] == "cross_artifact_predicate"
+        assert diag.evidence[0].data["judgment"] == "unsupported"
+        assert diag.evidence[0].data["prompt_version"] == "v8"
+
+    def test_cross_artifact_remediation_points_to_target_scope(self, monkeypatch):
+        """The remediation must direct authors to the S5 target_scope / multi-target remedy."""
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._CROSS_ARTIFACT_JSON),
+        )
+        diag = llm_backend.check(self._completeness_rule(), "a doc table")
+        assert diag.remediation is not None
+        assert "target_scope" in diag.remediation
+        assert "multi-target" in diag.remediation
+
+    def test_cross_artifact_honoured_with_annotation(self, monkeypatch):
+        """A documentation-annotated rule still routes to the cross-artifact path (#291)."""
+        from gate_keeper.models import TargetKind
+
+        _patch_env(monkeypatch, self._ENV)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(self._CROSS_ARTIFACT_JSON),
+        )
+        rule = self._completeness_rule(TargetKind.DOCUMENTATION)
+        diag = llm_backend.check(rule, "a doc table", artifact_kind=TargetKind.DOCUMENTATION)
+        assert diag.status is Status.UNSUPPORTED
+        # Cross-artifact reason wins over the target-kind-mismatch path even
+        # though the rule is annotated — the artifact kind actually matches.
+        assert diag.evidence[0].kind == "cross_artifact_predicate"
+
+    def test_self_contained_semantic_rule_still_judges(self, monkeypatch):
+        """A self-contained rule whose model returns pass/fail must NOT be declined (#291 over-trigger guard).
+
+        The two README rules in the #291 run judged correctly against the doc
+        target. A pass verdict on such a rule must map to ``Status.PASS`` — the
+        decline path only fires when the model itself returns
+        ``unsupported_reason=cross_artifact_predicate``.
+        """
+        _patch_env(monkeypatch, self._ENV)
+        pass_json = json.dumps(
+            {
+                "judgment": "pass",
+                "primary_reason": "The README names the user-visible change plainly in the opening.",
+                "supporting_evidence_quotes": ["names the user-visible change"],
+                "suggested_action": None,
+            }
+        )
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_anthropic",
+            lambda *_a, **_k: _stub_response(pass_json),
+        )
+        diag = llm_backend.check(self._completeness_rule(), "names the user-visible change in the first line")
+        assert diag.status is Status.PASS
+        assert diag.evidence[0].kind == "llm_judgment"
+
+    def test_cross_artifact_parses_with_empty_quotes(self):
+        """The parser accepts the cross-artifact decline shape (#291)."""
+        result = llm_backend._parse_llm_judgment(self._CROSS_ARTIFACT_JSON)
+        assert isinstance(result, LlmJudgment)
+        assert result.judgment == "unsupported"
+        assert result.unsupported_reason == "cross_artifact_predicate"
+        assert result.supporting_evidence_quotes == []
+
+    def test_unsupported_reason_dropped_on_pass(self):
+        """A stray unsupported_reason on a pass verdict is dropped, not rejected (#291)."""
+        payload = json.dumps(
+            {
+                "judgment": "pass",
+                "unsupported_reason": "cross_artifact_predicate",
+                "primary_reason": "Looks fine.",
+                "supporting_evidence_quotes": ["some grounding quote"],
+                "suggested_action": None,
+            }
+        )
+        result = llm_backend._parse_llm_judgment(payload)
+        assert isinstance(result, LlmJudgment)
+        assert result.judgment == "pass"
+        assert result.unsupported_reason is None
+
+    def test_consensus_counts_cross_artifact_as_unsupported_vote(self, monkeypatch, tmp_path):
+        """A panel that unanimously declines cross-artifact returns UNSUPPORTED (#291).
+
+        Regression guard: without the guard bypass, an unannotated rule's
+        cross-artifact decline would be miscounted as
+        ``unsupported_without_target_kind`` (a degraded contract-violation vote)
+        rather than a legitimate ``unsupported`` vote.
+        """
+        env = {**self._ENV, "GATE_KEEPER_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+        _patch_env(monkeypatch, env)
+        monkeypatch.setattr(
+            llm_backend,
+            "_call_openai",
+            lambda *_a, **_k: _stub_response(self._CROSS_ARTIFACT_JSON),
+        )
+        rule = self._completeness_rule()
+        rule = dataclasses.replace(rule, params={"strategy": "consensus", "consensus_panel_size": 3})
+        diag = llm_backend.check(rule, "a doc table")
+        assert diag.status is Status.UNSUPPORTED
+        # Not the degraded provider-error path — a genuine no-majority decline.
+        assert diag.evidence[0].kind == "consensus_no_majority"
+        judge_results = diag.evidence[0].data["judge_results"]
+        assert all(r["verdict"] == "unsupported" for r in judge_results)
+        assert all(r.get("failure_mode") != "unsupported_without_target_kind" for r in judge_results)
 
 
 class TestArtifactKindStripsFilenameFromPrompt:
@@ -4468,8 +4649,8 @@ class TestMultiTargetPromptRendering:
         with pytest.raises(ValueError, match=r"path traversal"):
             llm_backend._parse_multi_targets(rule)
 
-    def test_prompt_version_constant_is_v7(self):
-        assert llm_backend.PROMPT_VERSION == "v7"
+    def test_prompt_version_constant_is_v8(self):
+        assert llm_backend.PROMPT_VERSION == "v8"
 
 
 class TestEvidenceRefsPrimaryContract:

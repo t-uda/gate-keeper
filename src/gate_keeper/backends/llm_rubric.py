@@ -189,7 +189,23 @@ _SUPPORTED_PROVIDERS = ("anthropic", "openai")
 #   line numbers, and backend-side reconstruction populates
 #   ``supporting_evidence_quotes`` mechanically from validated ranges. Legacy
 #   quote-shaped responses remain accepted only as a defensive fallback path.
-PROMPT_VERSION = "v7"
+# - v8 (#291): broaden the decline contract. Before v8 the only authorised
+#   ``"unsupported"`` verdict was the target-kind-mismatch case (gated on a
+#   ``target_kind`` annotation). #291 (dogfood, trunk #63) showed the rubric
+#   fabricating within-target grounding for rules whose predicate ranges over
+#   artifacts *not present in the rendered target* (e.g. "classify every module
+#   under src/" judged against only the doc) — it emitted a confident, wrong
+#   pass/fail instead of declining. v8 adds a second decline reason,
+#   ``"unsupported_reason": "cross_artifact_predicate"``, valid for any rule
+#   (annotated or not): the model returns ``"unsupported"`` and names the absent
+#   artifacts when deciding the rule would require examining them. The response
+#   schema gains an ``unsupported_reason`` discriminator; the backend maps a
+#   cross-artifact decline to :data:`Status.UNSUPPORTED` with
+#   ``evidence.kind=cross_artifact_predicate`` and a remediation pointing at
+#   ``params.target_scope`` / multi-target (docs/design/multi-target.md §9).
+#   The bump matters for reproducibility: a v7 record could only ever carry a
+#   target-kind-mismatch ``unsupported``; a v8 record may carry either reason.
+PROMPT_VERSION = "v8"
 
 # ---------------------------------------------------------------------------
 # Per-model pricing table (#133)
@@ -242,13 +258,28 @@ class LlmJudgment(BaseModel):
     Fields
     ------
     judgment:
-        ``"pass"``, ``"fail"``, or ``"unsupported"`` (#169). The
-        ``"unsupported"`` verdict is reserved for the target-kind-mismatch
-        case: when the rule carries an explicit ``target_kind`` annotation
-        and the artifact provided is a different kind, the model returns
-        ``"unsupported"`` rather than parroting the rule's wording onto an
-        artifact the rule does not address. The backend maps this to
-        :data:`Status.UNSUPPORTED` with ``evidence.kind=target_kind_mismatch``.
+        ``"pass"``, ``"fail"``, or ``"unsupported"`` (#169, #291). The
+        ``"unsupported"`` verdict signals the model is declining to render a
+        pass/fail rather than fabricating one. Two decline reasons exist,
+        discriminated by :attr:`unsupported_reason`:
+
+        - ``"target_kind_mismatch"`` (#169) — the rule carries an explicit
+          ``target_kind`` annotation and the artifact provided is a different
+          kind; the model declines rather than parroting the rule's wording
+          onto an artifact the rule does not address. Maps to
+          :data:`Status.UNSUPPORTED` with ``evidence.kind=target_kind_mismatch``.
+        - ``"cross_artifact_predicate"`` (#291) — deciding the rule requires
+          examining artifacts that are not present in the rendered target
+          (e.g. a source tree the rule ranges over, or another document it
+          compares against). Valid for any rule regardless of ``target_kind``.
+          Maps to :data:`Status.UNSUPPORTED` with
+          ``evidence.kind=cross_artifact_predicate``.
+    unsupported_reason:
+        Discriminator for the two decline reasons above. ``None`` on
+        ``"pass"`` / ``"fail"``. When ``judgment`` is ``"unsupported"`` and the
+        model omits it, the backend falls back to the pre-v8 target-kind-mismatch
+        semantics (honoured only for annotated rules; a stray decline on an
+        unannotated rule still degrades to a provider error).
     primary_reason:
         One-sentence summary of why the target passed, failed, or was
         rejected as unsupported.
@@ -292,6 +323,7 @@ class LlmJudgment(BaseModel):
     supporting_evidence_refs: list[Any] | None = None
     suggested_action: str | None
     supporting_evidence_quote_target_ids: list[str | None] | None = None
+    unsupported_reason: Literal["target_kind_mismatch", "cross_artifact_predicate"] | None = None
 
     @field_validator("primary_reason")
     @classmethod
@@ -319,6 +351,10 @@ class LlmJudgment(BaseModel):
         # suggested_action must be a non-empty string on fail.
         if self.judgment == "fail" and (self.suggested_action is None or not self.suggested_action.strip()):
             raise ValueError("suggested_action must be a non-empty string when judgment is 'fail'")
+        # #291 — unsupported_reason discriminates the two decline reasons and is
+        # meaningful only on an ``unsupported`` verdict.
+        if self.judgment != "unsupported" and self.unsupported_reason is not None:
+            raise ValueError("unsupported_reason must be None when judgment is not 'unsupported'")
         return self
 
 
@@ -494,6 +530,16 @@ artifact satisfies the given rule.
    sections (rationale paragraphs, body content, trailing details).
 3. Judge whether the target (identified by the reference above) satisfies it.
 4. If you cannot read the target's content directly, judge from the reference alone.
+- If deciding the rule would require examining artifacts that are **not included
+  above** — for example the rule's predicate ranges over every file in a source
+  tree, or checks the target for consistency against another document that is
+  not shown — you cannot ground a verdict from the target alone. Return
+  `"unsupported"` with `"unsupported_reason": "cross_artifact_predicate"` and
+  name, in `primary_reason`, the specific absent artifacts you would need to
+  see. Do **not** guess a pass/fail from the target alone. This applies **only**
+  when the missing artifacts are essential to the predicate: if the target
+  artifact itself contains everything needed to decide — even if it merely
+  mentions other files by name — judge it normally with `"pass"` or `"fail"`.
 {unsupported_instruction}\
 5. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
 
@@ -501,6 +547,7 @@ artifact satisfies the given rule.
 
 {{
   "judgment": "pass" | "fail" | "unsupported",
+  "unsupported_reason": "target_kind_mismatch" | "cross_artifact_predicate" | null,
   "primary_reason": "<one sentence>",
   "supporting_evidence_refs": [
     {{"target_id": null, "path": "<path-or-null>", "line_start": 1, "line_end": 1}}
@@ -511,9 +558,16 @@ artifact satisfies the given rule.
 
 Constraints:
 - `judgment` must be exactly `"pass"`, `"fail"`, or `"unsupported"`.
-- `"unsupported"` is reserved for the target-kind-mismatch case and is
-  ONLY valid when an `## Artifact kind` block is present above. If no
-  `## Artifact kind` block is rendered, return `"pass"` or `"fail"` only.
+- `"unsupported"` means you are declining to render a pass/fail. Set
+  `"unsupported_reason"` to the reason:
+    - `"target_kind_mismatch"` — the rule's `target_kind` annotation names a
+      different artifact kind than the target above.
+      ONLY valid when an `## Artifact kind` block is present above.
+    - `"cross_artifact_predicate"` — deciding the rule requires artifacts not
+      included above (see instruction 4 above). Valid for any rule.
+  Do not return `"unsupported"` for any other reason. If the target artifact is
+  sufficient to decide, return `"pass"` or `"fail"`. Set `unsupported_reason` to
+  `null` on `"pass"` / `"fail"`.
 - `primary_reason` must be a single sentence (no newlines).
 - `supporting_evidence_refs` is the primary evidence field. For pass/fail
   it must contain at least one reference object. Each object must include
@@ -564,6 +618,16 @@ A failing verdict, grounded in the artifact:
     "This commit fixes the bug. See the diff for details. Tests updated accordingly."
   ],
   "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
+}}
+
+A decline because the rule's predicate needs artifacts that are not shown:
+
+{{
+  "judgment": "unsupported",
+  "unsupported_reason": "cross_artifact_predicate",
+  "primary_reason": "This rule ranges over the src/ tree, which is not part of the target shown above.",
+  "supporting_evidence_quotes": [],
+  "suggested_action": null
 }}{unsupported_example_block}\
 """
 
@@ -595,6 +659,16 @@ artifact satisfies the given rule.
    sections (rationale paragraphs, body content, trailing details).
 3. Judge whether the target (identified by the reference above) satisfies it.
 4. If you cannot read the target's content directly, judge from the reference alone.
+- If deciding the rule would require examining artifacts that are **not included
+  above** — for example the rule's predicate ranges over every file in a source
+  tree, or checks the targets for consistency against another document that is
+  not shown — you cannot ground a verdict from the targets alone. Return
+  `"unsupported"` with `"unsupported_reason": "cross_artifact_predicate"` and
+  name, in `primary_reason`, the specific absent artifacts you would need to
+  see. Do **not** guess a pass/fail from the targets alone. This applies **only**
+  when the missing artifacts are essential to the predicate: if the target
+  artifacts above contain everything needed to decide — even if they merely
+  mention other files by name — judge normally with `"pass"` or `"fail"`.
 {unsupported_instruction}\
 5. Respond with **only** a JSON object that matches the schema below — no prose outside the JSON.
 
@@ -602,6 +676,7 @@ artifact satisfies the given rule.
 
 {{
   "judgment": "pass" | "fail" | "unsupported",
+  "unsupported_reason": "target_kind_mismatch" | "cross_artifact_predicate" | null,
   "primary_reason": "<one sentence>",
   "supporting_evidence_refs": [
     {{"target_id": "<id>", "path": "<path-or-null>", "line_start": 1, "line_end": 1}}
@@ -612,9 +687,16 @@ artifact satisfies the given rule.
 
 Constraints:
 - `judgment` must be exactly `"pass"`, `"fail"`, or `"unsupported"`.
-- `"unsupported"` is reserved for the target-kind-mismatch case and is
-  ONLY valid when an `## Artifact kind` block is present above. If no
-  `## Artifact kind` block is rendered, return `"pass"` or `"fail"` only.
+- `"unsupported"` means you are declining to render a pass/fail. Set
+  `"unsupported_reason"` to the reason:
+    - `"target_kind_mismatch"` — the rule's `target_kind` annotation names a
+      different artifact kind than the targets above.
+      ONLY valid when an `## Artifact kind` block is present above.
+    - `"cross_artifact_predicate"` — deciding the rule requires artifacts not
+      included above (see instruction 4 above). Valid for any rule.
+  Do not return `"unsupported"` for any other reason. If the target artifacts
+  are sufficient to decide, return `"pass"` or `"fail"`. Set `unsupported_reason`
+  to `null` on `"pass"` / `"fail"`.
 - `primary_reason` must be a single sentence (no newlines).
 - `supporting_evidence_refs` is the primary evidence field. For pass/fail
   it must contain at least one reference object. Each object must include
@@ -665,6 +747,16 @@ A failing verdict, grounded in the artifact:
     "This commit fixes the bug. See the diff for details. Tests updated accordingly."
   ],
   "suggested_action": "Add a paragraph naming the failure mode and why this fix is correct."
+}}
+
+A decline because the rule's predicate needs artifacts that are not shown:
+
+{{
+  "judgment": "unsupported",
+  "unsupported_reason": "cross_artifact_predicate",
+  "primary_reason": "This rule ranges over the src/ tree, which is not part of the targets shown above.",
+  "supporting_evidence_quotes": [],
+  "suggested_action": null
 }}{unsupported_example_block}\
 """
 
@@ -1656,6 +1748,18 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
         # pass / unsupported — suggested_action must be None/absent
         suggested_action = None
 
+    # #291 — the decline-reason discriminator. Only consumed on an
+    # ``unsupported`` verdict; a stray value on pass/fail is dropped rather than
+    # rejected so a good pass/fail verdict is never turned into a parse error.
+    # An ``unsupported`` verdict with an unrecognised reason falls back to None,
+    # which the backend then treats under the pre-v8 target-kind-mismatch
+    # semantics (honoured only for annotated rules).
+    unsupported_reason: str | None = None
+    if judgment == "unsupported":
+        reason_raw = obj.get("unsupported_reason")
+        if reason_raw in ("target_kind_mismatch", "cross_artifact_predicate"):
+            unsupported_reason = reason_raw
+
     try:
         return LlmJudgment(
             judgment=judgment,
@@ -1667,6 +1771,7 @@ def _parse_llm_judgment(text: str) -> LlmJudgment | LlmJudgmentParseError:
             # quote arrived in the object form — single-target / legacy
             # callers keep the v4 wire shape (field is ``None``).
             supporting_evidence_quote_target_ids=target_ids if saw_object_form else None,
+            unsupported_reason=unsupported_reason,  # type: ignore[arg-type]
         )
     except ValidationError as exc:
         return LlmJudgmentParseError(
@@ -2750,6 +2855,84 @@ def _unavailable_invalid_evidence_reference(
 
 
 # ---------------------------------------------------------------------------
+# Cross-artifact decline (#291)
+# ---------------------------------------------------------------------------
+
+# Remediation surfaced when the model declines because the rule's predicate
+# ranges over artifacts absent from the rendered target. Points authors at the
+# existing S5 mechanism (params.target_scope / multi-target) rather than a new
+# one — direction (b) of #291 already shipped in PR #290.
+_CROSS_ARTIFACT_REMEDIATION = (
+    "This rule's predicate ranges over artifacts that are not part of the "
+    "rendered target (for example a source tree the rule enumerates, or another "
+    "document it is checked against), so the LLM has nothing to ground a verdict "
+    "on and correctly declined rather than fabricating one. Bring the referenced "
+    "artifacts into the rule's scope — declare `params.target_scope` (or an "
+    "explicit `params.targets` list) so the referenced files are rendered "
+    "alongside the target — then re-run. See docs/design/multi-target.md §9 and "
+    "docs/semantic-rules.md (cross-artifact predicates)."
+)
+
+
+def _is_cross_artifact_decline(parsed: LlmJudgment) -> bool:
+    """True when the model declined via the #291 cross-artifact-predicate path.
+
+    A cross-artifact decline is honoured regardless of whether the rule carries
+    a ``target_kind`` annotation (unlike the target-kind-mismatch decline, which
+    is gated on the annotation): the model is signalling it would need artifacts
+    that were never rendered, which any rule can require.
+    """
+    return parsed.judgment == "unsupported" and parsed.unsupported_reason == "cross_artifact_predicate"
+
+
+def _cross_artifact_decline_diagnostic(
+    *,
+    rule: Rule,
+    model: str,
+    parsed: LlmJudgment,
+    telemetry: dict[str, Any],
+    cost: float | None,
+    strategy_meta: dict[str, Any],
+) -> Diagnostic:
+    """Build the :data:`Status.UNSUPPORTED` diagnostic for a cross-artifact decline (#291).
+
+    Fail-closed: this is an explicit, evidence-bearing non-verdict (UNSUPPORTED
+    is a non-pass status), never a silent pass. The evidence records the model's
+    ``primary_reason`` (which names the absent artifacts) so a reviewer sees why
+    the rule could not be grounded here.
+    """
+    return Diagnostic(
+        rule_id=rule.id,
+        source=rule.source,
+        backend=Backend.LLM_RUBRIC,
+        status=Status.UNSUPPORTED,
+        severity=rule.severity,
+        message=parsed.primary_reason,
+        evidence=[
+            Evidence(
+                kind="cross_artifact_predicate",
+                data={
+                    "model": model,
+                    "prompt_version": PROMPT_VERSION,
+                    "judgment": parsed.judgment,
+                    "unsupported_reason": "cross_artifact_predicate",
+                    "primary_reason": parsed.primary_reason,
+                    "supporting_evidence_quotes": parsed.supporting_evidence_quotes,
+                    "suggested_action": parsed.suggested_action,
+                    "rule_target_kind": rule.target_kind.value,
+                    "latency_ms": telemetry["latency_ms"],
+                    "tokens_in": telemetry["tokens_in"],
+                    "tokens_out": telemetry["tokens_out"],
+                    "cost_estimate_usd": cost,
+                    **strategy_meta,
+                },
+            )
+        ],
+        remediation=_CROSS_ARTIFACT_REMEDIATION,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
 
@@ -2910,6 +3093,19 @@ def _run_single_strategy(request: JudgmentRequest) -> Diagnostic:
     # / `unsupported_without_target_kind`) and degrades the verdict to
     # UNAVAILABLE rather than silently inventing a mismatch.
     if parsed.judgment == "unsupported":
+        # #291 — a cross-artifact-predicate decline is honoured for any rule
+        # (annotated or not): the model is signalling the rendered target is
+        # insufficient to ground the predicate, which does not depend on a
+        # target_kind annotation. Checked before the target-kind gate below.
+        if _is_cross_artifact_decline(parsed):
+            return _cross_artifact_decline_diagnostic(
+                rule=rule,
+                model=model,
+                parsed=parsed,
+                telemetry=telemetry,
+                cost=cost,
+                strategy_meta=strategy_meta,
+            )
         if rule.target_kind is TargetKind.UNSPECIFIED:
             return _unavailable_provider_error(
                 rule,
@@ -3287,12 +3483,22 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
             )
             continue
 
-        # Mirror the single-strategy contract: an "unsupported" verdict on a
-        # rule without ``target_kind`` is a contract violation — the
+        # #291 — a cross-artifact-predicate decline is a legitimate
+        # ``unsupported`` vote for any rule (annotated or not); it falls through
+        # to the append below and aggregates through the normal majority logic
+        # (a plurality of cross-artifact declines yields an UNSUPPORTED panel).
+        # Only the target-kind-mismatch decline stays gated on the annotation.
+        #
+        # Mirror the single-strategy contract: a target-kind ``unsupported``
+        # verdict on a rule without ``target_kind`` is a contract violation — the
         # artifact-kind block was never injected, so the model had no basis to
         # claim a mismatch.  Record as a provider error so it counts as an
         # unsupported vote rather than silently aggregating as a valid judgment.
-        if parsed.judgment == "unsupported" and rule.target_kind is TargetKind.UNSPECIFIED:
+        if (
+            parsed.judgment == "unsupported"
+            and rule.target_kind is TargetKind.UNSPECIFIED
+            and not _is_cross_artifact_decline(parsed)
+        ):
             judge_results.append(
                 {
                     "judge_index": judge_index,
@@ -3362,6 +3568,9 @@ def _run_consensus_strategy(request: JudgmentRequest) -> Diagnostic:
                 "judge_index": judge_index,
                 "model": model,
                 "verdict": parsed.judgment,
+                # #291 — surface the decline reason so a plurality of
+                # cross-artifact declines is legible in the panel evidence.
+                "unsupported_reason": parsed.unsupported_reason,
                 "primary_reason": parsed.primary_reason,
                 "supporting_evidence_quotes": resolved_quotes,
                 "supporting_evidence_refs": resolved_refs,
@@ -3848,6 +4057,24 @@ def _run_review_strategy(request: JudgmentRequest) -> Diagnostic:
 
     # Apply the same unsupported / fabrication guards as single strategy.
     if primary_parsed.judgment == "unsupported":
+        # #291 — a cross-artifact-predicate decline from the primary judge is
+        # conclusive: a reviewer pass cannot make the absent artifacts appear,
+        # so surface the decline directly rather than escalating.
+        if _is_cross_artifact_decline(primary_parsed):
+            return _cross_artifact_decline_diagnostic(
+                rule=rule,
+                model=model,
+                parsed=primary_parsed,
+                telemetry=primary_telemetry,
+                cost=primary_cost,
+                strategy_meta={
+                    "llm_strategy": "review",
+                    "llm_call_count": 1,
+                    "models": [model],
+                    "cost_estimate_usd_total": primary_cost,
+                    "latency_ms_total": primary_telemetry["latency_ms"],
+                },
+            )
         if rule.target_kind is TargetKind.UNSPECIFIED:
             return _unavailable_provider_error(
                 rule,
@@ -4202,6 +4429,11 @@ def _run_adaptive_strategy(request: JudgmentRequest) -> Diagnostic:
       evidence → **fail-closed without escalation**.  Consensus cannot recover
       malformed provider responses; surfacing the Tier 1 failure directly is
       the correct action.
+    - ``cross_artifact_predicate`` evidence from Tier 1 (#291) →
+      **fail-closed without escalation**. The model declined because the rule's
+      predicate needs artifacts not in the rendered target; a consensus panel
+      re-runs against the same insufficient target and cannot recover it, so the
+      Tier 1 UNSUPPORTED is surfaced directly.
     - ``llm_judgment`` (``pass`` / ``fail``) from Tier 1 → commit to verdict,
       no escalation.
 
@@ -4852,6 +5084,14 @@ def check(
     (e.g. a PR-description rule given a commit-message artifact), the
     judgment maps to :data:`Status.UNSUPPORTED` with
     ``evidence.kind=target_kind_mismatch`` rather than rendering a verdict.
+
+    When the model declines because the rule's predicate ranges over artifacts
+    absent from the rendered target (#291 — e.g. "classify every module under
+    src/" judged against only the doc), the judgment maps to
+    :data:`Status.UNSUPPORTED` with ``evidence.kind=cross_artifact_predicate``
+    and a remediation pointing at ``params.target_scope`` / multi-target. This
+    decline is honoured for any rule, annotated or not; it is fail-closed (a
+    non-pass status), never a silent pass.
 
     Multi-target inputs (``TargetSpec`` with ``is_multi=True``) are not
     supported by this backend in the first slice (issue #146); the call
