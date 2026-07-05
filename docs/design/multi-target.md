@@ -677,7 +677,7 @@ the precheck's position nor its run-level semantics.
 | AC4 — per-rule `DEFAULT_FILE_LIMIT` breach → per-rule diagnostic | §9.5 |
 | AC5 — existing literal-path rules and `validate()` unchanged | §9.9 |
 
-## 9.12 Ratified: Narrowed Affected-Context Assembly (S5, #281)
+### 9.12 Ratified: Narrowed Affected-Context Assembly (S5, #281)
 
 > Status: ratified contract — **implemented in S5** (#281, under umbrella #277).
 > A multi-file per-rule effective set (or any multi-file `TargetSpec`) routed to
@@ -694,7 +694,7 @@ edges (S4) — **never the whole reference closure.** By the time a multi-file
 `TargetSpec` reaches the backend, narrowing has already happened engine-side
 (§9.2); S5 only assembles what it is handed.
 
-### 9.12.1 Assembly and per-file headers
+#### 9.12.1 Assembly and per-file headers
 
 The backend reads each file in the effective set, orders them lexicographically
 by a stable per-file label, and concatenates their bodies under
@@ -708,7 +708,7 @@ assembled set (`included_files`), any `omitted_files` / `unreadable_files`, and
 the `tokens_estimated` / `tokens_full` / `token_budget` figures so every dynamic
 verdict is auditable.
 
-### 9.12.2 Token budget and deterministic truncation
+#### 9.12.2 Token budget and deterministic truncation
 
 The budget follows §2.3 precedence: `params.token_budget` → dotenv
 `GATE_KEEPER_TOKEN_BUDGET` → compiled-in `32000`. Token count is estimated as
@@ -727,7 +727,7 @@ lexicographically-first file alone is over budget — the rule fails closed to
 receive no grounded content). Unreadable files are excluded from the assembled
 corpus (never quotable) and named in evidence.
 
-### 9.12.3 Mixed per-file `target_kind` (resolves §9.7's deferral)
+#### 9.12.3 Mixed per-file `target_kind` (resolves §9.7's deferral)
 
 **Decision: the dynamic-assembly path does not inspect or gate per-file artifact
 kinds. Every in-scope file is assembled regardless of its individual kind; the
@@ -746,7 +746,7 @@ inference at assembly time. Because the run-level precheck still short-circuits 
 whole-rule kind mismatch before dispatch, a rule only reaches this path when its
 `target_kind` is unspecified or already matches the run-level `--artifact-kind`.
 
-### 9.12.4 Eval-cache interplay (S2-B, #69)
+#### 9.12.4 Eval-cache interplay (S2-B, #69)
 
 The assembled-content hash is the target content hash in the eval-cache key
 (`docs/design/eval-cache.md` §9, acceptance criterion 4). The cache-key builder
@@ -755,7 +755,7 @@ so a dynamic set hits only when its surviving files, their contents, order, and
 the resulting truncation are identical, and misses on any change to budget-driven
 truncation — even when the underlying scope is unchanged.
 
-### 9.12.5 What S5 does *not* change
+#### 9.12.5 What S5 does *not* change
 
 - The literal `params.targets` mechanism (#182, ≤5 `{id, kind, path}` entries) is
   untouched. A rule that declares `params.targets` keeps the unchanged
